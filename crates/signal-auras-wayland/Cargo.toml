@@ -1,0 +1,11 @@
+[package]
+name = "signal-auras-wayland"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+signal-auras-core = { path = "../signal-auras-core" }
+
+[lib]
+path = "src/lib.rs"

@@ -1,0 +1,314 @@
+use crate::prompt::{stdin_is_interactive, ScopePrompt, TerminalPrompt};
+use signal_auras_core::{
+    execute_plan, ActiveProcessProvider, DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyId,
+    HotkeyRegistrar, MacroExecutor, MacroScheduler, RuntimeStats, ScopeDecision, ScopeSelection,
+    ShutdownReason,
+};
+use signal_auras_lua::load_lua_file;
+use signal_auras_wayland::MockableWaylandAdapter;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
+
+pub struct StdioPrompt;
+
+impl ScopePrompt for StdioPrompt {
+    fn resolve_missing_scope(
+        &mut self,
+    ) -> Result<signal_auras_core::ConsentDecision, DiagnosableError> {
+        let stdin = io::stdin();
+        let stdout = io::stdout();
+        let mut prompt = TerminalPrompt::new(stdin.lock(), stdout.lock(), stdin_is_interactive());
+        prompt.resolve_missing_scope()
+    }
+}
+
+pub fn run_cli(
+    args: impl IntoIterator<Item = String>,
+    prompt: &mut impl ScopePrompt,
+) -> Result<(), DiagnosableError> {
+    let args = args.into_iter().collect::<Vec<_>>();
+    let path = parse_run_args(&args)?;
+    let mut registrar = MockableWaylandAdapter::default();
+    let active_process_provider = MockableWaylandAdapter::default();
+    let mut executor = MockableWaylandAdapter::default();
+    let mut lifecycle = CtrlCShutdown::new();
+    start_runner_with_lifecycle(
+        &path,
+        prompt,
+        &mut registrar,
+        &active_process_provider,
+        &mut executor,
+        &mut lifecycle,
+    )
+    .map(|_| ())
+}
+
+pub fn parse_run_args(args: &[String]) -> Result<PathBuf, DiagnosableError> {
+    if args.len() != 2 || args[0] != "run" {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ArgumentValidation,
+            "usage: signal-auras run <lua-file>",
+        ));
+    }
+    Ok(PathBuf::from(&args[1]))
+}
+
+pub fn start_runner<R, P, E>(
+    lua_file: &Path,
+    prompt: &mut impl ScopePrompt,
+    registrar: &mut R,
+    active_process_provider: &P,
+    executor: &mut E,
+) -> Result<RuntimeStats, DiagnosableError>
+where
+    R: HotkeyRegistrar,
+    P: ActiveProcessProvider,
+    E: MacroExecutor,
+{
+    let mut lifecycle = ImmediateShutdown;
+    start_runner_with_lifecycle(
+        lua_file,
+        prompt,
+        registrar,
+        active_process_provider,
+        executor,
+        &mut lifecycle,
+    )
+}
+
+pub fn start_runner_with_lifecycle<R, P, E, L>(
+    lua_file: &Path,
+    prompt: &mut impl ScopePrompt,
+    registrar: &mut R,
+    active_process_provider: &P,
+    executor: &mut E,
+    lifecycle: &mut L,
+) -> Result<RuntimeStats, DiagnosableError>
+where
+    R: HotkeyRegistrar,
+    P: ActiveProcessProvider,
+    E: MacroExecutor,
+    L: RunnerLifecycle,
+{
+    println!("startup script_path={}", lua_file.display());
+    let config = load_lua_file(lua_file)?;
+    println!("script_validation result=ok");
+
+    let scope = match config.scope.clone() {
+        Some(script_scope) => ScopeSelection::from_script(script_scope),
+        None => match prompt.resolve_missing_scope()?.into_scope()? {
+            Some(scope) => scope,
+            None => {
+                println!("scope_prompt result=cancelled");
+                return Ok(RuntimeStats::new());
+            }
+        },
+    };
+    println!("effective_scope {}", scope.describe());
+    println!("capability_probe result=mock-adapter");
+
+    let mut stats = RuntimeStats::new();
+    let bindings = config.bindings_for_scope(scope);
+    for binding in &bindings {
+        stats.record_registration_attempt();
+        match registrar.register(binding.clone()) {
+            Ok(id) => {
+                stats.record_registration_success();
+                println!(
+                    "hotkey_registered hotkey={} id={}",
+                    binding.hotkey.as_str(),
+                    id.as_str()
+                );
+            }
+            Err(error) => {
+                stats.record_registration_failure();
+                cleanup_after_error(registrar, ErrorPhase::Registration)?;
+                return Err(error);
+            }
+        }
+    }
+
+    let shutdown_reason = match run_lifecycle(
+        &bindings,
+        active_process_provider,
+        executor,
+        lifecycle,
+        &mut stats,
+    ) {
+        Ok(reason) => reason,
+        Err(error) => {
+            println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
+            cleanup_after_error(registrar, ErrorPhase::Shutdown)?;
+            return Err(error);
+        }
+    };
+
+    println!("{}", stats.render_summary(shutdown_reason));
+    registrar.unregister_all()?;
+    Ok(stats)
+}
+
+pub trait RunnerLifecycle {
+    fn next_event(&mut self) -> Result<RunnerEvent, DiagnosableError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunnerEvent {
+    Hotkey(HotkeyId),
+    Shutdown(ShutdownReason),
+    RuntimeError(DiagnosableError),
+}
+
+pub struct ImmediateShutdown;
+
+impl RunnerLifecycle for ImmediateShutdown {
+    fn next_event(&mut self) -> Result<RunnerEvent, DiagnosableError> {
+        Ok(RunnerEvent::Shutdown(ShutdownReason::CtrlC))
+    }
+}
+
+pub struct CtrlCShutdown {
+    installed: bool,
+}
+
+impl CtrlCShutdown {
+    pub fn new() -> Self {
+        Self { installed: false }
+    }
+}
+
+impl Default for CtrlCShutdown {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RunnerLifecycle for CtrlCShutdown {
+    fn next_event(&mut self) -> Result<RunnerEvent, DiagnosableError> {
+        if !self.installed {
+            install_ctrl_c_handler();
+            self.installed = true;
+        }
+        while !CTRL_C_REQUESTED.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(50));
+        }
+        Ok(RunnerEvent::Shutdown(ShutdownReason::CtrlC))
+    }
+}
+
+static CTRL_C_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+fn install_ctrl_c_handler() {
+    const SIGINT: i32 = 2;
+
+    unsafe extern "C" {
+        fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
+    }
+
+    extern "C" fn handle_sigint(_signal: i32) {
+        CTRL_C_REQUESTED.store(true, Ordering::SeqCst);
+    }
+
+    // Safety: installs a small SIGINT handler that only writes to an AtomicBool,
+    // which is signal-safe for this purpose. The previous handler is intentionally
+    // not restored because this terminal runner owns the process lifetime.
+    unsafe {
+        signal(SIGINT, handle_sigint);
+    }
+}
+
+#[cfg(not(unix))]
+fn install_ctrl_c_handler() {
+    CTRL_C_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+fn run_lifecycle<P, E, L>(
+    bindings: &[HotkeyBinding],
+    active_process_provider: &P,
+    executor: &mut E,
+    lifecycle: &mut L,
+    stats: &mut RuntimeStats,
+) -> Result<ShutdownReason, DiagnosableError>
+where
+    P: ActiveProcessProvider,
+    E: MacroExecutor,
+    L: RunnerLifecycle,
+{
+    let mut scheduler = MacroScheduler::default();
+    loop {
+        match lifecycle.next_event()? {
+            RunnerEvent::Hotkey(hotkey) => {
+                if let Some(binding) = bindings.iter().find(|binding| binding.hotkey == hotkey) {
+                    handle_trigger(
+                        binding,
+                        active_process_provider,
+                        executor,
+                        &mut scheduler,
+                        stats,
+                    )?;
+                }
+            }
+            RunnerEvent::Shutdown(reason) => return Ok(reason),
+            RunnerEvent::RuntimeError(error) => return Err(error),
+        }
+    }
+}
+
+fn cleanup_after_error(
+    registrar: &mut impl HotkeyRegistrar,
+    phase: ErrorPhase,
+) -> Result<(), DiagnosableError> {
+    registrar.unregister_all().map_err(|error| {
+        DiagnosableError::new(phase, format!("cleanup failed after runner error: {error}"))
+    })
+}
+
+pub fn handle_trigger<P, E>(
+    binding: &HotkeyBinding,
+    active_process_provider: &P,
+    executor: &mut E,
+    scheduler: &mut MacroScheduler,
+    stats: &mut RuntimeStats,
+) -> Result<(), DiagnosableError>
+where
+    P: ActiveProcessProvider,
+    E: MacroExecutor,
+{
+    stats.record_trigger(binding.hotkey.as_str());
+    let active_process = active_process_provider.active_process_name()?;
+    match binding.scope.decide(active_process.as_ref()) {
+        ScopeDecision::Allowed => {
+            let guard = match scheduler.begin(binding.hotkey.as_str()) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    stats.denied_action_count += 1;
+                    return Err(error);
+                }
+            };
+            let result = execute_plan(&binding.macro_definition, |action| {
+                executor.execute_action(action)
+            });
+            scheduler.finish(guard);
+            match result {
+                Ok(()) => stats.macro_success_count += 1,
+                Err(error) => {
+                    stats.macro_failure_count += 1;
+                    return Err(error);
+                }
+            }
+        }
+        ScopeDecision::Denied { reason } => {
+            stats.denied_action_count += 1;
+            stats.scope_mismatch_count += 1;
+            println!(
+                "denied_trigger hotkey={} reason={reason}",
+                binding.hotkey.as_str()
+            );
+        }
+    }
+    Ok(())
+}

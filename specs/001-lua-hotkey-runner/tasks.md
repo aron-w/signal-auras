@@ -26,12 +26,12 @@
 
 **Purpose**: Initialize the Rust/Nix project structure needed by every story.
 
-- [ ] T001 Update `flake.nix` with Rust toolchain, cargo, rustfmt, clippy, pkg-config, and native libraries needed by planned Lua/Wayland crates
-- [ ] T002 Create workspace root `Cargo.toml` with members for `crates/signal-auras-core`, `crates/signal-auras-lua`, `crates/signal-auras-wayland`, and `crates/signal-auras-cli`
-- [ ] T003 Create crate manifests in `crates/signal-auras-core/Cargo.toml`, `crates/signal-auras-lua/Cargo.toml`, `crates/signal-auras-wayland/Cargo.toml`, and `crates/signal-auras-cli/Cargo.toml`
-- [ ] T004 Create initial module files in `crates/signal-auras-core/src/lib.rs`, `crates/signal-auras-lua/src/lib.rs`, `crates/signal-auras-wayland/src/lib.rs`, and `crates/signal-auras-cli/src/main.rs`
-- [ ] T005 [P] Create contract test directories and placeholders in `tests/contract/cli_runner.rs`, `tests/contract/lua_api.rs`, `tests/contract/rust_library.rs`, and `tests/integration/runner_flow.rs`
-- [ ] T006 [P] Verify `.gitignore` contains Rust/Nix build outputs including `target/`, `debug/`, `release/`, `*.rs.bk`, `*.rlib`, `*.prof*`, `*.log`, `.env*`, `.direnv/`, and `result`
+- [X] T001 Update `flake.nix` with Rust toolchain, cargo, rustfmt, clippy, pkg-config, and native libraries needed by planned Lua/Wayland crates
+- [X] T002 Create workspace root `Cargo.toml` with members for `crates/signal-auras-core`, `crates/signal-auras-lua`, `crates/signal-auras-wayland`, and `crates/signal-auras-cli`
+- [X] T003 Create crate manifests in `crates/signal-auras-core/Cargo.toml`, `crates/signal-auras-lua/Cargo.toml`, `crates/signal-auras-wayland/Cargo.toml`, and `crates/signal-auras-cli/Cargo.toml`
+- [X] T004 Create initial module files in `crates/signal-auras-core/src/lib.rs`, `crates/signal-auras-lua/src/lib.rs`, `crates/signal-auras-wayland/src/lib.rs`, and `crates/signal-auras-cli/src/main.rs`
+- [X] T005 [P] Create contract test directories and placeholders in `tests/contract/cli_runner.rs`, `tests/contract/lua_api.rs`, `tests/contract/rust_library.rs`, and `tests/integration/runner_flow.rs`
+- [X] T006 [P] Verify `.gitignore` contains Rust/Nix build outputs including `target/`, `debug/`, `release/`, `*.rs.bk`, `*.rlib`, `*.prof*`, `*.log`, `.env*`, `.direnv/`, and `result`
 
 ---
 
@@ -41,15 +41,15 @@
 
 **CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T007 [P] Write failing tests for diagnosable error phases and capabilities in `crates/signal-auras-core/src/error.rs`
-- [ ] T008 [P] Write failing tests for hotkey/process/macro value validation in `crates/signal-auras-core/src/hotkey.rs`, `crates/signal-auras-core/src/scope.rs`, and `crates/signal-auras-core/src/macro_plan.rs`
-- [ ] T009 [P] Write failing adapter trait contract tests for unsupported protocol, denied permission, and unavailable active process in `tests/contract/rust_library.rs`
-- [ ] T010 Implement `DiagnosableError`, `ErrorPhase`, and `Capability` in `crates/signal-auras-core/src/error.rs`
-- [ ] T011 Implement shared hotkey, process name, scope, macro action, macro definition, and registration ID types in `crates/signal-auras-core/src/hotkey.rs`, `crates/signal-auras-core/src/scope.rs`, and `crates/signal-auras-core/src/macro_plan.rs`
-- [ ] T012 Implement capability adapter traits `ActiveProcessProvider`, `HotkeyRegistrar`, and `MacroExecutor` in `crates/signal-auras-core/src/lib.rs`
-- [ ] T013 Implement Wayland adapter error mapping stubs in `crates/signal-auras-wayland/src/adapter.rs`, `crates/signal-auras-wayland/src/diagnostics.rs`, and `crates/signal-auras-wayland/src/portal.rs`
-- [ ] T014 Add manual compositor verification procedure file at `tests/compositor/manual-wayland-verification.md` based on `specs/001-lua-hotkey-runner/quickstart.md`
-- [ ] T015 Run `nix develop -c cargo test` against workspace `Cargo.toml` and confirm foundational tests fail only for not-yet-implemented story behavior
+- [X] T007 [P] Write failing tests for diagnosable error phases and capabilities in `crates/signal-auras-core/src/error.rs`
+- [X] T008 [P] Write failing tests for hotkey/process/macro value validation in `crates/signal-auras-core/src/hotkey.rs`, `crates/signal-auras-core/src/scope.rs`, and `crates/signal-auras-core/src/macro_plan.rs`
+- [X] T009 [P] Write failing adapter trait contract tests for unsupported protocol, denied permission, and unavailable active process in `tests/contract/rust_library.rs`
+- [X] T010 Implement `DiagnosableError`, `ErrorPhase`, and `Capability` in `crates/signal-auras-core/src/error.rs`
+- [X] T011 Implement shared hotkey, process name, scope, macro action, macro definition, and registration ID types in `crates/signal-auras-core/src/hotkey.rs`, `crates/signal-auras-core/src/scope.rs`, and `crates/signal-auras-core/src/macro_plan.rs`
+- [X] T012 Implement capability adapter traits `ActiveProcessProvider`, `HotkeyRegistrar`, and `MacroExecutor` in `crates/signal-auras-core/src/lib.rs`
+- [X] T013 Implement Wayland adapter error mapping stubs in `crates/signal-auras-wayland/src/adapter.rs`, `crates/signal-auras-wayland/src/diagnostics.rs`, and `crates/signal-auras-wayland/src/portal.rs`
+- [X] T014 Add manual compositor verification procedure file at `tests/compositor/manual-wayland-verification.md` based on `specs/001-lua-hotkey-runner/quickstart.md`
+- [X] T015 Run `nix develop -c cargo test` against workspace `Cargo.toml` and confirm foundational tests fail only for not-yet-implemented story behavior
 
 **Checkpoint**: Foundation ready. User story implementation can now begin.
 
@@ -63,20 +63,20 @@
 
 ### Verification for User Story 1
 
-- [ ] T016 [P] [US1] Write failing core config validation tests for scoped scripts, empty hotkeys, malformed scope, duplicate hotkeys, unsupported hotkeys, and unsupported macro actions in `crates/signal-auras-core/src/config.rs`
-- [ ] T017 [P] [US1] Write failing Lua API contract tests for the v1 sample script, macro constructors, and denied ambient APIs in `tests/contract/lua_api.rs`
-- [ ] T018 [P] [US1] Write failing CLI contract tests for exactly-one-argument validation and scoped startup output in `tests/contract/cli_runner.rs`
-- [ ] T019 [P] [US1] Write failing integration test for scoped registration with mock hotkey registrar in `tests/integration/runner_flow.rs`
+- [X] T016 [P] [US1] Write failing core config validation tests for scoped scripts, empty hotkeys, malformed scope, duplicate hotkeys, unsupported hotkeys, and unsupported macro actions in `crates/signal-auras-core/src/config.rs`
+- [X] T017 [P] [US1] Write failing Lua API contract tests for the v1 sample script, macro constructors, and denied ambient APIs in `tests/contract/lua_api.rs`
+- [X] T018 [P] [US1] Write failing CLI contract tests for exactly-one-argument validation and scoped startup output in `tests/contract/cli_runner.rs`
+- [X] T019 [P] [US1] Write failing integration test for scoped registration with mock hotkey registrar in `tests/integration/runner_flow.rs`
 
 ### Implementation for User Story 1
 
-- [ ] T020 [P] [US1] Implement validated `LuaAutomationConfiguration` and `HotkeyBinding` construction in `crates/signal-auras-core/src/config.rs`
-- [ ] T021 [P] [US1] Implement macro action validation and ordered macro plan storage in `crates/signal-auras-core/src/macro_plan.rs`
-- [ ] T022 [US1] Implement sandboxed Lua loading and constructor extraction in `crates/signal-auras-lua/src/sandbox.rs` and `crates/signal-auras-lua/src/lib.rs`
-- [ ] T023 [US1] Implement CLI argument parsing for `signal-auras run <lua-file>` in `crates/signal-auras-cli/src/main.rs`
-- [ ] T024 [US1] Implement startup orchestration with script load, validation, capability probe, scoped registration, and logs in `crates/signal-auras-cli/src/runner.rs`
-- [ ] T025 [US1] Implement mock-friendly Wayland registration adapter skeleton in `crates/signal-auras-wayland/src/adapter.rs`
-- [ ] T026 [US1] Run `nix develop -c cargo test --test lua_api --test cli_runner --test runner_flow` for `tests/contract/lua_api.rs`, `tests/contract/cli_runner.rs`, and `tests/integration/runner_flow.rs` and ensure US1 tests pass
+- [X] T020 [P] [US1] Implement validated `LuaAutomationConfiguration` and `HotkeyBinding` construction in `crates/signal-auras-core/src/config.rs`
+- [X] T021 [P] [US1] Implement macro action validation and ordered macro plan storage in `crates/signal-auras-core/src/macro_plan.rs`
+- [X] T022 [US1] Implement sandboxed Lua loading and constructor extraction in `crates/signal-auras-lua/src/sandbox.rs` and `crates/signal-auras-lua/src/lib.rs`
+- [X] T023 [US1] Implement CLI argument parsing for `signal-auras run <lua-file>` in `crates/signal-auras-cli/src/main.rs`
+- [X] T024 [US1] Implement startup orchestration with script load, validation, capability probe, scoped registration, and logs in `crates/signal-auras-cli/src/runner.rs`
+- [X] T025 [US1] Implement mock-friendly Wayland registration adapter skeleton in `crates/signal-auras-wayland/src/adapter.rs`
+- [X] T026 [US1] Run `nix develop -c cargo test --test lua_api --test cli_runner --test runner_flow` for `tests/contract/lua_api.rs`, `tests/contract/cli_runner.rs`, and `tests/integration/runner_flow.rs` and ensure US1 tests pass
 
 **Checkpoint**: US1 is independently functional as the MVP.
 
@@ -90,17 +90,17 @@
 
 ### Verification for User Story 2
 
-- [ ] T027 [P] [US2] Write failing consent tests for process selection, explicit global selection, cancel, non-interactive stdin, and no default global behavior in `crates/signal-auras-core/src/consent.rs`
-- [ ] T028 [P] [US2] Write failing CLI prompt contract tests for process, global, cancel, and non-interactive flows in `tests/contract/cli_runner.rs`
-- [ ] T029 [P] [US2] Write failing integration test proving prompt scope is not persisted between runs in `tests/integration/runner_flow.rs`
+- [X] T027 [P] [US2] Write failing consent tests for process selection, explicit global selection, cancel, non-interactive stdin, and no default global behavior in `crates/signal-auras-core/src/consent.rs`
+- [X] T028 [P] [US2] Write failing CLI prompt contract tests for process, global, cancel, and non-interactive flows in `tests/contract/cli_runner.rs`
+- [X] T029 [P] [US2] Write failing integration test proving prompt scope is not persisted between runs in `tests/integration/runner_flow.rs`
 
 ### Implementation for User Story 2
 
-- [ ] T030 [P] [US2] Implement `ScopeSelection` consent constructors and current-run-only rules in `crates/signal-auras-core/src/consent.rs`
-- [ ] T031 [US2] Implement terminal prompt UI for missing scope in `crates/signal-auras-cli/src/prompt.rs`
-- [ ] T032 [US2] Integrate missing-scope prompt into runner startup before hotkey registration in `crates/signal-auras-cli/src/runner.rs`
-- [ ] T033 [US2] Add visible consent logs for prompt-selected process scope, explicit global scope, cancel, and non-interactive failure in `crates/signal-auras-cli/src/runner.rs`
-- [ ] T034 [US2] Run `nix develop -c cargo test --test cli_runner --test runner_flow` for `tests/contract/cli_runner.rs` and `tests/integration/runner_flow.rs` and ensure US1 and US2 tests pass
+- [X] T030 [P] [US2] Implement `ScopeSelection` consent constructors and current-run-only rules in `crates/signal-auras-core/src/consent.rs`
+- [X] T031 [US2] Implement terminal prompt UI for missing scope in `crates/signal-auras-cli/src/prompt.rs`
+- [X] T032 [US2] Integrate missing-scope prompt into runner startup before hotkey registration in `crates/signal-auras-cli/src/runner.rs`
+- [X] T033 [US2] Add visible consent logs for prompt-selected process scope, explicit global scope, cancel, and non-interactive failure in `crates/signal-auras-cli/src/runner.rs`
+- [X] T034 [US2] Run `nix develop -c cargo test --test cli_runner --test runner_flow` for `tests/contract/cli_runner.rs` and `tests/integration/runner_flow.rs` and ensure US1 and US2 tests pass
 
 **Checkpoint**: US1 and US2 work independently.
 
@@ -114,19 +114,19 @@
 
 ### Verification for User Story 3
 
-- [ ] T035 [P] [US3] Write failing scope matcher tests for matching process, non-matching process, unknown active process, and explicit global scope in `crates/signal-auras-core/src/scope.rs`
-- [ ] T036 [P] [US3] Write failing macro scheduler tests for ordered key/text/delay execution, action failure stop, and repeated-trigger denial in `crates/signal-auras-core/src/macro_plan.rs`
-- [ ] T037 [P] [US3] Write failing stats tests for triggers, successes, failures, denied actions, permission failures, and scope mismatches in `crates/signal-auras-core/src/stats.rs`
-- [ ] T038 [P] [US3] Write failing integration test for allowed and denied trigger handling with mock active process provider and macro executor in `tests/integration/runner_flow.rs`
+- [X] T035 [P] [US3] Write failing scope matcher tests for matching process, non-matching process, unknown active process, and explicit global scope in `crates/signal-auras-core/src/scope.rs`
+- [X] T036 [P] [US3] Write failing macro scheduler tests for ordered key/text/delay execution, action failure stop, and repeated-trigger denial in `crates/signal-auras-core/src/macro_plan.rs`
+- [X] T037 [P] [US3] Write failing stats tests for triggers, successes, failures, denied actions, permission failures, and scope mismatches in `crates/signal-auras-core/src/stats.rs`
+- [X] T038 [P] [US3] Write failing integration test for allowed and denied trigger handling with mock active process provider and macro executor in `tests/integration/runner_flow.rs`
 
 ### Implementation for User Story 3
 
-- [ ] T039 [P] [US3] Implement active-process scope decision logic in `crates/signal-auras-core/src/scope.rs`
-- [ ] T040 [P] [US3] Implement macro execution planning, delay handling, action failure behavior, and deny-while-running policy in `crates/signal-auras-core/src/macro_plan.rs`
-- [ ] T041 [P] [US3] Implement runtime stats counters and final summary model in `crates/signal-auras-core/src/stats.rs`
-- [ ] T042 [US3] Integrate hotkey trigger handling with active-process provider, scope decision, macro executor, denial logs, and stats in `crates/signal-auras-cli/src/runner.rs`
-- [ ] T043 [US3] Implement synthesized-input adapter skeleton and diagnosable unavailable-permission errors in `crates/signal-auras-wayland/src/adapter.rs`
-- [ ] T044 [US3] Run `nix develop -c cargo test --test runner_flow` for `tests/integration/runner_flow.rs` and ensure US1 through US3 tests pass
+- [X] T039 [P] [US3] Implement active-process scope decision logic in `crates/signal-auras-core/src/scope.rs`
+- [X] T040 [P] [US3] Implement macro execution planning, delay handling, action failure behavior, and deny-while-running policy in `crates/signal-auras-core/src/macro_plan.rs`
+- [X] T041 [P] [US3] Implement runtime stats counters and final summary model in `crates/signal-auras-core/src/stats.rs`
+- [X] T042 [US3] Integrate hotkey trigger handling with active-process provider, scope decision, macro executor, denial logs, and stats in `crates/signal-auras-cli/src/runner.rs`
+- [X] T043 [US3] Implement synthesized-input adapter skeleton and diagnosable unavailable-permission errors in `crates/signal-auras-wayland/src/adapter.rs`
+- [X] T044 [US3] Run `nix develop -c cargo test --test runner_flow` for `tests/integration/runner_flow.rs` and ensure US1 through US3 tests pass
 
 **Checkpoint**: US1, US2, and US3 work independently.
 
@@ -140,17 +140,17 @@
 
 ### Verification for User Story 4
 
-- [ ] T045 [P] [US4] Write failing shutdown stats tests for Ctrl-C, startup error, runtime error, and in-flight macro shutdown in `crates/signal-auras-core/src/stats.rs`
-- [ ] T046 [P] [US4] Write failing CLI shutdown contract tests for unregister-all and final summary output in `tests/contract/cli_runner.rs`
-- [ ] T047 [P] [US4] Write failing integration test for Ctrl-C shutdown path with mock registrar and executor in `tests/integration/runner_flow.rs`
+- [X] T045 [P] [US4] Write failing shutdown stats tests for Ctrl-C, startup error, runtime error, and in-flight macro shutdown in `crates/signal-auras-core/src/stats.rs`
+- [X] T046 [P] [US4] Write failing CLI shutdown contract tests for unregister-all and final summary output in `tests/contract/cli_runner.rs`
+- [X] T047 [P] [US4] Write failing integration test for Ctrl-C shutdown path with mock registrar and executor in `tests/integration/runner_flow.rs`
 
 ### Implementation for User Story 4
 
-- [ ] T048 [P] [US4] Implement shutdown reason and final summary rendering support in `crates/signal-auras-core/src/stats.rs`
-- [ ] T049 [US4] Implement Ctrl-C signal handling and shutdown orchestration in `crates/signal-auras-cli/src/runner.rs`
-- [ ] T050 [US4] Ensure `HotkeyRegistrar::unregister_all` is called on Ctrl-C, startup cleanup, and runtime-error cleanup in `crates/signal-auras-cli/src/runner.rs`
-- [ ] T051 [US4] Add final summary terminal output for elapsed runtime, triggers, successes, failures, denials, and permission failures in `crates/signal-auras-cli/src/runner.rs`
-- [ ] T052 [US4] Run `nix develop -c cargo test` against workspace `Cargo.toml` and ensure all automated tests pass
+- [X] T048 [P] [US4] Implement shutdown reason and final summary rendering support in `crates/signal-auras-core/src/stats.rs`
+- [X] T049 [US4] Implement Ctrl-C signal handling and shutdown orchestration in `crates/signal-auras-cli/src/runner.rs`
+- [X] T050 [US4] Ensure `HotkeyRegistrar::unregister_all` is called on Ctrl-C, startup cleanup, and runtime-error cleanup in `crates/signal-auras-cli/src/runner.rs`
+- [X] T051 [US4] Add final summary terminal output for elapsed runtime, triggers, successes, failures, denials, and permission failures in `crates/signal-auras-cli/src/runner.rs`
+- [X] T052 [US4] Run `nix develop -c cargo test` against workspace `Cargo.toml` and ensure all automated tests pass
 
 **Checkpoint**: All user stories are independently functional.
 
@@ -160,14 +160,14 @@
 
 **Purpose**: Validate reproducibility, formatting, security documentation, and manual Wayland gaps.
 
-- [ ] T053 [P] Update `README.md` with v1 CLI usage, consent model, Lua sample, and unsupported Wayland behavior
-- [ ] T054 [P] Add example scripts in `examples/poe2-hideout.lua` and `examples/prompt-scope.lua`
-- [ ] T055 [P] Review Lua sandbox hardening and add missing denied-capability regression tests in `tests/contract/lua_api.rs`
-- [ ] T056 [P] Update `tests/compositor/manual-wayland-verification.md` with actual compositor/protocol support selected during implementation
-- [ ] T057 Run `nix develop -c cargo fmt --check` against workspace `Cargo.toml` and `crates/*/src/`
-- [ ] T058 Run `nix develop -c cargo clippy --all-targets -- -D warnings` against workspace `Cargo.toml` and `crates/*/src/`
-- [ ] T059 Run `nix develop -c cargo test` against workspace `Cargo.toml` and `tests/`
-- [ ] T060 Run quickstart failure scenarios from `specs/001-lua-hotkey-runner/quickstart.md` and record any manual gaps in `tests/compositor/manual-wayland-verification.md`
+- [X] T053 [P] Update `README.md` with v1 CLI usage, consent model, Lua sample, and unsupported Wayland behavior
+- [X] T054 [P] Add example scripts in `examples/poe2-hideout.lua` and `examples/prompt-scope.lua`
+- [X] T055 [P] Review Lua sandbox hardening and add missing denied-capability regression tests in `tests/contract/lua_api.rs`
+- [X] T056 [P] Update `tests/compositor/manual-wayland-verification.md` with actual compositor/protocol support selected during implementation
+- [X] T057 Run `nix develop -c cargo fmt --check` against workspace `Cargo.toml` and `crates/*/src/`
+- [X] T058 Run `nix develop -c cargo clippy --all-targets -- -D warnings` against workspace `Cargo.toml` and `crates/*/src/`
+- [X] T059 Run `nix develop -c cargo test` against workspace `Cargo.toml` and `tests/`
+- [X] T060 Run quickstart failure scenarios from `specs/001-lua-hotkey-runner/quickstart.md` and record any manual gaps in `tests/compositor/manual-wayland-verification.md`
 
 ---
 

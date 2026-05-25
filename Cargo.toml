@@ -1,0 +1,43 @@
+[package]
+name = "signal-auras-workspace"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[workspace]
+members = [
+    ".",
+    "crates/signal-auras-core",
+    "crates/signal-auras-lua",
+    "crates/signal-auras-wayland",
+    "crates/signal-auras-cli",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[dev-dependencies]
+signal-auras-cli = { path = "crates/signal-auras-cli" }
+signal-auras-core = { path = "crates/signal-auras-core" }
+signal-auras-lua = { path = "crates/signal-auras-lua" }
+signal-auras-wayland = { path = "crates/signal-auras-wayland" }
+
+[[test]]
+name = "cli_runner"
+path = "tests/contract/cli_runner.rs"
+
+[[test]]
+name = "lua_api"
+path = "tests/contract/lua_api.rs"
+
+[[test]]
+name = "rust_library"
+path = "tests/contract/rust_library.rs"
+
+[[test]]
+name = "runner_flow"
+path = "tests/integration/runner_flow.rs"

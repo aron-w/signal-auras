@@ -1,0 +1,336 @@
+use signal_auras_cli::prompt::{ScopePrompt, TerminalPrompt};
+use signal_auras_cli::runner::{
+    parse_run_args, start_runner, start_runner_with_lifecycle, RunnerEvent, RunnerLifecycle,
+};
+use signal_auras_core::{
+    ActiveProcessProvider, ConsentDecision, DiagnosableError, ErrorPhase, HotkeyBinding,
+    HotkeyRegistrar, MacroAction, MacroExecutor, ProcessName, RegistrationId, ScopeSelection,
+    ShutdownReason,
+};
+use std::io::Cursor;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[test]
+fn cli_requires_run_and_one_path() {
+    assert!(parse_run_args(&[]).is_err());
+    assert!(parse_run_args(&["run".into(), "a.lua".into(), "b.lua".into()]).is_err());
+    assert!(parse_run_args(&["run".into(), "a.lua".into()]).is_ok());
+}
+
+#[test]
+fn prompt_accepts_process_scope_for_current_run() {
+    let input = Cursor::new("1\npoe2.exe, alacritty\n");
+    let mut output = Vec::new();
+    let decision = {
+        let mut prompt = TerminalPrompt::new(input, &mut output, true);
+        prompt.resolve_missing_scope().unwrap()
+    };
+
+    let scope = decision.into_scope().unwrap().unwrap();
+    assert_eq!(
+        scope,
+        ScopeSelection::process_list(vec![
+            ProcessName::parse("poe2.exe").unwrap(),
+            ProcessName::parse("alacritty").unwrap(),
+        ])
+        .unwrap()
+    );
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("No scope declared by script"));
+    assert!(output.contains("Process names"));
+}
+
+#[test]
+fn prompt_requires_literal_global_confirmation() {
+    let mut accepted_output = Vec::new();
+    let accepted = {
+        let input = Cursor::new("2\nGLOBAL\n");
+        let mut prompt = TerminalPrompt::new(input, &mut accepted_output, true);
+        prompt.resolve_missing_scope().unwrap()
+    };
+    assert_eq!(
+        accepted.into_scope().unwrap().unwrap(),
+        ScopeSelection::ExplicitGlobal
+    );
+    assert!(String::from_utf8(accepted_output)
+        .unwrap()
+        .contains("Type GLOBAL"));
+
+    let input = Cursor::new("2\nglobal\n");
+    let mut rejected_output = Vec::new();
+    let mut prompt = TerminalPrompt::new(input, &mut rejected_output, true);
+    assert_eq!(
+        prompt.resolve_missing_scope().unwrap(),
+        ConsentDecision::Cancel
+    );
+}
+
+#[test]
+fn prompt_cancel_and_non_interactive_do_not_select_global_scope() {
+    let input = Cursor::new("3\n");
+    let mut output = Vec::new();
+    let mut prompt = TerminalPrompt::new(input, &mut output, true);
+    assert_eq!(
+        prompt
+            .resolve_missing_scope()
+            .unwrap()
+            .into_scope()
+            .unwrap(),
+        None
+    );
+
+    let input = Cursor::new("");
+    let mut output = Vec::new();
+    let mut prompt = TerminalPrompt::new(input, &mut output, false);
+    let error = prompt
+        .resolve_missing_scope()
+        .unwrap()
+        .into_scope()
+        .unwrap_err();
+    assert_eq!(error.phase, ErrorPhase::ScopePrompt);
+    assert!(error.message.contains("interactive stdin"));
+    assert!(output.is_empty());
+}
+
+#[test]
+fn cancelled_missing_scope_exits_before_registration() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          hotkeys = {
+            ["F5"] = macro {
+              text "/hideout",
+            },
+          },
+        }
+        "#,
+    );
+    let mut prompt = FixedPrompt(ConsentDecision::Cancel);
+    let mut registrar = RecordingRegistrar::default();
+    let active = StaticActive(None);
+    let mut executor = CountingExecutor::default();
+
+    let stats = start_runner(
+        &lua_file,
+        &mut prompt,
+        &mut registrar,
+        &active,
+        &mut executor,
+    )
+    .unwrap();
+
+    assert_eq!(stats.registration_attempts, 0);
+    assert_eq!(registrar.registered_scopes.len(), 0);
+    assert_eq!(registrar.unregister_calls, 0);
+    assert_eq!(executor.actions, 0);
+}
+
+#[test]
+fn ctrl_c_shutdown_unregisters_hotkeys_and_returns_summary_stats() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          scope = { processes = { "poe2.exe" } },
+          hotkeys = {
+            ["F5"] = macro {
+              text "/hideout",
+            },
+          },
+        }
+        "#,
+    );
+    let mut prompt = FixedPrompt(ConsentDecision::Cancel);
+    let mut registrar = RecordingRegistrar::default();
+    let active = StaticActive(Some(ProcessName::parse("poe2.exe").unwrap()));
+    let mut executor = CountingExecutor::default();
+
+    let stats = start_runner(
+        &lua_file,
+        &mut prompt,
+        &mut registrar,
+        &active,
+        &mut executor,
+    )
+    .unwrap();
+
+    assert_eq!(registrar.registered_scopes.len(), 1);
+    assert_eq!(registrar.unregister_calls, 1);
+    assert_eq!(executor.actions, 0);
+    let summary = stats.render_summary(ShutdownReason::CtrlC);
+    assert!(summary.contains("final_summary"));
+    assert!(summary.contains("reason=CtrlC"));
+    assert!(summary.contains("triggers=0"));
+    assert!(summary.contains("successes=0"));
+}
+
+#[test]
+fn lifecycle_runtime_error_unregisters_hotkeys() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          scope = { processes = { "poe2.exe" } },
+          hotkeys = {
+            ["F5"] = macro {
+              text "/hideout",
+            },
+          },
+        }
+        "#,
+    );
+    let mut prompt = FixedPrompt(ConsentDecision::Cancel);
+    let mut registrar = RecordingRegistrar::default();
+    let active = StaticActive(Some(ProcessName::parse("poe2.exe").unwrap()));
+    let mut executor = CountingExecutor::default();
+    let mut lifecycle = ScriptedLifecycle::new(vec![RunnerEvent::RuntimeError(
+        DiagnosableError::new(ErrorPhase::Trigger, "event loop failed"),
+    )]);
+
+    let error = start_runner_with_lifecycle(
+        &lua_file,
+        &mut prompt,
+        &mut registrar,
+        &active,
+        &mut executor,
+        &mut lifecycle,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.phase, ErrorPhase::Trigger);
+    assert_eq!(registrar.registered_scopes.len(), 1);
+    assert_eq!(registrar.unregister_calls, 1);
+}
+
+#[test]
+fn registration_failure_runs_startup_cleanup() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          scope = { processes = { "poe2.exe" } },
+          hotkeys = {
+            ["F5"] = macro {
+              text "/hideout",
+            },
+          },
+        }
+        "#,
+    );
+    let mut prompt = FixedPrompt(ConsentDecision::Cancel);
+    let mut registrar = FailingRegistrar::default();
+    let active = StaticActive(Some(ProcessName::parse("poe2.exe").unwrap()));
+    let mut executor = CountingExecutor::default();
+    let mut lifecycle = ScriptedLifecycle::new(vec![RunnerEvent::Shutdown(ShutdownReason::CtrlC)]);
+
+    let error = start_runner_with_lifecycle(
+        &lua_file,
+        &mut prompt,
+        &mut registrar,
+        &active,
+        &mut executor,
+        &mut lifecycle,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.phase, ErrorPhase::Registration);
+    assert_eq!(registrar.unregister_calls, 1);
+}
+
+#[derive(Clone)]
+struct FixedPrompt(ConsentDecision);
+
+impl ScopePrompt for FixedPrompt {
+    fn resolve_missing_scope(&mut self) -> Result<ConsentDecision, DiagnosableError> {
+        Ok(self.0.clone())
+    }
+}
+
+#[derive(Default)]
+struct RecordingRegistrar {
+    registered_scopes: Vec<ScopeSelection>,
+    unregister_calls: usize,
+}
+
+impl HotkeyRegistrar for RecordingRegistrar {
+    fn register(&mut self, binding: HotkeyBinding) -> Result<RegistrationId, DiagnosableError> {
+        self.registered_scopes.push(binding.scope);
+        Ok(RegistrationId::new(format!(
+            "registration-{}",
+            self.registered_scopes.len()
+        )))
+    }
+
+    fn unregister_all(&mut self) -> Result<(), DiagnosableError> {
+        self.unregister_calls += 1;
+        Ok(())
+    }
+}
+
+struct StaticActive(Option<ProcessName>);
+
+impl ActiveProcessProvider for StaticActive {
+    fn active_process_name(&self) -> Result<Option<ProcessName>, DiagnosableError> {
+        Ok(self.0.clone())
+    }
+}
+
+#[derive(Default)]
+struct CountingExecutor {
+    actions: usize,
+}
+
+struct ScriptedLifecycle {
+    events: std::vec::IntoIter<RunnerEvent>,
+}
+
+impl ScriptedLifecycle {
+    fn new(events: Vec<RunnerEvent>) -> Self {
+        Self {
+            events: events.into_iter(),
+        }
+    }
+}
+
+impl RunnerLifecycle for ScriptedLifecycle {
+    fn next_event(&mut self) -> Result<RunnerEvent, DiagnosableError> {
+        self.events
+            .next()
+            .ok_or_else(|| DiagnosableError::new(ErrorPhase::Shutdown, "test lifecycle exhausted"))
+    }
+}
+
+#[derive(Default)]
+struct FailingRegistrar {
+    unregister_calls: usize,
+}
+
+impl HotkeyRegistrar for FailingRegistrar {
+    fn register(&mut self, _binding: HotkeyBinding) -> Result<RegistrationId, DiagnosableError> {
+        Err(DiagnosableError::new(
+            ErrorPhase::Registration,
+            "registration failed",
+        ))
+    }
+
+    fn unregister_all(&mut self) -> Result<(), DiagnosableError> {
+        self.unregister_calls += 1;
+        Ok(())
+    }
+}
+
+impl MacroExecutor for CountingExecutor {
+    fn execute_action(&mut self, _action: &MacroAction) -> Result<(), DiagnosableError> {
+        self.actions += 1;
+        Ok(())
+    }
+}
+
+fn write_lua(source: &str) -> PathBuf {
+    let mut path = std::env::temp_dir();
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    path.push(format!("signal-auras-cli-runner-{unique}.lua"));
+    std::fs::write(&path, source).unwrap();
+    path
+}

@@ -1,0 +1,17 @@
+[package]
+name = "signal-auras-cli"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+signal-auras-core = { path = "../signal-auras-core" }
+signal-auras-lua = { path = "../signal-auras-lua" }
+signal-auras-wayland = { path = "../signal-auras-wayland" }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "signal-auras"
+path = "src/main.rs"

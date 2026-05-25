@@ -1,0 +1,112 @@
+# Signal Auras
+
+Signal Auras is a Wayland-first automation runner for NixOS. The v1 runner
+loads one Lua file from a terminal command, validates scoped hotkeys, registers
+them through the current Wayland adapter boundary, and prints runtime stats when
+the run stops.
+
+## Current Status
+
+The repository currently contains the first Lua hotkey runner implementation and
+mock-friendly Wayland adapter contracts. Real compositor protocol support for
+global shortcut registration, active-process metadata, and synthesized input is
+not implemented yet. When those capabilities are unavailable, the runner must
+fail with diagnosable errors instead of falling back to hidden behavior.
+
+## Usage
+
+Run from the project development shell:
+
+```bash
+nix develop -c cargo run -p signal-auras-cli -- run ./examples/poe2-hideout.lua
+```
+
+The command shape is:
+
+```text
+signal-auras run <lua-file>
+```
+
+The runner accepts exactly one Lua file path. Startup output includes the script
+path, validation result, effective scope, capability probe result, and hotkey
+registration result. Press Ctrl-C to stop a successful run and print final
+runtime stats.
+
+## Consent Model
+
+Signal Auras does not install background services, autostart entries, persistent
+state, or hidden global hotkeys for v1. Every run is terminal-started and
+current-run only.
+
+Lua scripts may declare a process scope:
+
+```lua
+return {
+  scope = { processes = { "poe2.exe" } },
+  hotkeys = {
+    ["F5"] = macro {
+      key "Enter",
+      text "/hideout",
+      key "Enter",
+    },
+  },
+}
+```
+
+If a script omits `scope`, the runner prompts before registration:
+
+```text
+No scope declared by script.
+Select scope for this run:
+1. Process names
+2. Global hotkeys for this run
+3. Cancel
+```
+
+Process selection applies only to the current process. Global selection requires
+an explicit `GLOBAL` confirmation and is also current-run only. Cancel exits
+without registering hotkeys.
+
+## Lua API
+
+The v1 Lua surface is intentionally small:
+
+- `macro { ... }` creates one ordered macro.
+- `key "<key-name>"` sends a key action.
+- `text "<string>"` sends text input.
+- `delay <milliseconds>` waits before the next action.
+
+Lua scripts do not receive ambient filesystem, network, process, shell,
+environment, compositor, active-process, global-input, or synthesized-input
+access. Unsupported or malformed scripts are rejected before registration.
+
+## Examples
+
+- `examples/poe2-hideout.lua`: process-scoped `F5` macro for `/hideout`.
+- `examples/prompt-scope.lua`: scope-free script that exercises the terminal
+  consent prompt.
+
+## Verification
+
+Automated checks:
+
+```bash
+nix develop -c cargo fmt --check
+nix develop -c cargo clippy --all-targets -- -D warnings
+nix develop -c cargo test
+```
+
+The repository also includes a `justfile` with a shell-rendered command guide:
+
+```bash
+just
+just check
+just run
+just failures
+```
+
+Manual compositor verification is documented in
+`tests/compositor/manual-wayland-verification.md`. Until a real compositor
+adapter replaces the mock-friendly skeleton, that procedure can verify startup,
+validation, consent, cleanup, and diagnosable unsupported-capability behavior,
+but it cannot prove real global shortcut or synthesized input behavior.

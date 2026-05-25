@@ -23,10 +23,18 @@
         default = pkgs.mkShell {
           packages = with pkgs; [
             bash
+            cargo
             direnv
             git
+            just
+            pkg-config
             python313
+            rustc
+            rustfmt
+            clippy
             uv
+            wayland
+            wayland-protocols
           ];
 
           shellHook = ''
