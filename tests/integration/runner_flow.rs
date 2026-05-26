@@ -3,9 +3,10 @@ use signal_auras_cli::runner::{
     handle_trigger, start_runner, start_runner_with_lifecycle, RunnerEvent, RunnerLifecycle,
 };
 use signal_auras_core::{
-    ActiveProcessProvider, ConsentDecision, DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyId,
-    HotkeyRegistrar, MacroAction, MacroDefinition, MacroExecutor, MacroScheduler, ProcessName,
-    RegistrationId, RegistrationState, RuntimeStats, ScopeSelection,
+    ActiveProcessProvider, BindingMode, BindingTrigger, CompositeTrigger, ConsentDecision,
+    DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyId, HotkeyRegistrar, MacroAction,
+    MacroDefinition, MacroExecutor, MacroScheduler, ModifierSet, MouseTrigger, ProcessName,
+    RegistrationId, RegistrationState, RuntimeStats, ScopeSelection, WheelDirection,
 };
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -45,7 +46,8 @@ impl MacroExecutor for Executor {
 #[test]
 fn scoped_trigger_executes_only_for_matching_process() {
     let binding = HotkeyBinding {
-        hotkey: HotkeyId::parse("F5").unwrap(),
+        trigger: signal_auras_core::BindingTrigger::keyboard(HotkeyId::parse("F5").unwrap()),
+        mode: signal_auras_core::BindingMode::Consume,
         scope: ScopeSelection::process_list(vec![ProcessName::parse("poe2.exe").unwrap()]).unwrap(),
         macro_definition: MacroDefinition::new(vec![MacroAction::text("/hideout").unwrap()])
             .unwrap(),
@@ -80,7 +82,8 @@ fn scoped_trigger_executes_only_for_matching_process() {
 #[test]
 fn trigger_failure_stops_remaining_actions_and_updates_failure_stats() {
     let binding = HotkeyBinding {
-        hotkey: HotkeyId::parse("F5").unwrap(),
+        trigger: signal_auras_core::BindingTrigger::keyboard(HotkeyId::parse("F5").unwrap()),
+        mode: signal_auras_core::BindingMode::Consume,
         scope: ScopeSelection::process_list(vec![ProcessName::parse("poe2.exe").unwrap()]).unwrap(),
         macro_definition: MacroDefinition::new(vec![
             MacroAction::text("/hideout").unwrap(),
@@ -115,7 +118,8 @@ fn trigger_failure_stops_remaining_actions_and_updates_failure_stats() {
 #[test]
 fn repeated_trigger_denial_keeps_macro_from_running_twice() {
     let binding = HotkeyBinding {
-        hotkey: HotkeyId::parse("F5").unwrap(),
+        trigger: signal_auras_core::BindingTrigger::keyboard(HotkeyId::parse("F5").unwrap()),
+        mode: signal_auras_core::BindingMode::Consume,
         scope: ScopeSelection::ExplicitGlobal,
         macro_definition: MacroDefinition::new(vec![MacroAction::text("/hideout").unwrap()])
             .unwrap(),
@@ -269,6 +273,68 @@ fn lifecycle_executes_hotkey_events_until_ctrl_c_shutdown() {
     assert_eq!(stats.total_triggers(), 1);
     assert_eq!(stats.macro_success_count, 1);
     assert_eq!(registrar.unregisters, 1);
+}
+
+#[test]
+fn lifecycle_executes_composite_trigger_events_and_records_consumption_mode() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          bindings = {
+            {
+              trigger = {
+                modifiers = { "Ctrl" },
+                mouse = { wheel = "up" },
+              },
+              macro = macro { key "Left" },
+            },
+            {
+              trigger = {
+                modifiers = { "Ctrl" },
+                mouse = { wheel = "down" },
+              },
+              mode = "passthrough",
+              macro = macro { key "Right" },
+            },
+          },
+        }
+        "#,
+    );
+    let mut prompt = Prompt::new(ConsentDecision::ExplicitGlobalConfirmed);
+    let mut registrar = Registrar::default();
+    let active = Active(Some(ProcessName::parse("poe2.exe").unwrap()));
+    let mut executor = Executor::default();
+    let consume_trigger = BindingTrigger::Composite(CompositeTrigger::new(
+        ModifierSet::parse(["Ctrl"]).unwrap(),
+        MouseTrigger::Wheel(WheelDirection::Up),
+    ));
+    let passthrough_trigger = BindingTrigger::Composite(CompositeTrigger::new(
+        ModifierSet::parse(["Ctrl"]).unwrap(),
+        MouseTrigger::Wheel(WheelDirection::Down),
+    ));
+    let mut lifecycle = ScriptedLifecycle::new(vec![
+        RunnerEvent::Trigger(consume_trigger),
+        RunnerEvent::Trigger(passthrough_trigger),
+        RunnerEvent::Shutdown(signal_auras_core::ShutdownReason::CtrlC),
+    ]);
+
+    let stats = start_runner_with_lifecycle(
+        &lua_file,
+        &mut prompt,
+        &mut registrar,
+        &active,
+        &mut executor,
+        &mut lifecycle,
+    )
+    .unwrap();
+
+    assert_eq!(executor.actions, 2);
+    assert_eq!(stats.consumed_trigger_event_count, 1);
+    assert_eq!(stats.passthrough_trigger_event_count, 1);
+    assert_eq!(
+        registrar.modes,
+        vec![BindingMode::Consume, BindingMode::Passthrough]
+    );
 }
 
 #[test]
@@ -426,6 +492,52 @@ fn unavailable_kde_portal_input_emits_zero_actions_and_leaves_no_session() {
     assert_eq!(adapter.cleanup_report().attempted, 0);
 }
 
+#[test]
+fn unsupported_composite_consume_capability_fails_before_activation() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          bindings = {
+            {
+              trigger = {
+                modifiers = { "Ctrl" },
+                mouse = { wheel = "up" },
+              },
+              macro = macro { key "Left" },
+            },
+          },
+        }
+        "#,
+    );
+    let mut prompt = Prompt::new(ConsentDecision::ExplicitGlobalConfirmed);
+    let mut adapter = signal_auras_wayland::RealWaylandAdapter::from_environment(
+        signal_auras_wayland::capability::KdeEnvironment {
+            wayland_display: Some("wayland-0".into()),
+            session_type: Some("wayland".into()),
+            current_desktop: Some("KDE".into()),
+            services: signal_auras_wayland::capability::KdeServiceAvailability::available(),
+        },
+    );
+    let mut lifecycle = ScriptedLifecycle::new(vec![RunnerEvent::Shutdown(
+        signal_auras_core::ShutdownReason::CtrlC,
+    )]);
+
+    let error = signal_auras_cli::runner::start_real_runner_with_lifecycle(
+        &lua_file,
+        &mut prompt,
+        &mut adapter,
+        &mut lifecycle,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.phase, ErrorPhase::CapabilityProbe);
+    assert_eq!(
+        error.capability,
+        Some(signal_auras_core::Capability::CompositePointerObservation)
+    );
+    assert_eq!(adapter.cleanup_report().attempted, 0);
+}
+
 #[derive(Default)]
 struct FailsOnSecondRegistration {
     register_attempts: usize,
@@ -472,6 +584,7 @@ impl ScopePrompt for Prompt {
 #[derive(Default)]
 struct Registrar {
     scopes: Vec<ScopeSelection>,
+    modes: Vec<BindingMode>,
     registrations: usize,
     unregisters: usize,
 }
@@ -479,6 +592,7 @@ struct Registrar {
 impl HotkeyRegistrar for Registrar {
     fn register(&mut self, binding: HotkeyBinding) -> Result<RegistrationId, DiagnosableError> {
         self.registrations += 1;
+        self.modes.push(binding.mode);
         self.scopes.push(binding.scope);
         Ok(RegistrationId::new(format!(
             "test-registration-{}",

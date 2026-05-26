@@ -76,12 +76,51 @@ without registering hotkeys.
 
 ## Lua API
 
-The v1 Lua surface is intentionally small:
+The Lua surface is intentionally small:
 
 - `macro { ... }` creates one ordered macro.
 - `key "<key-name>"` sends a key action.
 - `text "<string>"` sends text input.
 - `delay <milliseconds>` waits before the next action.
+- `hotkeys = { ["F5"] = macro { ... } }` keeps the legacy keyboard binding shape.
+- `bindings = { ... }` accepts structured triggers with modifiers, mouse buttons, mouse wheel directions, and an explicit mode.
+
+Structured composite bindings use one primary trigger and optional modifiers:
+
+```lua
+return {
+  bindings = {
+    {
+      trigger = {
+        modifiers = { "Ctrl" },
+        mouse = { wheel = "up" },
+      },
+      macro = macro {
+        key "Left",
+      },
+    },
+    {
+      trigger = {
+        modifiers = { "Ctrl" },
+        mouse = { button = "left" },
+      },
+      mode = "passthrough",
+      macro = macro {
+        key "Alt+Right",
+        text "hello world",
+        key "Enter",
+      },
+    },
+  },
+}
+```
+
+Supported modifiers are `Ctrl`, `Alt`, `Shift`, and `Super`. Supported mouse
+buttons are `left`, `right`, and `middle`; supported wheel directions are `up`
+and `down`. Missing `mode` defaults to `consume`; `passthrough` leaves the
+original input event available to the target application. Consumed pointer
+bindings fail before activation when the Wayland provider cannot guarantee
+suppression of the original click or wheel event.
 
 Lua scripts do not receive ambient filesystem, network, process, shell,
 environment, compositor, active-process, global-input, or synthesized-input
@@ -92,6 +131,8 @@ access. Unsupported or malformed scripts are rejected before registration.
 - `examples/poe2-hideout.lua`: process-scoped `F5` macro for `/hideout`.
 - `examples/prompt-scope.lua`: scope-free script that exercises the terminal
   consent prompt.
+- `examples/composite-bindings.lua`: structured `Ctrl` plus wheel and left-click
+  bindings.
 
 ## Verification
 

@@ -28,6 +28,8 @@ pub struct RuntimeStats {
     pub metadata_unavailable_count: u64,
     pub synthesized_input_emitted_count: u64,
     pub synthesized_input_denied_count: u64,
+    pub consumed_trigger_event_count: u64,
+    pub passthrough_trigger_event_count: u64,
     pub kde_bridge_setup_count: u64,
     pub kde_bridge_cleanup_count: u64,
     pub cleanup_success_count: u64,
@@ -61,6 +63,8 @@ impl RuntimeStats {
             metadata_unavailable_count: 0,
             synthesized_input_emitted_count: 0,
             synthesized_input_denied_count: 0,
+            consumed_trigger_event_count: 0,
+            passthrough_trigger_event_count: 0,
             kde_bridge_setup_count: 0,
             kde_bridge_cleanup_count: 0,
             cleanup_success_count: 0,
@@ -127,6 +131,14 @@ impl RuntimeStats {
         self.synthesized_input_denied_count += 1;
     }
 
+    pub fn record_consumed_trigger_event(&mut self) {
+        self.consumed_trigger_event_count += 1;
+    }
+
+    pub fn record_passthrough_trigger_event(&mut self) {
+        self.passthrough_trigger_event_count += 1;
+    }
+
     pub fn record_kde_bridge_setup(&mut self) {
         self.kde_bridge_setup_count += 1;
     }
@@ -145,7 +157,7 @@ impl RuntimeStats {
 
     pub fn render_summary(&self, reason: ShutdownReason) -> String {
         format!(
-            "final_summary reason={reason:?} elapsed_ms={} triggers={} successes={} failures={} denials={} permission_failures={} scope_mismatches={} capability_probe_successes={} capability_probe_failures={} ignored_events={} active_process_matches={} active_process_non_matches={} metadata_unavailable={} input_emitted={} input_denied={} kde_bridge_setups={} kde_bridge_cleanups={} cleanup_successes={} cleanup_failures={}",
+            "final_summary reason={reason:?} elapsed_ms={} triggers={} successes={} failures={} denials={} permission_failures={} scope_mismatches={} capability_probe_successes={} capability_probe_failures={} ignored_events={} active_process_matches={} active_process_non_matches={} metadata_unavailable={} input_emitted={} input_denied={} consumed_events={} passthrough_events={} kde_bridge_setups={} kde_bridge_cleanups={} cleanup_successes={} cleanup_failures={}",
             self.elapsed_runtime().as_millis(),
             self.total_triggers(),
             self.macro_success_count,
@@ -161,6 +173,8 @@ impl RuntimeStats {
             self.metadata_unavailable_count,
             self.synthesized_input_emitted_count,
             self.synthesized_input_denied_count,
+            self.consumed_trigger_event_count,
+            self.passthrough_trigger_event_count,
             self.kde_bridge_setup_count,
             self.kde_bridge_cleanup_count,
             self.cleanup_success_count,

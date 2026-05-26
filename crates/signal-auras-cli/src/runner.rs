@@ -1,8 +1,9 @@
 use crate::prompt::{stdin_is_interactive, ScopePrompt, TerminalPrompt};
 use signal_auras_core::{
-    execute_plan, ActiveProcessProvider, CapabilitySet, DiagnosableError, ErrorPhase,
-    HotkeyBinding, HotkeyId, HotkeyRegistrar, MacroExecutor, MacroScheduler, RuntimeStats,
-    ScopeDecision, ScopeSelection, ShutdownReason, SynthesizedInputRequest,
+    execute_plan, ActiveProcessProvider, BindingMode, BindingTrigger, CapabilitySet,
+    DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyId, HotkeyRegistrar, MacroExecutor,
+    MacroScheduler, RuntimeStats, ScopeDecision, ScopeSelection, ShutdownReason,
+    SynthesizedInputRequest,
 };
 use signal_auras_lua::load_lua_file;
 use signal_auras_wayland::RealWaylandAdapter;
@@ -107,8 +108,9 @@ where
             Ok(id) => {
                 stats.record_registration_success();
                 println!(
-                    "hotkey_registered hotkey={} id={}",
-                    binding.hotkey.as_str(),
+                    "binding_registered trigger={} mode={} id={}",
+                    binding.trigger_label(),
+                    binding.mode.as_str(),
                     id.as_str()
                 );
             }
@@ -185,8 +187,9 @@ where
             Ok(id) => {
                 stats.record_registration_success();
                 println!(
-                    "hotkey_registered hotkey={} id={}",
-                    binding.hotkey.as_str(),
+                    "binding_registered trigger={} mode={} id={}",
+                    binding.trigger_label(),
+                    binding.mode.as_str(),
                     id.as_str()
                 );
             }
@@ -256,8 +259,9 @@ pub fn start_live_real_runner(
             Ok(id) => {
                 stats.record_registration_success();
                 println!(
-                    "hotkey_registered hotkey={} id={}",
-                    binding.hotkey.as_str(),
+                    "binding_registered trigger={} mode={} id={}",
+                    binding.trigger_label(),
+                    binding.mode.as_str(),
                     id.as_str()
                 );
             }
@@ -291,6 +295,7 @@ pub trait RunnerLifecycle {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunnerEvent {
     Hotkey(HotkeyId),
+    Trigger(BindingTrigger),
     Shutdown(ShutdownReason),
     RuntimeError(DiagnosableError),
 }
@@ -375,7 +380,21 @@ where
     loop {
         match lifecycle.next_event()? {
             RunnerEvent::Hotkey(hotkey) => {
-                if let Some(binding) = bindings.iter().find(|binding| binding.hotkey == hotkey) {
+                if let Some(binding) = bindings
+                    .iter()
+                    .find(|binding| binding.trigger == BindingTrigger::Keyboard(hotkey.clone()))
+                {
+                    handle_trigger(
+                        binding,
+                        active_process_provider,
+                        executor,
+                        &mut scheduler,
+                        stats,
+                    )?;
+                }
+            }
+            RunnerEvent::Trigger(trigger) => {
+                if let Some(binding) = bindings.iter().find(|binding| binding.trigger == trigger) {
                     handle_trigger(
                         binding,
                         active_process_provider,
@@ -404,7 +423,10 @@ fn run_live_real_lifecycle(
             return Ok(ShutdownReason::CtrlC);
         }
         if let Some(hotkey) = adapter.next_shortcut_event() {
-            if let Some(binding) = bindings.iter().find(|binding| binding.hotkey == hotkey) {
+            if let Some(binding) = bindings
+                .iter()
+                .find(|binding| binding.trigger == BindingTrigger::Keyboard(hotkey.clone()))
+            {
                 let active_context = adapter.active_process_context()?;
                 handle_trigger_with_context(
                     binding,
@@ -453,11 +475,16 @@ fn handle_trigger_with_context<E>(
 where
     E: MacroExecutor,
 {
-    stats.record_trigger(binding.hotkey.as_str());
+    let trigger_label = binding.trigger_label();
+    stats.record_trigger(&trigger_label);
+    match binding.mode {
+        BindingMode::Consume => stats.record_consumed_trigger_event(),
+        BindingMode::Passthrough => stats.record_passthrough_trigger_event(),
+    }
     match binding.scope.decide_context(&active_context) {
         ScopeDecision::Allowed => {
             stats.record_active_process_match();
-            let guard = match scheduler.begin(binding.hotkey.as_str()) {
+            let guard = match scheduler.begin(&trigger_label) {
                 Ok(guard) => guard,
                 Err(error) => {
                     stats.denied_action_count += 1;
@@ -506,10 +533,7 @@ where
             if active_context.matchable_name().is_none() {
                 stats.record_metadata_unavailable();
             }
-            println!(
-                "denied_trigger hotkey={} reason={reason}",
-                binding.hotkey.as_str()
-            );
+            println!("denied_trigger hotkey={} reason={reason}", trigger_label);
         }
     }
     Ok(())

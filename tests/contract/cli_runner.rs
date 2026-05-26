@@ -470,7 +470,10 @@ fn synthesized_input_denial_is_reported_before_macro_success() {
     }
 
     let binding = HotkeyBinding {
-        hotkey: signal_auras_core::HotkeyId::parse("F5").unwrap(),
+        trigger: signal_auras_core::BindingTrigger::keyboard(
+            signal_auras_core::HotkeyId::parse("F5").unwrap(),
+        ),
+        mode: signal_auras_core::BindingMode::Consume,
         scope: ScopeSelection::ExplicitGlobal,
         macro_definition: signal_auras_core::MacroDefinition::new(vec![MacroAction::text(
             "/hideout",

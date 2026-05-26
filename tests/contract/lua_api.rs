@@ -22,6 +22,42 @@ fn lua_api_accepts_v1_sample() {
 }
 
 #[test]
+fn lua_api_accepts_structured_composite_bindings() {
+    let config = load_lua_source(
+        r#"
+        return {
+          bindings = {
+            {
+              trigger = {
+                modifiers = { "Ctrl" },
+                mouse = { button = "left" },
+              },
+              macro = macro {
+                key "Alt+Right",
+                text "hello world",
+                key "Enter",
+              },
+            },
+          },
+        }
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(config.bindings().len(), 1);
+    assert_eq!(
+        config
+            .bindings()
+            .values()
+            .next()
+            .unwrap()
+            .trigger
+            .describe(),
+        "Ctrl+mouse_left"
+    );
+}
+
+#[test]
 fn lua_api_denies_ambient_filesystem() {
     assert!(load_lua_source(r#"return { hotkeys = { }, leak = io.open("/etc/passwd") }"#).is_err());
 }

@@ -124,14 +124,20 @@ impl KwinShortcutBridge {
         &mut self,
         binding: &HotkeyBinding,
     ) -> Result<String, DiagnosableError> {
+        let hotkey = binding.keyboard_hotkey().ok_or_else(|| {
+            DiagnosableError::new(
+                ErrorPhase::Registration,
+                "KWin shortcut bridge only accepts keyboard triggers",
+            )
+        })?;
         self.next_index += 1;
         let action_name = format!("SignalAuras_{}_{}", std::process::id(), self.next_index);
         let script_id = format!("signal-auras-{}-{}", std::process::id(), self.next_index);
         let script_path = std::env::temp_dir().join(format!("{script_id}.js"));
         let script = kwin_shortcut_script(
             &action_name,
-            binding.hotkey.as_str(),
-            &format!("Signal Auras {}", binding.hotkey.as_str()),
+            hotkey.as_str(),
+            &format!("Signal Auras {}", hotkey.as_str()),
             &self.callback_bus_name,
             &self.callback_object_path,
         );
@@ -152,17 +158,13 @@ impl KwinShortcutBridge {
         }
         proxy.call::<_, _, ()>("start", &()).map_err(bridge_error)?;
 
-        self.actions
-            .insert(action_name.clone(), binding.hotkey.clone());
+        self.actions.insert(action_name.clone(), hotkey.clone());
         self.scripts.push(KwinScriptHandle {
             action_name,
             script_id: script_id.clone(),
             script_path,
         });
-        Ok(format!(
-            "kde-kwin-script:{script_id}:{}",
-            binding.hotkey.as_str()
-        ))
+        Ok(format!("kde-kwin-script:{script_id}:{}", hotkey.as_str()))
     }
 
     pub fn next_shortcut_event(&mut self) -> Option<HotkeyId> {

@@ -34,6 +34,8 @@ impl fmt::Display for ErrorPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
     GlobalShortcut,
+    CompositePointerObservation,
+    CompositePointerConsumption,
     ActiveProcess,
     SynthesizedInput,
 }
@@ -42,6 +44,8 @@ impl fmt::Display for Capability {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
             Self::GlobalShortcut => "global_shortcut",
+            Self::CompositePointerObservation => "composite_pointer_observation",
+            Self::CompositePointerConsumption => "composite_pointer_consumption",
             Self::ActiveProcess => "active_process",
             Self::SynthesizedInput => "synthesized_input",
         };
@@ -52,6 +56,8 @@ impl fmt::Display for Capability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CapabilityKind {
     GlobalShortcut,
+    CompositePointerObservation,
+    CompositePointerConsumption,
     ActiveProcessMetadata,
     SynthesizedInput,
 }
@@ -60,6 +66,8 @@ impl CapabilityKind {
     pub fn legacy_capability(self) -> Capability {
         match self {
             Self::GlobalShortcut => Capability::GlobalShortcut,
+            Self::CompositePointerObservation => Capability::CompositePointerObservation,
+            Self::CompositePointerConsumption => Capability::CompositePointerConsumption,
             Self::ActiveProcessMetadata => Capability::ActiveProcess,
             Self::SynthesizedInput => Capability::SynthesizedInput,
         }
@@ -70,6 +78,8 @@ impl fmt::Display for CapabilityKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
             Self::GlobalShortcut => "global_shortcut",
+            Self::CompositePointerObservation => "composite_pointer_observation",
+            Self::CompositePointerConsumption => "composite_pointer_consumption",
             Self::ActiveProcessMetadata => "active_process_metadata",
             Self::SynthesizedInput => "synthesized_input",
         };
@@ -178,8 +188,19 @@ impl CapabilitySet {
     pub fn for_bindings<'a>(
         bindings: impl IntoIterator<Item = &'a crate::config::HotkeyBinding>,
     ) -> Self {
-        let mut required = vec![CapabilityKind::GlobalShortcut];
+        let mut required = Vec::new();
         for binding in bindings {
+            match binding.trigger {
+                crate::hotkey::BindingTrigger::Keyboard(_) => {
+                    required.push(CapabilityKind::GlobalShortcut);
+                }
+                crate::hotkey::BindingTrigger::Composite(_) => {
+                    required.push(CapabilityKind::CompositePointerObservation);
+                    if binding.mode == crate::config::BindingMode::Consume {
+                        required.push(CapabilityKind::CompositePointerConsumption);
+                    }
+                }
+            }
             if matches!(
                 binding.scope,
                 crate::scope::ScopeSelection::ProcessList { .. }

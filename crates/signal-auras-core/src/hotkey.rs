@@ -1,5 +1,79 @@
 use crate::{DiagnosableError, ErrorPhase};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Modifier {
+    Ctrl,
+    Alt,
+    Shift,
+    Super,
+}
+
+impl Modifier {
+    pub fn parse(value: impl AsRef<str>) -> Result<Self, DiagnosableError> {
+        match value.as_ref().trim() {
+            "Ctrl" => Ok(Self::Ctrl),
+            "Alt" => Ok(Self::Alt),
+            "Shift" => Ok(Self::Shift),
+            "Super" => Ok(Self::Super),
+            value => Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                format!("unsupported modifier '{value}'"),
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ctrl => "Ctrl",
+            Self::Alt => "Alt",
+            Self::Shift => "Shift",
+            Self::Super => "Super",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct ModifierSet(Vec<Modifier>);
+
+impl ModifierSet {
+    pub fn new(modifiers: impl IntoIterator<Item = Modifier>) -> Result<Self, DiagnosableError> {
+        let mut normalized = Vec::new();
+        for modifier in modifiers {
+            if normalized.contains(&modifier) {
+                return Err(DiagnosableError::new(
+                    ErrorPhase::ScriptValidation,
+                    format!("duplicate modifier '{}'", modifier.as_str()),
+                ));
+            }
+            normalized.push(modifier);
+        }
+        normalized.sort();
+        Ok(Self(normalized))
+    }
+
+    pub fn parse(
+        modifiers: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<Self, DiagnosableError> {
+        Self::new(
+            modifiers
+                .into_iter()
+                .map(Modifier::parse)
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Modifier> + '_ {
+        self.0.iter().copied()
+    }
+
+    pub fn describe(&self) -> String {
+        self.iter()
+            .map(Modifier::as_str)
+            .collect::<Vec<_>>()
+            .join("+")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HotkeyId(String);
 
@@ -34,6 +108,123 @@ fn is_supported_hotkey(value: &str) -> bool {
     ) || value
         .split('+')
         .all(|part| matches!(part, "Ctrl" | "Alt" | "Shift" | "Super") || part.len() == 1)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+}
+
+impl MouseButton {
+    pub fn parse(value: impl AsRef<str>) -> Result<Self, DiagnosableError> {
+        match value.as_ref().trim() {
+            "left" => Ok(Self::Left),
+            "right" => Ok(Self::Right),
+            "middle" => Ok(Self::Middle),
+            value => Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                format!("unsupported mouse button '{value}'"),
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Middle => "middle",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum WheelDirection {
+    Up,
+    Down,
+}
+
+impl WheelDirection {
+    pub fn parse(value: impl AsRef<str>) -> Result<Self, DiagnosableError> {
+        match value.as_ref().trim() {
+            "up" => Ok(Self::Up),
+            "down" => Ok(Self::Down),
+            value => Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                format!("unsupported mouse wheel direction '{value}'"),
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Up => "wheel_up",
+            Self::Down => "wheel_down",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MouseTrigger {
+    Button(MouseButton),
+    Wheel(WheelDirection),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CompositeTrigger {
+    modifiers: ModifierSet,
+    primary: MouseTrigger,
+}
+
+impl CompositeTrigger {
+    pub fn new(modifiers: ModifierSet, primary: MouseTrigger) -> Self {
+        Self { modifiers, primary }
+    }
+
+    pub fn modifiers(&self) -> &ModifierSet {
+        &self.modifiers
+    }
+
+    pub fn primary(&self) -> &MouseTrigger {
+        &self.primary
+    }
+
+    pub fn describe(&self) -> String {
+        let primary = match self.primary {
+            MouseTrigger::Button(button) => format!("mouse_{}", button.as_str()),
+            MouseTrigger::Wheel(direction) => direction.as_str().to_string(),
+        };
+        let modifiers = self.modifiers.describe();
+        if modifiers.is_empty() {
+            primary
+        } else {
+            format!("{modifiers}+{primary}")
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BindingTrigger {
+    Keyboard(HotkeyId),
+    Composite(CompositeTrigger),
+}
+
+impl BindingTrigger {
+    pub fn keyboard(hotkey: HotkeyId) -> Self {
+        Self::Keyboard(hotkey)
+    }
+
+    pub fn is_keyboard(&self) -> bool {
+        matches!(self, Self::Keyboard(_))
+    }
+
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Keyboard(hotkey) => hotkey.as_str().to_string(),
+            Self::Composite(trigger) => trigger.describe(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -114,5 +305,26 @@ mod tests {
     #[test]
     fn rejects_empty_hotkey() {
         assert!(HotkeyId::parse(" ").is_err());
+    }
+
+    #[test]
+    fn normalizes_modifier_order() {
+        let modifiers = ModifierSet::parse(["Shift", "Ctrl", "Alt"]).unwrap();
+
+        assert_eq!(modifiers.describe(), "Ctrl+Alt+Shift");
+    }
+
+    #[test]
+    fn rejects_duplicate_and_unknown_modifiers() {
+        assert!(ModifierSet::parse(["Ctrl", "Ctrl"]).is_err());
+        assert!(ModifierSet::parse(["Meta"]).is_err());
+    }
+
+    #[test]
+    fn validates_supported_mouse_triggers() {
+        assert_eq!(MouseButton::parse("left").unwrap(), MouseButton::Left);
+        assert_eq!(WheelDirection::parse("up").unwrap(), WheelDirection::Up);
+        assert!(MouseButton::parse("back").is_err());
+        assert!(WheelDirection::parse("sideways").is_err());
     }
 }

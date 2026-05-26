@@ -6,14 +6,18 @@ mod macro_plan;
 mod scope;
 mod stats;
 
-pub use config::{HotkeyBinding, LuaAutomationConfiguration, RegistrationState};
+pub use config::{
+    BindingDefinition, BindingMode, HotkeyBinding, LuaAutomationConfiguration, RegistrationState,
+};
 pub use consent::ConsentDecision;
 pub use error::{
     AdapterDiagnostic, Capability, CapabilityAvailability, CapabilityKind, CapabilityReport,
     CapabilitySet, CapabilityStatus, DiagnosableError, ErrorPhase,
 };
 pub use hotkey::{
-    CleanupReport, HotkeyId, RegistrationId, ShortcutRegistrationHandle, ShortcutRegistrationState,
+    BindingTrigger, CleanupReport, CompositeTrigger, HotkeyId, Modifier, ModifierSet, MouseButton,
+    MouseTrigger, RegistrationId, ShortcutRegistrationHandle, ShortcutRegistrationState,
+    WheelDirection,
 };
 pub use macro_plan::{
     execute_plan, InputEmission, MacroAction, MacroDefinition, MacroScheduler,

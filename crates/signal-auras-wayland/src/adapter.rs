@@ -58,7 +58,7 @@ impl ActiveProcessProvider for MockableWaylandAdapter {
 
 impl HotkeyRegistrar for MockableWaylandAdapter {
     fn register(&mut self, binding: HotkeyBinding) -> Result<RegistrationId, DiagnosableError> {
-        let id = RegistrationId::new(format!("mock-{}", binding.hotkey.as_str()));
+        let id = RegistrationId::new(format!("mock-{}", binding.trigger_label()));
         self.registrations.push(id.clone());
         Ok(id)
     }
@@ -158,20 +158,28 @@ impl ActiveProcessProvider for RealWaylandAdapter {
 
 impl HotkeyRegistrar for RealWaylandAdapter {
     fn register(&mut self, binding: HotkeyBinding) -> Result<RegistrationId, DiagnosableError> {
-        let required = CapabilitySet::new([CapabilityKind::GlobalShortcut]);
+        let required = CapabilitySet::for_bindings([&binding]);
         if let Some(error) = self
             .probe_capabilities(&required)
             .first_blocking_error(&required)
         {
             return Err(error);
         }
-        if self.rejected_hotkeys.contains(binding.hotkey.as_str()) {
-            return Err(crate::diagnostics::reserved_shortcut(
-                binding.hotkey.as_str(),
-            ));
+        if !binding.trigger.is_keyboard() {
+            return Err(DiagnosableError::new(
+                ErrorPhase::Registration,
+                "composite pointer registration provider is unsupported",
+            )
+            .with_capability(Capability::CompositePointerObservation));
+        }
+        let signal_auras_core::BindingTrigger::Keyboard(hotkey) = &binding.trigger else {
+            unreachable!("composite triggers returned above")
+        };
+        if self.rejected_hotkeys.contains(hotkey.as_str()) {
+            return Err(crate::diagnostics::reserved_shortcut(hotkey.as_str()));
         }
         let id = if self.environment.is_some() {
-            RegistrationId::new(format!("kde-{}", binding.hotkey.as_str()))
+            RegistrationId::new(format!("kde-{}", hotkey.as_str()))
         } else {
             if self.shortcut_bridge.is_none() {
                 self.shortcut_bridge = Some(crate::kde_bridge::KwinShortcutBridge::connect()?);

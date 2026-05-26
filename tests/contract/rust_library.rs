@@ -1,9 +1,10 @@
 use signal_auras_core::{
-    ActiveProcessConfidence, ActiveProcessContext, ActiveProcessProvider, Capability,
-    CapabilityAvailability, CapabilityKind, CapabilityReport, CapabilitySet, CapabilityStatus,
-    DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyRegistrar, InputEmission, MacroAction,
-    MacroDefinition, MacroExecutor, ProcessName, RegistrationId, RuntimeStats,
-    ShortcutRegistrationState, SynthesizedInputRequest,
+    ActiveProcessConfidence, ActiveProcessContext, ActiveProcessProvider, BindingMode,
+    BindingTrigger, Capability, CapabilityAvailability, CapabilityKind, CapabilityReport,
+    CapabilitySet, CapabilityStatus, CompositeTrigger, DiagnosableError, ErrorPhase, HotkeyBinding,
+    HotkeyRegistrar, InputEmission, MacroAction, MacroDefinition, MacroExecutor, ModifierSet,
+    MouseTrigger, ProcessName, RegistrationId, RuntimeStats, ShortcutRegistrationState,
+    SynthesizedInputRequest, WheelDirection,
 };
 
 struct FailingRegistrar;
@@ -25,7 +26,10 @@ impl HotkeyRegistrar for FailingRegistrar {
 fn adapter_contract_can_report_unsupported_protocol() {
     let macro_definition = MacroDefinition::new(vec![MacroAction::text("x").unwrap()]).unwrap();
     let binding = HotkeyBinding {
-        hotkey: signal_auras_core::HotkeyId::parse("F5").unwrap(),
+        trigger: signal_auras_core::BindingTrigger::keyboard(
+            signal_auras_core::HotkeyId::parse("F5").unwrap(),
+        ),
+        mode: signal_auras_core::BindingMode::Consume,
         scope: signal_auras_core::ScopeSelection::ExplicitGlobal,
         macro_definition,
         registration_state: signal_auras_core::RegistrationState::Pending,
@@ -83,6 +87,44 @@ fn capability_report_fails_closed_for_unavailable_capabilities() {
     assert!(!report.all_available(&required));
     let error = report.first_blocking_error(&required).unwrap();
     assert_eq!(error.capability, Some(Capability::SynthesizedInput));
+}
+
+#[test]
+fn composite_consume_bindings_require_observation_and_consumption_capabilities() {
+    let binding = HotkeyBinding {
+        trigger: BindingTrigger::Composite(CompositeTrigger::new(
+            ModifierSet::parse(["Ctrl"]).unwrap(),
+            MouseTrigger::Wheel(WheelDirection::Up),
+        )),
+        mode: BindingMode::Consume,
+        scope: signal_auras_core::ScopeSelection::ExplicitGlobal,
+        macro_definition: MacroDefinition::new(vec![MacroAction::key("Left").unwrap()]).unwrap(),
+        registration_state: signal_auras_core::RegistrationState::Pending,
+    };
+
+    let required = CapabilitySet::for_bindings([&binding]);
+
+    assert!(required.contains(CapabilityKind::CompositePointerObservation));
+    assert!(required.contains(CapabilityKind::CompositePointerConsumption));
+}
+
+#[test]
+fn composite_passthrough_bindings_do_not_require_consumption_capability() {
+    let binding = HotkeyBinding {
+        trigger: BindingTrigger::Composite(CompositeTrigger::new(
+            ModifierSet::parse(["Ctrl"]).unwrap(),
+            MouseTrigger::Wheel(WheelDirection::Down),
+        )),
+        mode: BindingMode::Passthrough,
+        scope: signal_auras_core::ScopeSelection::ExplicitGlobal,
+        macro_definition: MacroDefinition::new(vec![MacroAction::key("Right").unwrap()]).unwrap(),
+        registration_state: signal_auras_core::RegistrationState::Pending,
+    };
+
+    let required = CapabilitySet::for_bindings([&binding]);
+
+    assert!(required.contains(CapabilityKind::CompositePointerObservation));
+    assert!(!required.contains(CapabilityKind::CompositePointerConsumption));
 }
 
 #[test]
@@ -267,7 +309,10 @@ fn kde_global_shortcut_registration_uses_owned_handles_and_cleanup() {
         },
     );
     let binding = HotkeyBinding {
-        hotkey: signal_auras_core::HotkeyId::parse("F5").unwrap(),
+        trigger: signal_auras_core::BindingTrigger::keyboard(
+            signal_auras_core::HotkeyId::parse("F5").unwrap(),
+        ),
+        mode: signal_auras_core::BindingMode::Consume,
         scope: signal_auras_core::ScopeSelection::ExplicitGlobal,
         macro_definition: MacroDefinition::new(vec![MacroAction::text("x").unwrap()]).unwrap(),
         registration_state: signal_auras_core::RegistrationState::Pending,

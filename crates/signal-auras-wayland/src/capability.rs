@@ -195,6 +195,16 @@ pub fn kde_capability_report(
         CapabilityKind::GlobalShortcut if environment.services.kglobalaccel => {
             CapabilityStatus::available(kind, "kglobalaccel")
         }
+        CapabilityKind::CompositePointerObservation => unavailable_kind(
+            kind,
+            "KDE composite pointer observation provider is unavailable",
+            "kwin-pointer-filter",
+        ),
+        CapabilityKind::CompositePointerConsumption => unavailable_kind(
+            kind,
+            "KDE composite pointer consumption provider is unavailable",
+            "kwin-pointer-filter",
+        ),
         CapabilityKind::ActiveProcessMetadata if environment.services.kwin => {
             CapabilityStatus::available(kind, "kwin")
         }

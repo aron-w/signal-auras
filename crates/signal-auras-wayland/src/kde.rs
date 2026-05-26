@@ -82,19 +82,24 @@ impl ActiveProcessProvider for KdePlasmaAdapter {
 
 impl HotkeyRegistrar for KdePlasmaAdapter {
     fn register(&mut self, binding: HotkeyBinding) -> Result<RegistrationId, DiagnosableError> {
-        let required = CapabilitySet::new([CapabilityKind::GlobalShortcut]);
+        let required = CapabilitySet::for_bindings([&binding]);
         if let Some(error) = self
             .probe_capabilities(&required)
             .first_blocking_error(&required)
         {
             return Err(error);
         }
-        if self.rejected_hotkeys.contains(binding.hotkey.as_str()) {
-            return Err(crate::diagnostics::reserved_shortcut(
-                binding.hotkey.as_str(),
-            ));
+        let Some(hotkey) = binding.keyboard_hotkey() else {
+            return Err(DiagnosableError::new(
+                ErrorPhase::Registration,
+                "KDE composite pointer registration provider is unsupported",
+            )
+            .with_capability(Capability::CompositePointerObservation));
+        };
+        if self.rejected_hotkeys.contains(hotkey.as_str()) {
+            return Err(crate::diagnostics::reserved_shortcut(hotkey.as_str()));
         }
-        let id = RegistrationId::new(format!("kde-{}", binding.hotkey.as_str()));
+        let id = RegistrationId::new(format!("kde-{}", hotkey.as_str()));
         self.registrations.push(id.clone());
         Ok(id)
     }

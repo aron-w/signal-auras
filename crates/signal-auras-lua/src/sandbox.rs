@@ -1,6 +1,7 @@
 use signal_auras_core::{
-    DiagnosableError, ErrorPhase, HotkeyId, LuaAutomationConfiguration, MacroAction,
-    MacroDefinition, ProcessName, ScriptScope,
+    BindingDefinition, BindingMode, BindingTrigger, CompositeTrigger, DiagnosableError, ErrorPhase,
+    HotkeyId, LuaAutomationConfiguration, MacroAction, MacroDefinition, ModifierSet, MouseButton,
+    MouseTrigger, ProcessName, ScriptScope, WheelDirection,
 };
 use std::fs;
 use std::path::Path;
@@ -29,23 +30,39 @@ pub fn load_lua_source(source: &str) -> Result<LuaAutomationConfiguration, Diagn
             ));
         }
     }
-    if !source.contains("return") || !source.contains("hotkeys") {
+    if !source.contains("return") || !(source.contains("hotkeys") || source.contains("bindings")) {
         return Err(DiagnosableError::new(
             ErrorPhase::ScriptValidation,
-            "Lua script must return a table with hotkeys",
+            "Lua script must return a table with hotkeys or bindings",
         ));
     }
 
     let scope = parse_scope(source)?;
-    let hotkeys = parse_hotkeys(source)?;
-    LuaAutomationConfiguration::new(scope, hotkeys)
+    let mut bindings = parse_hotkeys(source)?
+        .into_iter()
+        .map(|(hotkey, macro_definition)| {
+            BindingDefinition::new(
+                BindingTrigger::keyboard(hotkey),
+                BindingMode::Consume,
+                macro_definition,
+            )
+        })
+        .collect::<Vec<_>>();
+    bindings.extend(parse_bindings(source)?);
+    LuaAutomationConfiguration::with_bindings(scope, bindings)
 }
 
 fn parse_scope(source: &str) -> Result<Option<ScriptScope>, DiagnosableError> {
     let Some(scope_index) = source.find("scope") else {
         return Ok(None);
     };
-    let scope_source = &source[scope_index..source.find("hotkeys").unwrap_or(source.len())];
+    let end = [source.find("hotkeys"), source.find("bindings")]
+        .into_iter()
+        .flatten()
+        .filter(|index| *index > scope_index)
+        .min()
+        .unwrap_or(source.len());
+    let scope_source = &source[scope_index..end];
     if scope_source.contains("global") {
         return Err(DiagnosableError::new(
             ErrorPhase::ScriptValidation,
@@ -92,6 +109,80 @@ fn parse_hotkeys(source: &str) -> Result<Vec<(HotkeyId, MacroDefinition)>, Diagn
         cursor = &cursor[block_start + 1..];
     }
     Ok(result)
+}
+
+fn parse_bindings(source: &str) -> Result<Vec<BindingDefinition>, DiagnosableError> {
+    let Some(bindings_body) = table_body_after(source, "bindings")? else {
+        return Ok(Vec::new());
+    };
+    let mut result = Vec::new();
+    for entry in top_level_tables(bindings_body) {
+        result.push(parse_binding_entry(entry)?);
+    }
+    Ok(result)
+}
+
+fn parse_binding_entry(source: &str) -> Result<BindingDefinition, DiagnosableError> {
+    let mode = BindingMode::parse(field_string(source, "mode"))?;
+    let trigger_body = table_body_after(source, "trigger")?.ok_or_else(|| {
+        DiagnosableError::new(ErrorPhase::ScriptValidation, "binding requires trigger")
+    })?;
+    let trigger = parse_binding_trigger(trigger_body)?;
+    let macro_definition = parse_macro_field(source)?;
+    Ok(BindingDefinition::new(trigger, mode, macro_definition))
+}
+
+fn parse_binding_trigger(source: &str) -> Result<BindingTrigger, DiagnosableError> {
+    let modifiers = table_body_after(source, "modifiers")?
+        .map(|body| ModifierSet::parse(quoted_strings(body)))
+        .transpose()?
+        .unwrap_or_default();
+    let mouse_body = table_body_after(source, "mouse")?;
+    let key = field_string(source, "key");
+    let button = mouse_body.and_then(|body| field_string(body, "button"));
+    let wheel = mouse_body.and_then(|body| field_string(body, "wheel"));
+    let primary_count =
+        usize::from(key.is_some()) + usize::from(button.is_some()) + usize::from(wheel.is_some());
+    if primary_count != 1 {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "binding trigger must contain exactly one primary trigger",
+        ));
+    }
+    if let Some(key) = key {
+        return Ok(BindingTrigger::keyboard(HotkeyId::parse(key)?));
+    }
+    let primary = if let Some(button) = button {
+        MouseTrigger::Button(MouseButton::parse(button)?)
+    } else {
+        MouseTrigger::Wheel(WheelDirection::parse(wheel.expect("wheel counted above"))?)
+    };
+    Ok(BindingTrigger::Composite(CompositeTrigger::new(
+        modifiers, primary,
+    )))
+}
+
+fn parse_macro_field(source: &str) -> Result<MacroDefinition, DiagnosableError> {
+    let Some(macro_start) = source.find("macro") else {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "binding must map to a macro",
+        ));
+    };
+    let macro_source = &source[macro_start..];
+    let Some(block_start) = macro_source.find('{') else {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "macro must use table constructor",
+        ));
+    };
+    let Some(block_end) = matching_brace(macro_source, block_start) else {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "macro table is not closed",
+        ));
+    };
+    MacroDefinition::new(parse_actions(&macro_source[block_start + 1..block_end])?)
 }
 
 fn parse_actions(source: &str) -> Result<Vec<MacroAction>, DiagnosableError> {
@@ -151,6 +242,70 @@ fn first_quoted(source: &str) -> Option<&str> {
     Some(&source[start..end])
 }
 
+fn field_string<'a>(source: &'a str, field: &str) -> Option<&'a str> {
+    let index = source.find(field)?;
+    let after_field = &source[index + field.len()..];
+    let equals = after_field.find('=')?;
+    first_quoted(&after_field[equals + 1..])
+}
+
+fn table_body_after<'a>(source: &'a str, field: &str) -> Result<Option<&'a str>, DiagnosableError> {
+    let Some(field_index) = source.find(field) else {
+        return Ok(None);
+    };
+    let after_field = &source[field_index + field.len()..];
+    let Some(block_start) = after_field.find('{') else {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!("{field} must use table constructor"),
+        ));
+    };
+    let Some(block_end) = matching_brace(after_field, block_start) else {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!("{field} table is not closed"),
+        ));
+    };
+    Ok(Some(&after_field[block_start + 1..block_end]))
+}
+
+fn top_level_tables(source: &str) -> Vec<&str> {
+    let bytes = source.as_bytes();
+    let mut tables = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'{' {
+            if let Some(end) = matching_brace(source, cursor) {
+                tables.push(&source[cursor + 1..end]);
+                cursor = end + 1;
+                continue;
+            }
+        }
+        cursor += 1;
+    }
+    tables
+}
+
+fn matching_brace(source: &str, start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    for (index, byte) in source.as_bytes().iter().enumerate().skip(start) {
+        match (*byte, in_string) {
+            (b'"', false) => in_string = true,
+            (b'"', true) => in_string = false,
+            (b'{', false) => depth += 1,
+            (b'}', false) => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,5 +350,70 @@ mod tests {
     #[test]
     fn denies_ambient_api() {
         assert!(load_lua_source("return { hotkeys = {}, x = os.getenv(\"HOME\") }").is_err());
+    }
+
+    #[test]
+    fn parses_structured_mouse_wheel_binding() {
+        let source = r#"
+            return {
+              bindings = {
+                {
+                  trigger = {
+                    modifiers = { "Ctrl", "Shift" },
+                    mouse = { wheel = "up" },
+                  },
+                  macro = macro { key "Left" },
+                },
+              },
+            }
+        "#;
+
+        let config = load_lua_source(source).unwrap();
+        let binding = config.bindings().values().next().unwrap();
+        assert_eq!(binding.mode, BindingMode::Consume);
+        assert_eq!(binding.trigger.describe(), "Ctrl+Shift+wheel_up");
+    }
+
+    #[test]
+    fn parses_passthrough_mouse_button_binding() {
+        let source = r#"
+            return {
+              bindings = {
+                {
+                  trigger = {
+                    modifiers = { "Ctrl" },
+                    mouse = { button = "left" },
+                  },
+                  mode = "passthrough",
+                  macro = macro {
+                    key "Alt+Right",
+                    text "hello world",
+                    key "Enter",
+                  },
+                },
+              },
+            }
+        "#;
+
+        let config = load_lua_source(source).unwrap();
+        let binding = config.bindings().values().next().unwrap();
+        assert_eq!(binding.mode, BindingMode::Passthrough);
+        assert_eq!(binding.macro_definition.actions().len(), 3);
+    }
+
+    #[test]
+    fn rejects_malformed_structured_binding_triggers() {
+        for source in [
+            r#"return { bindings = { { trigger = { modifiers = { "Meta" }, mouse = { wheel = "up" } }, macro = macro { key "Left" } } } }"#,
+            r#"return { bindings = { { trigger = { mouse = { button = "back" } }, macro = macro { key "Left" } } } }"#,
+            r#"return { bindings = { { trigger = { mouse = { wheel = "sideways" } }, macro = macro { key "Left" } } } }"#,
+            r#"return { bindings = { { trigger = { modifiers = { "Ctrl" } }, macro = macro { key "Left" } } } }"#,
+            r#"return { bindings = { { trigger = { key = "F5", mouse = { wheel = "up" } }, macro = macro { key "Left" } } } }"#,
+        ] {
+            assert!(
+                load_lua_source(source).is_err(),
+                "source should be denied: {source}"
+            );
+        }
     }
 }

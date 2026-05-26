@@ -271,3 +271,25 @@ final_summary reason=CtrlC elapsed_ms=46238 triggers=1 successes=1 failures=0 de
 - Synthesized input success: PASS. The macro emitted three ordered input requests: `Enter`, text, `Enter`.
 - Ctrl-C cleanup: PASS. Shutdown completed after SIGINT and left no reported cleanup failures.
 - T062 status: PASS. All required KDE Plasma Wayland manual compositor scenarios have successful recorded evidence.
+
+## Composite Pointer Bindings
+
+Composite pointer bindings remain blocked on a real KDE provider for pointer
+observation and event consumption. Until that provider exists, run the composite
+example and verify that consumed pointer bindings fail closed before
+registration:
+
+```bash
+nix develop -c cargo run -p signal-auras-cli -- run ./examples/composite-bindings.lua
+```
+
+Expected result: `capability_probe` fails with the
+`composite_pointer_observation` capability and no pointer binding is registered.
+
+When KDE pointer observation and consumption support is added, manually verify:
+
+- `Ctrl+WheelUp` emits `Left` without zooming or scrolling.
+- `Ctrl+WheelDown` emits `Right` without zooming or scrolling.
+- `Ctrl+LeftClick` emits `Alt+Right`, `hello world`, and `Enter`.
+- Out-of-scope applications are unaffected.
+- Ctrl-C removes all current-run registrations.
