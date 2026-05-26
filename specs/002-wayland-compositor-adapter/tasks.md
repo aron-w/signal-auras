@@ -139,7 +139,7 @@
 - [X] T059 [P] Run and record `nix flake check` in `specs/002-wayland-compositor-adapter/quickstart.md`
 - [X] T060 Update README capability and limitation notes for KDE Plasma Wayland adapter behavior in `README.md`
 - [X] T061 Review and tighten safety-boundary comments for D-Bus object lifetimes, KWin bridge state, portal sessions, and event-loop ownership in `crates/signal-auras-wayland/src/kde.rs`
-- [ ] T062 Validate all KDE Plasma Wayland manual compositor scenarios and record results in `tests/compositor/manual-wayland-verification.md`
+- [X] T062 Validate all KDE Plasma Wayland manual compositor scenarios and record results in `tests/compositor/manual-wayland-verification.md`
 - [X] T063 Run a final placeholder scan for unresolved planning markers in `specs/002-wayland-compositor-adapter/tasks.md`
 
 ---

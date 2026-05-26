@@ -219,6 +219,55 @@ final_summary reason=CtrlC elapsed_ms=127963 triggers=1 successes=1 failures=0 d
 - Synthesized input success: PASS. The live runner opened the KDE RemoteDesktop portal path and reported one emitted input request.
 - Active-process match: PASS. The portal input was emitted only after the KWin callback reported a matching active process.
 - Ctrl-C cleanup: PASS for KGlobalAccel residue. The cleanup check returned no `SignalAuras` entries.
-- Physical desktop keypress: NOT VERIFIED. The observed portal input trigger used KGlobalAccel D-Bus invocation, not a hardware keypress.
-- Denied synthesized input emits zero input: NOT VERIFIED. The KDE portal permission-denial path was not exercised in this session.
-- T062 status: INCOMPLETE. Do not mark T062 complete until physical desktop-wide keypress delivery and denied-portal zero-emission behavior are verified manually.
+- Physical desktop keypress: NOT VERIFIED in this run. The observed portal input trigger used KGlobalAccel D-Bus invocation, not a hardware keypress.
+- Denied synthesized input emits zero input: NOT VERIFIED in this run. The KDE portal permission-denial path was not exercised in this session.
+
+### Run 2026-05-26: physical F5 with denied RemoteDesktop portal
+
+- Signal Auras command: `just run-prompt`
+- Script: `examples/prompt-scope.lua`
+- Prompt choices: `2`, then `GLOBAL`
+- Trigger: physical `F5` keypress in the KDE Plasma Wayland session
+- Portal response: RemoteDesktop permission denied after revoking `kde-authorized remote-desktop` with the portal permission store
+
+Observed output:
+
+```text
+startup script_path=examples/prompt-scope.lua
+script_validation result=ok
+effective_scope global (explicit current run)
+provider selected=kde-plasma-wayland
+capability_probe result=ok
+hotkey_registered hotkey=F5 id=kde-kwin-script:signal-auras-1162050-1:F5
+final_summary reason=RuntimeError elapsed_ms=4422 triggers=1 successes=0 failures=1 denials=0 permission_failures=0 scope_mismatches=0 capability_probe_successes=1 capability_probe_failures=0 ignored_events=0 active_process_matches=1 active_process_non_matches=0 metadata_unavailable=0 input_emitted=0 input_denied=0 kde_bridge_setups=0 kde_bridge_cleanups=0 cleanup_successes=0 cleanup_failures=0
+error capability_probe: required permission was denied (capability: synthesized_input) remediation: grant the requested permission and restart the runner source: xdg-desktop-portal RemoteDesktop
+```
+
+- Physical desktop keypress: PASS. A hardware `F5` press reached the current-run KWin shortcut bridge.
+- Denied synthesized input emits zero input: PASS. The denied portal request produced `input_emitted=0` and a diagnosable synthesized-input permission error.
+
+### Run 2026-05-26: physical F5 with granted RemoteDesktop portal
+
+- Signal Auras command: `just run-prompt`
+- Script: `examples/prompt-scope.lua`
+- Prompt choices: `2`, then `GLOBAL`
+- Trigger: physical `F5` keypress in the KDE Plasma Wayland session
+- Portal response: RemoteDesktop permission granted
+
+Observed output:
+
+```text
+startup script_path=examples/prompt-scope.lua
+script_validation result=ok
+effective_scope global (explicit current run)
+provider selected=kde-plasma-wayland
+capability_probe result=ok
+hotkey_registered hotkey=F5 id=kde-kwin-script:signal-auras-1169284-1:F5
+/hideout
+final_summary reason=CtrlC elapsed_ms=46238 triggers=1 successes=1 failures=0 denials=0 permission_failures=0 scope_mismatches=0 capability_probe_successes=1 capability_probe_failures=0 ignored_events=0 active_process_matches=1 active_process_non_matches=0 metadata_unavailable=0 input_emitted=3 input_denied=0 kde_bridge_setups=0 kde_bridge_cleanups=0 cleanup_successes=0 cleanup_failures=0
+```
+
+- Physical desktop keypress: PASS. A hardware `F5` press triggered the macro and emitted `/hideout`.
+- Synthesized input success: PASS. The macro emitted three ordered input requests: `Enter`, text, `Enter`.
+- Ctrl-C cleanup: PASS. Shutdown completed after SIGINT and left no reported cleanup failures.
+- T062 status: PASS. All required KDE Plasma Wayland manual compositor scenarios have successful recorded evidence.
