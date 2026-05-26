@@ -64,6 +64,7 @@ pub struct ActiveProcessContext {
     pub visible_name: Option<ProcessName>,
     pub process_id: Option<u32>,
     pub app_id: Option<String>,
+    pub window_class: Option<String>,
     pub confidence: ActiveProcessConfidence,
     pub captured_at: Instant,
     pub diagnostic: Option<AdapterDiagnostic>,
@@ -75,6 +76,7 @@ impl ActiveProcessContext {
             visible_name: Some(visible_name),
             process_id,
             app_id: None,
+            window_class: None,
             confidence: ActiveProcessConfidence::Exact,
             captured_at: Instant::now(),
             diagnostic: None,
@@ -86,6 +88,7 @@ impl ActiveProcessContext {
             visible_name: Some(visible_name),
             process_id: None,
             app_id: None,
+            window_class: None,
             confidence: ActiveProcessConfidence::NameOnly,
             captured_at: Instant::now(),
             diagnostic: None,
@@ -97,6 +100,7 @@ impl ActiveProcessContext {
             visible_name: None,
             process_id: None,
             app_id: None,
+            window_class: None,
             confidence: ActiveProcessConfidence::Unavailable,
             captured_at: Instant::now(),
             diagnostic: Some(AdapterDiagnostic::new(
@@ -111,6 +115,7 @@ impl ActiveProcessContext {
             visible_name: None,
             process_id: None,
             app_id: None,
+            window_class: None,
             confidence: ActiveProcessConfidence::Denied,
             captured_at: Instant::now(),
             diagnostic: Some(AdapterDiagnostic::new(
@@ -125,6 +130,7 @@ impl ActiveProcessContext {
             visible_name: None,
             process_id: None,
             app_id: None,
+            window_class: None,
             confidence: ActiveProcessConfidence::Ambiguous,
             captured_at: Instant::now(),
             diagnostic: Some(AdapterDiagnostic::new(ErrorPhase::Trigger, reason.into())),
@@ -133,6 +139,16 @@ impl ActiveProcessContext {
 
     pub fn is_stale(&self, max_age: Duration) -> bool {
         self.captured_at.elapsed() > max_age
+    }
+
+    pub fn with_app_id(mut self, app_id: impl Into<String>) -> Self {
+        self.app_id = Some(app_id.into());
+        self
+    }
+
+    pub fn with_window_class(mut self, window_class: impl Into<String>) -> Self {
+        self.window_class = Some(window_class.into());
+        self
     }
 
     pub fn matchable_name(&self) -> Option<&ProcessName> {

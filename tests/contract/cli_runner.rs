@@ -268,6 +268,181 @@ fn real_runner_fails_before_registration_when_global_shortcut_capability_is_unsu
 }
 
 #[test]
+fn real_runner_fails_before_registration_on_non_kde_wayland_session() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          scope = { processes = { "kate" } },
+          hotkeys = {
+            ["F5"] = macro {
+              text "hello",
+            },
+          },
+        }
+        "#,
+    );
+    let mut prompt = FixedPrompt(ConsentDecision::Cancel);
+    let mut adapter =
+        RealWaylandAdapter::from_environment(signal_auras_wayland::capability::KdeEnvironment {
+            wayland_display: Some("wayland-0".into()),
+            session_type: Some("wayland".into()),
+            current_desktop: Some("GNOME".into()),
+            services: signal_auras_wayland::capability::KdeServiceAvailability::available(),
+        });
+    let mut lifecycle = ScriptedLifecycle::new(vec![RunnerEvent::Shutdown(ShutdownReason::CtrlC)]);
+
+    let error =
+        start_real_runner_with_lifecycle(&lua_file, &mut prompt, &mut adapter, &mut lifecycle)
+            .unwrap_err();
+
+    assert_eq!(error.phase, ErrorPhase::CapabilityProbe);
+    assert!(error.message.contains("KDE Plasma Wayland"));
+}
+
+#[test]
+fn real_runner_fails_before_registration_on_non_wayland_session() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          scope = { processes = { "kate" } },
+          hotkeys = {
+            ["F5"] = macro {
+              text "hello",
+            },
+          },
+        }
+        "#,
+    );
+    let mut prompt = FixedPrompt(ConsentDecision::Cancel);
+    let mut adapter =
+        RealWaylandAdapter::from_environment(signal_auras_wayland::capability::KdeEnvironment {
+            wayland_display: None,
+            session_type: Some("x11".into()),
+            current_desktop: Some("KDE".into()),
+            services: signal_auras_wayland::capability::KdeServiceAvailability::available(),
+        });
+    let mut lifecycle = ScriptedLifecycle::new(vec![RunnerEvent::Shutdown(ShutdownReason::CtrlC)]);
+
+    let error =
+        start_real_runner_with_lifecycle(&lua_file, &mut prompt, &mut adapter, &mut lifecycle)
+            .unwrap_err();
+
+    assert_eq!(error.phase, ErrorPhase::CapabilityProbe);
+    assert!(error.message.contains("Wayland"));
+}
+
+#[test]
+fn real_runner_registers_kde_shortcut_when_required_services_are_available() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          scope = { processes = { "kate" } },
+          hotkeys = {
+            ["F5"] = macro {
+              delay 1,
+            },
+          },
+        }
+        "#,
+    );
+    let mut prompt = FixedPrompt(ConsentDecision::Cancel);
+    let mut adapter =
+        RealWaylandAdapter::from_environment(signal_auras_wayland::capability::KdeEnvironment {
+            wayland_display: Some("wayland-0".into()),
+            session_type: Some("wayland".into()),
+            current_desktop: Some("KDE".into()),
+            services: signal_auras_wayland::capability::KdeServiceAvailability::available(),
+        });
+    let mut lifecycle = ScriptedLifecycle::new(vec![RunnerEvent::Shutdown(ShutdownReason::CtrlC)]);
+
+    let stats =
+        start_real_runner_with_lifecycle(&lua_file, &mut prompt, &mut adapter, &mut lifecycle)
+            .unwrap();
+
+    assert_eq!(stats.registration_successes, 1);
+    assert_eq!(adapter.cleanup_report().attempted, 0);
+}
+
+#[test]
+fn real_runner_fails_before_registration_when_kde_metadata_is_unavailable_for_process_scope() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          scope = { processes = { "kate" } },
+          hotkeys = {
+            ["F5"] = macro {
+              delay 1,
+            },
+          },
+        }
+        "#,
+    );
+    let mut prompt = FixedPrompt(ConsentDecision::Cancel);
+    let mut adapter =
+        RealWaylandAdapter::from_environment(signal_auras_wayland::capability::KdeEnvironment {
+            wayland_display: Some("wayland-0".into()),
+            session_type: Some("wayland".into()),
+            current_desktop: Some("KDE".into()),
+            services: signal_auras_wayland::capability::KdeServiceAvailability {
+                kwin: false,
+                kglobalaccel: true,
+                portal: true,
+            },
+        });
+    let mut lifecycle = ScriptedLifecycle::new(vec![RunnerEvent::Shutdown(ShutdownReason::CtrlC)]);
+
+    let error =
+        start_real_runner_with_lifecycle(&lua_file, &mut prompt, &mut adapter, &mut lifecycle)
+            .unwrap_err();
+
+    assert_eq!(error.phase, ErrorPhase::CapabilityProbe);
+    assert_eq!(
+        error.capability,
+        Some(signal_auras_core::Capability::ActiveProcess)
+    );
+    assert!(error.message.contains("KWin"));
+}
+
+#[test]
+fn real_runner_fails_before_registration_when_kde_portal_input_is_unavailable() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          scope = { processes = { "kate" } },
+          hotkeys = {
+            ["F5"] = macro {
+              text "hello",
+            },
+          },
+        }
+        "#,
+    );
+    let mut prompt = FixedPrompt(ConsentDecision::Cancel);
+    let mut adapter =
+        RealWaylandAdapter::from_environment(signal_auras_wayland::capability::KdeEnvironment {
+            wayland_display: Some("wayland-0".into()),
+            session_type: Some("wayland".into()),
+            current_desktop: Some("KDE".into()),
+            services: signal_auras_wayland::capability::KdeServiceAvailability {
+                kwin: true,
+                kglobalaccel: true,
+                portal: false,
+            },
+        });
+    let mut lifecycle = ScriptedLifecycle::new(vec![RunnerEvent::Shutdown(ShutdownReason::CtrlC)]);
+
+    let error =
+        start_real_runner_with_lifecycle(&lua_file, &mut prompt, &mut adapter, &mut lifecycle)
+            .unwrap_err();
+
+    assert_eq!(error.phase, ErrorPhase::CapabilityProbe);
+    assert_eq!(
+        error.capability,
+        Some(signal_auras_core::Capability::SynthesizedInput)
+    );
+}
+
+#[test]
 fn synthesized_input_denial_is_reported_before_macro_success() {
     struct DenyingExecutor;
 

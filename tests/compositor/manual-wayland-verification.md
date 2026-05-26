@@ -60,6 +60,34 @@ Record before the run:
 5. Deny synthesized-input permission if KDE/portal offers a prompt and confirm zero input is emitted.
 6. Stop or invalidate KWin/portal during a run if practical and confirm cleanup before exit.
 
+## Global Shortcut Verification
+
+1. Configure a single KDE-supported hotkey that is not already reserved by Plasma.
+2. Start the runner and confirm `provider selected=kde-plasma-wayland` appears before registration.
+3. Confirm the hotkey registration output includes the configured key and a KDE provider handle.
+4. Trigger the hotkey from a focused application outside the terminal and confirm exactly one event is reported.
+5. Repeat with a reserved or already-owned hotkey and confirm startup exits after cleaning up any earlier handles.
+6. Press Ctrl-C and confirm no shortcut remains active after shutdown.
+
+## Active Process Metadata Verification
+
+1. Configure a process-scoped shortcut for a visible KDE application such as Kate.
+2. Focus that application and press the registered shortcut.
+3. Confirm the runner logs an active-process match with the visible process or application identity.
+4. Focus a different application and press the same shortcut.
+5. Confirm the runner logs a non-match and emits no macro input.
+6. Repeat on a privileged or compositor-owned surface such as a lock screen or launcher when practical and confirm it is treated as unavailable or ambiguous.
+7. Invalidate or deny the metadata path when practical and confirm startup or event handling fails closed with a KWin diagnostic.
+
+## Synthesized Input Verification
+
+1. Configure a macro that emits short ASCII text into a focused KDE text editor.
+2. Start the runner in KDE Plasma Wayland and grant any portal permission prompt.
+3. Press the registered shortcut and confirm the text appears once in declared order.
+4. Repeat with portal permission denied and confirm zero input is emitted.
+5. Repeat with text that the key-translation path cannot represent and confirm no partial text is emitted.
+6. Press Ctrl-C during or immediately after a macro and confirm portal input is cancelled before exit.
+
 ## Results
 
 - KDE provider selected:
@@ -72,4 +100,3 @@ Record before the run:
 - Ctrl-C cleanup:
 - Unsupported-session diagnostics:
 - Notes:
-

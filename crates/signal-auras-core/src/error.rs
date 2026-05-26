@@ -85,6 +85,7 @@ pub enum CapabilityAvailability {
     Denied,
     Revoked,
     Invalidated,
+    ProviderError,
 }
 
 impl CapabilityAvailability {

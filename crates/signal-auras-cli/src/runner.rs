@@ -169,6 +169,7 @@ where
     let mut stats = RuntimeStats::new();
     let bindings = config.bindings_for_scope(scope);
     let required = CapabilitySet::for_bindings(&bindings);
+    println!("provider selected=kde-plasma-wayland");
     let report = adapter.probe_capabilities(&required);
     if let Some(error) = report.first_blocking_error(&required) {
         stats.record_capability_probe_failure();

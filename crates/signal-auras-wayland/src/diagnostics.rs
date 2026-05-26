@@ -36,6 +36,25 @@ pub fn invalidated_provider(capability: Capability) -> DiagnosableError {
     .with_remediation("restart the runner after the compositor/session is stable")
 }
 
+pub fn unsupported_kde_session(source: impl Into<String>) -> DiagnosableError {
+    DiagnosableError::new(
+        ErrorPhase::CapabilityProbe,
+        "KDE Plasma Wayland provider requires a KDE Plasma Wayland session",
+    )
+    .with_source(source)
+    .with_remediation("start Signal Auras from a KDE Plasma Wayland session")
+}
+
+pub fn missing_kde_service(service: impl Into<String>) -> DiagnosableError {
+    let service = service.into();
+    DiagnosableError::new(
+        ErrorPhase::CapabilityProbe,
+        format!("required KDE service '{service}' is unavailable"),
+    )
+    .with_source(service)
+    .with_remediation("enable the required KDE Plasma service and restart the runner")
+}
+
 pub fn reserved_shortcut(hotkey: &str) -> DiagnosableError {
     DiagnosableError::new(
         ErrorPhase::Registration,
@@ -43,6 +62,16 @@ pub fn reserved_shortcut(hotkey: &str) -> DiagnosableError {
     )
     .with_capability(Capability::GlobalShortcut)
     .with_remediation("choose a different hotkey")
+}
+
+pub fn unsupported_shortcut_key(hotkey: &str) -> DiagnosableError {
+    DiagnosableError::new(
+        ErrorPhase::Registration,
+        format!("hotkey '{hotkey}' is not supported by the KDE shortcut provider"),
+    )
+    .with_capability(Capability::GlobalShortcut)
+    .with_source("kglobalaccel")
+    .with_remediation("choose a KDE-supported key combination")
 }
 
 pub fn unsupported_kind(kind: CapabilityKind, source: impl Into<String>) -> DiagnosableError {

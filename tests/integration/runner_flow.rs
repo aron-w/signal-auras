@@ -307,6 +307,125 @@ fn partial_registration_failure_cleans_up_successful_handles() {
     assert_eq!(registrar.unregisters, 1);
 }
 
+#[test]
+fn kde_bridge_cleanup_after_setup_failure_is_idempotent() {
+    let mut bridge = signal_auras_wayland::kde_bridge::KdeBridgeState::active_for_test(2);
+
+    let first = bridge.unload().unwrap();
+    let second = bridge.unload().unwrap();
+
+    assert_eq!(first.attempted, 2);
+    assert_eq!(first.succeeded, 2);
+    assert_eq!(second.attempted, 0);
+    assert_eq!(second.succeeded, 0);
+    assert_eq!(
+        bridge.lifecycle(),
+        &signal_auras_wayland::kde_bridge::KdeBridgeLifecycle::Unloaded
+    );
+}
+
+#[test]
+fn kde_partial_registration_failure_cleans_up_successful_handles() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          scope = { processes = { "kate" } },
+          hotkeys = {
+            ["F5"] = macro { delay 1 },
+            ["F6"] = macro { delay 1 },
+          },
+        }
+        "#,
+    );
+    let mut prompt = Prompt::new(ConsentDecision::Cancel);
+    let mut adapter = signal_auras_wayland::RealWaylandAdapter::from_environment(
+        signal_auras_wayland::capability::KdeEnvironment {
+            wayland_display: Some("wayland-0".into()),
+            session_type: Some("wayland".into()),
+            current_desktop: Some("KDE".into()),
+            services: signal_auras_wayland::capability::KdeServiceAvailability::available(),
+        },
+    );
+    adapter.reject_hotkey_for_test("F6");
+    let mut lifecycle = ScriptedLifecycle::new(vec![RunnerEvent::Shutdown(
+        signal_auras_core::ShutdownReason::CtrlC,
+    )]);
+
+    let error = signal_auras_cli::runner::start_real_runner_with_lifecycle(
+        &lua_file,
+        &mut prompt,
+        &mut adapter,
+        &mut lifecycle,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.phase, ErrorPhase::Registration);
+    assert_eq!(adapter.cleanup_report().attempted, 0);
+}
+
+#[test]
+fn shortcut_events_use_fresh_kde_active_process_context() {
+    let scope = ScopeSelection::process_list(vec![ProcessName::parse("kate").unwrap()]).unwrap();
+    let matching = signal_auras_wayland::process::KwinWindowSnapshot::focused_app(
+        ProcessName::parse("kate").unwrap(),
+    )
+    .into_context();
+    let non_matching = signal_auras_wayland::process::KwinWindowSnapshot::focused_app(
+        ProcessName::parse("konsole").unwrap(),
+    )
+    .into_context();
+
+    assert_eq!(
+        scope.decide_context(&matching),
+        signal_auras_core::ScopeDecision::Allowed
+    );
+    assert!(matches!(
+        scope.decide_context(&non_matching),
+        signal_auras_core::ScopeDecision::Denied { .. }
+    ));
+}
+
+#[test]
+fn unavailable_kde_portal_input_emits_zero_actions_and_leaves_no_session() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          scope = { processes = { "kate" } },
+          hotkeys = {
+            ["F5"] = macro { text "hello" },
+          },
+        }
+        "#,
+    );
+    let mut prompt = Prompt::new(ConsentDecision::Cancel);
+    let mut adapter = signal_auras_wayland::RealWaylandAdapter::from_environment(
+        signal_auras_wayland::capability::KdeEnvironment {
+            wayland_display: Some("wayland-0".into()),
+            session_type: Some("wayland".into()),
+            current_desktop: Some("KDE".into()),
+            services: signal_auras_wayland::capability::KdeServiceAvailability {
+                kwin: true,
+                kglobalaccel: true,
+                portal: false,
+            },
+        },
+    );
+    let mut lifecycle = ScriptedLifecycle::new(vec![RunnerEvent::Shutdown(
+        signal_auras_core::ShutdownReason::CtrlC,
+    )]);
+
+    let error = signal_auras_cli::runner::start_real_runner_with_lifecycle(
+        &lua_file,
+        &mut prompt,
+        &mut adapter,
+        &mut lifecycle,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.phase, ErrorPhase::CapabilityProbe);
+    assert_eq!(adapter.cleanup_report().attempted, 0);
+}
+
 #[derive(Default)]
 struct FailsOnSecondRegistration {
     register_attempts: usize,

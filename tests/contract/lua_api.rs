@@ -48,6 +48,9 @@ fn lua_api_denies_compositor_metadata_and_raw_input_apis() {
         r#"return { hotkeys = {}, leak = active_process() }"#,
         r#"return { hotkeys = {}, leak = synthesize_input("x") }"#,
         r#"return { hotkeys = {}, leak = wayland.global_shortcut("F5") }"#,
+        r#"return { hotkeys = {}, leak = kde.active_window() }"#,
+        r#"return { hotkeys = {}, leak = kwin.activeWindow }"#,
+        r#"return { hotkeys = {}, leak = portal.remote_desktop() }"#,
     ] {
         assert!(
             load_lua_source(source).is_err(),

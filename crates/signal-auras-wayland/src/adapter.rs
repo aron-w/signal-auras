@@ -1,10 +1,12 @@
 use signal_auras_core::{
-    ActiveProcessContext, ActiveProcessProvider, Capability, CapabilityReport, CapabilitySet,
-    CleanupReport, DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyRegistrar, InputEmission,
-    MacroAction, MacroExecutor, ProcessName, RegistrationId, SynthesizedInputRequest,
+    ActiveProcessContext, ActiveProcessProvider, Capability, CapabilityKind, CapabilityReport,
+    CapabilitySet, CleanupReport, DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyRegistrar,
+    InputEmission, MacroAction, MacroExecutor, ProcessName, RegistrationId,
+    SynthesizedInputRequest,
 };
+use std::collections::BTreeSet;
 
-use crate::capability::environment_probe;
+use crate::capability::{environment_probe, KdeEnvironment};
 use crate::diagnostics::unsupported_protocol;
 
 #[derive(Default)]
@@ -93,6 +95,9 @@ pub fn real_registration_unavailable() -> DiagnosableError {
 #[derive(Default)]
 pub struct RealWaylandAdapter {
     registrations: Vec<RegistrationId>,
+    environment: Option<KdeEnvironment>,
+    rejected_hotkeys: BTreeSet<String>,
+    portal_session: Option<crate::portal::PortalInputSession>,
 }
 
 impl RealWaylandAdapter {
@@ -100,11 +105,27 @@ impl RealWaylandAdapter {
         Self::default()
     }
 
+    pub fn from_environment(environment: KdeEnvironment) -> Self {
+        Self {
+            registrations: Vec::new(),
+            environment: Some(environment),
+            rejected_hotkeys: BTreeSet::new(),
+            portal_session: None,
+        }
+    }
+
+    pub fn reject_hotkey_for_test(&mut self, hotkey: impl Into<String>) {
+        self.rejected_hotkeys.insert(hotkey.into());
+    }
+
     // This is the side-effect boundary for live Wayland session probing. It
     // intentionally fails closed until a compositor-specific provider is wired
     // behind the adapter contracts.
     pub fn probe_capabilities(&self, required: &CapabilitySet) -> CapabilityReport {
-        environment_probe(required)
+        match &self.environment {
+            Some(environment) => crate::capability::kde_capability_report(required, environment),
+            None => environment_probe(required),
+        }
     }
 
     pub fn cleanup_report(&self) -> CleanupReport {
@@ -125,8 +146,22 @@ impl ActiveProcessProvider for RealWaylandAdapter {
 }
 
 impl HotkeyRegistrar for RealWaylandAdapter {
-    fn register(&mut self, _binding: HotkeyBinding) -> Result<RegistrationId, DiagnosableError> {
-        Err(unsupported_protocol(Capability::GlobalShortcut))
+    fn register(&mut self, binding: HotkeyBinding) -> Result<RegistrationId, DiagnosableError> {
+        let required = CapabilitySet::new([CapabilityKind::GlobalShortcut]);
+        if let Some(error) = self
+            .probe_capabilities(&required)
+            .first_blocking_error(&required)
+        {
+            return Err(error);
+        }
+        if self.rejected_hotkeys.contains(binding.hotkey.as_str()) {
+            return Err(crate::diagnostics::reserved_shortcut(
+                binding.hotkey.as_str(),
+            ));
+        }
+        let id = RegistrationId::new(format!("kde-{}", binding.hotkey.as_str()));
+        self.registrations.push(id.clone());
+        Ok(id)
     }
 
     fn unregister_all(&mut self) -> Result<(), DiagnosableError> {
@@ -146,16 +181,26 @@ impl MacroExecutor for RealWaylandAdapter {
 
     fn execute_input_request(
         &mut self,
-        _request: SynthesizedInputRequest,
+        request: SynthesizedInputRequest,
     ) -> Result<InputEmission, DiagnosableError> {
-        Err(DiagnosableError::new(
-            ErrorPhase::MacroExecution,
-            "synthesized input provider is unsupported",
-        )
-        .with_capability(Capability::SynthesizedInput))
+        let required = CapabilitySet::new([CapabilityKind::SynthesizedInput]);
+        if let Some(error) = self
+            .probe_capabilities(&required)
+            .first_blocking_error(&required)
+        {
+            return Err(error);
+        }
+        if self.portal_session.is_none() {
+            self.portal_session = Some(crate::portal::PortalInputSession::open());
+        }
+        self.portal_session.as_ref().unwrap().synthesize(request)
     }
 
     fn cancel_pending(&mut self) -> Result<(), DiagnosableError> {
+        if let Some(session) = &mut self.portal_session {
+            let _ = session.close();
+        }
+        self.portal_session = None;
         Ok(())
     }
 }

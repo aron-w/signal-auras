@@ -8,12 +8,16 @@ the run stops.
 ## Current Status
 
 The repository currently contains the first Lua hotkey runner implementation and
-a real Wayland adapter boundary that probes the current session and fails closed
-when no supported compositor provider is configured. Successful desktop-wide
-global shortcut registration, active-process metadata, and synthesized input
-still require a compositor-specific backend behind that boundary. When those
-capabilities are unavailable, the runner fails with diagnosable errors instead
-of falling back to hidden behavior.
+a KDE Plasma Wayland adapter boundary. The runner detects KDE Wayland session
+requirements, maps missing KWin/KGlobalAccel/portal support to diagnosable
+capability failures, tracks current-run shortcut handles, converts KDE/KWin
+active-window snapshots into conservative process-matching contexts, and gates
+synthesized input through a portal-oriented validation/session boundary.
+
+The KDE provider is not yet a complete live desktop bridge: KGlobalAccel/KWin
+D-Bus callback wiring and xdg-desktop-portal RemoteDesktop emission still need
+manual KDE verification before the feature is complete. Unsupported sessions
+fail closed instead of falling back to hidden behavior.
 
 ## Usage
 
@@ -107,8 +111,8 @@ just run
 just failures
 ```
 
-Manual compositor verification is documented in
-`tests/compositor/manual-wayland-verification.md`. Until a compositor-specific
-provider is enabled, that procedure can verify startup, validation, consent,
-cleanup, session probing, and diagnosable unsupported-capability behavior, but
-it cannot prove successful global shortcut or synthesized input behavior.
+Manual KDE Plasma Wayland verification is documented in
+`tests/compositor/manual-wayland-verification.md`. Completion requires a real
+KDE session proving desktop-wide shortcut registration/event delivery,
+active-process scoped match and non-match behavior, synthesized input success,
+denial behavior, and shutdown cleanup.

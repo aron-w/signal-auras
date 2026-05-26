@@ -37,6 +37,11 @@
             wayland-protocols
             dbus
             xdg-desktop-portal
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            kdePackages.kglobalaccel
+            kdePackages.kwin
+            kdePackages.qttools
+            kdePackages.xdg-desktop-portal-kde
           ];
 
           shellHook = ''

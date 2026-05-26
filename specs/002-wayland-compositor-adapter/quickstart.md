@@ -102,9 +102,8 @@ This feature is complete only after a real KDE Plasma Wayland manual run records
 
 Record results here after implementation:
 
-- `nix develop -c cargo fmt --check`: PENDING
-- `nix develop -c cargo clippy --all-targets -- -D warnings`: PENDING
-- `nix develop -c cargo test`: PENDING
-- `nix flake check`: PENDING
+- `nix develop -c cargo fmt --check`: PASS on 2026-05-26.
+- `nix develop -c cargo clippy --all-targets -- -D warnings`: PASS on 2026-05-26.
+- `nix develop -c cargo test`: PASS on 2026-05-26.
+- `nix flake check`: PASS on 2026-05-26.
 - KDE Plasma Wayland manual verification: PENDING
-

@@ -5,7 +5,9 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+ashpd = "0.13.11"
 signal-auras-core = { path = "../signal-auras-core" }
+zbus = "5.15.0"
 
 # The first real adapter layer uses std/env session detection and fail-closed
 # provider contracts. Add compositor-specific crates here when a backend is
