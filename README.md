@@ -10,14 +10,15 @@ the run stops.
 The repository currently contains the first Lua hotkey runner implementation and
 a KDE Plasma Wayland adapter boundary. The runner detects KDE Wayland session
 requirements, maps missing KWin/KGlobalAccel/portal support to diagnosable
-capability failures, tracks current-run shortcut handles, converts KDE/KWin
-active-window snapshots into conservative process-matching contexts, and gates
-synthesized input through a portal-oriented validation/session boundary.
+capability failures by probing the live user D-Bus, tracks current-run shortcut
+handles, converts KDE/KWin active-window snapshots into conservative
+process-matching contexts, and gates synthesized input through a portal-oriented
+validation/session boundary.
 
-The KDE provider is not yet a complete live desktop bridge: KGlobalAccel/KWin
-D-Bus callback wiring and xdg-desktop-portal RemoteDesktop emission still need
-manual KDE verification before the feature is complete. Unsupported sessions
-fail closed instead of falling back to hidden behavior.
+The KDE provider now has current-run KWin/KGlobalAccel callback wiring and a KDE
+RemoteDesktop portal emission path. T062 remains open until physical desktop
+keypress delivery and the denied-portal zero-emission path are manually verified.
+Unsupported sessions fail closed instead of falling back to hidden behavior.
 
 ## Usage
 

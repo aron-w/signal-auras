@@ -90,13 +90,135 @@ Record before the run:
 
 ## Results
 
-- KDE provider selected:
-- Global shortcut registration:
-- Shortcut event delivery:
-- Active-process match:
-- Active-process non-match:
-- Synthesized input success:
-- Denied synthesized input emits zero input:
-- Ctrl-C cleanup:
-- Unsupported-session diagnostics:
-- Notes:
+### Run 2026-05-26: KDE Plasma Wayland live smoke test
+
+- Date: 2026-05-26
+- Machine/session: NixOS KDE Plasma Wayland, `XDG_SESSION_TYPE=wayland`, `XDG_CURRENT_DESKTOP=KDE`, `WAYLAND_DISPLAY=wayland-0`
+- KDE Plasma version: `plasmashell 6.6.5`
+- KWin session type: `kwin 6.6.5` on Wayland
+- xdg-desktop-portal-kde status: `org.freedesktop.portal.Desktop` and `org.freedesktop.impl.portal.desktop.kde` present on the user D-Bus; `xdg-desktop-portal.service` active
+- Signal Auras command: `timeout -s INT 5 cargo run -p signal-auras-cli -- run ./examples/poe2-hideout.lua`
+
+Observed output:
+
+```text
+startup script_path=./examples/poe2-hideout.lua
+script_validation result=ok
+effective_scope processes: poe2.exe
+provider selected=kde-plasma-wayland
+capability_probe result=ok
+hotkey_registered hotkey=F5 id=kde-F5
+final_summary reason=CtrlC elapsed_ms=4156 triggers=0 successes=0 failures=0 denials=0 permission_failures=0 scope_mismatches=0 capability_probe_successes=1 capability_probe_failures=0 ignored_events=0 active_process_matches=0 active_process_non_matches=0 metadata_unavailable=0 input_emitted=0 input_denied=0 kde_bridge_setups=0 kde_bridge_cleanups=0 cleanup_successes=0 cleanup_failures=0
+```
+
+- KDE provider selected: PASS. The live session probe selected `kde-plasma-wayland`.
+- Live service probe: PASS. The runner now probes KWin, KGlobalAccel, the desktop portal, and the KDE portal implementation through the user D-Bus instead of requiring test-only environment flags.
+- Global shortcut registration: FAIL. The registration output still reports an internal owned handle (`kde-F5`) but does not install a real KGlobalAccel/KWin shortcut.
+- Shortcut event delivery: FAIL. No desktop-wide shortcut event was delivered during the live run.
+- Active-process match: NOT RUN. This depends on real shortcut event delivery and a live KWin active-window metadata bridge.
+- Active-process non-match: NOT RUN. This depends on real shortcut event delivery and a live KWin active-window metadata bridge.
+- Synthesized input success: NOT RUN. This depends on a real trigger path and RemoteDesktop portal emission.
+- Denied synthesized input emits zero input: NOT RUN. This requires exercising the real portal permission prompt after the input path emits through the portal.
+- Ctrl-C cleanup: PARTIAL. The process stopped on SIGINT and printed final stats, but no real KDE bridge, KGlobalAccel registration, or portal session cleanup occurred because those live resources were not created.
+- Unsupported-session diagnostics: NOT RUN in this KDE session.
+- Notes: T062 remains incomplete. The next implementation step is a current-run KDE bridge that loads a temporary KWin script using `org.kde.kwin.Scripting`, registers shortcuts via KWin/KGlobalAccel, forwards trigger and active-window metadata back to the Rust runner over a current-run D-Bus object, and unloads the script plus D-Bus object during shutdown.
+
+### Run 2026-05-26: current-run KWin shortcut bridge smoke test
+
+- Signal Auras command: `timeout -s INT 5 cargo run -p signal-auras-cli -- run ./examples/poe2-hideout.lua`
+- Registered handle: `kde-kwin-script:signal-auras-3611656-1:F5`
+- KGlobalAccel cleanup check: `busctl --user call org.kde.kglobalaccel /component/kwin org.kde.kglobalaccel.Component allShortcutInfos | rg 'SignalAuras' || true`
+
+Observed output:
+
+```text
+startup script_path=./examples/poe2-hideout.lua
+script_validation result=ok
+effective_scope processes: poe2.exe
+provider selected=kde-plasma-wayland
+capability_probe result=ok
+hotkey_registered hotkey=F5 id=kde-kwin-script:signal-auras-3611656-1:F5
+final_summary reason=CtrlC elapsed_ms=4038 triggers=0 successes=0 failures=0 denials=0 permission_failures=0 scope_mismatches=0 capability_probe_successes=1 capability_probe_failures=0 ignored_events=0 active_process_matches=0 active_process_non_matches=0 metadata_unavailable=0 input_emitted=0 input_denied=0 kde_bridge_setups=0 kde_bridge_cleanups=0 cleanup_successes=0 cleanup_failures=0
+```
+
+- Global shortcut registration: PARTIAL PASS. The runner now loads a temporary KWin script and KGlobalAccel shows a real `SignalAuras_*` shortcut while the runner is active.
+- Ctrl-C cleanup: PASS for KGlobalAccel residue. After shutdown, `rg 'SignalAuras'` over KWin shortcut infos returns no entries.
+- Shortcut event delivery: NOT VERIFIED. Programmatic `invokeShortcut` did not emit a runner event through the KGlobalAccel signal listener in this session; physical keypress verification is still required, or the bridge needs a Rust D-Bus callback service backed by an async runtime.
+- Notes: T062 remains incomplete until desktop keypress event delivery, active-process decisions, and portal input are verified end-to-end.
+
+### Run 2026-05-26: KWin callback event and active-process non-match
+
+- Signal Auras command: `cargo run -p signal-auras-cli -- run ./examples/poe2-hideout.lua`
+- Trigger command: `busctl --user call org.kde.kglobalaccel /component/kwin org.kde.kglobalaccel.Component invokeShortcut s SignalAuras_4001005_1`
+- Cleanup check: `busctl --user call org.kde.kglobalaccel /component/kwin org.kde.kglobalaccel.Component allShortcutInfos | rg 'SignalAuras' || true`
+
+Observed output:
+
+```text
+startup script_path=./examples/poe2-hideout.lua
+script_validation result=ok
+effective_scope processes: poe2.exe
+provider selected=kde-plasma-wayland
+capability_probe result=ok
+hotkey_registered hotkey=F5 id=kde-kwin-script:signal-auras-4001005-1:F5
+denied_trigger hotkey=F5 reason=active process 'rustdesk' is outside configured scope
+final_summary reason=CtrlC elapsed_ms=42753 triggers=1 successes=0 failures=0 denials=1 permission_failures=0 scope_mismatches=1 capability_probe_successes=1 capability_probe_failures=0 ignored_events=0 active_process_matches=0 active_process_non_matches=1 metadata_unavailable=0 input_emitted=0 input_denied=0 kde_bridge_setups=0 kde_bridge_cleanups=0 cleanup_successes=0 cleanup_failures=0
+```
+
+- Shortcut event delivery: PASS for KWin callback delivery. The KWin script invoked the current-run Rust D-Bus callback and the runner counted one trigger.
+- Active-process non-match: PASS. KWin supplied active-window metadata and the runner denied the scoped macro because `rustdesk` did not match `poe2.exe`.
+- Ctrl-C cleanup: PASS for KGlobalAccel residue. The cleanup check returned no `SignalAuras` entries.
+- Remaining T062 gaps: active-process match with a matching app, real synthesized input emission through the RemoteDesktop portal, denied synthesized-input zero-emission behavior, and physical desktop keypress verification.
+
+### Run 2026-05-26: KWin callback active-process match
+
+- Signal Auras command: `cargo run -p signal-auras-cli -- run /tmp/signal-auras-kde-match.lua`
+- Temporary script scope: `rustdesk`
+- Trigger commands:
+  - `busctl --user call org.kde.kglobalaccel /component/kwin org.kde.kglobalaccel.Component invokeShortcut s SignalAuras_2217918_1`
+  - `busctl --user call org.signalAuras.Runner2217918 /org/signalAuras/Runner org.signalAuras.KWinBridge triggered sssss SignalAuras_2217918_1 RustDesk rustdesk rustdesk 1004576`
+- Cleanup check: `busctl --user call org.kde.kglobalaccel /component/kwin org.kde.kglobalaccel.Component allShortcutInfos | rg 'SignalAuras' || true`
+
+Observed output:
+
+```text
+startup script_path=/tmp/signal-auras-kde-match.lua
+script_validation result=ok
+effective_scope processes: rustdesk
+provider selected=kde-plasma-wayland
+capability_probe result=ok
+hotkey_registered hotkey=F5 id=kde-kwin-script:signal-auras-2217918-1:F5
+final_summary reason=CtrlC elapsed_ms=90757 triggers=2 successes=2 failures=0 denials=0 permission_failures=0 scope_mismatches=0 capability_probe_successes=1 capability_probe_failures=0 ignored_events=0 active_process_matches=2 active_process_non_matches=0 metadata_unavailable=0 input_emitted=0 input_denied=0 kde_bridge_setups=0 kde_bridge_cleanups=0 cleanup_successes=0 cleanup_failures=0
+```
+
+- Active-process match: PASS. KWin callback metadata matched the scoped `rustdesk` process.
+- Shortcut event delivery: PASS for KWin callback delivery through the current-run D-Bus callback.
+- Ctrl-C cleanup: PASS for KGlobalAccel residue. The cleanup check returned no `SignalAuras` entries.
+- Physical desktop keypress: NOT VERIFIED. No physical `F5` trigger was observed during the live waiting window; only D-Bus-triggered events were counted.
+
+### Run 2026-05-26: RemoteDesktop portal synthesized input
+
+- Signal Auras command: `cargo run -p signal-auras-cli -- run /tmp/signal-auras-kde-input.lua`
+- Temporary script scope: `rustdesk`
+- Temporary script macro: `text "sa"`
+- Trigger command: `busctl --user call org.kde.kglobalaccel /component/kwin org.kde.kglobalaccel.Component invokeShortcut s SignalAuras_2287141_1`
+- Cleanup check: `busctl --user call org.kde.kglobalaccel /component/kwin org.kde.kglobalaccel.Component allShortcutInfos | rg 'SignalAuras' || true`
+
+Observed output:
+
+```text
+startup script_path=/tmp/signal-auras-kde-input.lua
+script_validation result=ok
+effective_scope processes: rustdesk
+provider selected=kde-plasma-wayland
+capability_probe result=ok
+hotkey_registered hotkey=F5 id=kde-kwin-script:signal-auras-2287141-1:F5
+final_summary reason=CtrlC elapsed_ms=127963 triggers=1 successes=1 failures=0 denials=0 permission_failures=0 scope_mismatches=0 capability_probe_successes=1 capability_probe_failures=0 ignored_events=0 active_process_matches=1 active_process_non_matches=0 metadata_unavailable=0 input_emitted=1 input_denied=0 kde_bridge_setups=0 kde_bridge_cleanups=0 cleanup_successes=0 cleanup_failures=0
+```
+
+- Synthesized input success: PASS. The live runner opened the KDE RemoteDesktop portal path and reported one emitted input request.
+- Active-process match: PASS. The portal input was emitted only after the KWin callback reported a matching active process.
+- Ctrl-C cleanup: PASS for KGlobalAccel residue. The cleanup check returned no `SignalAuras` entries.
+- Physical desktop keypress: NOT VERIFIED. The observed portal input trigger used KGlobalAccel D-Bus invocation, not a hardware keypress.
+- Denied synthesized input emits zero input: NOT VERIFIED. The KDE portal permission-denial path was not exercised in this session.
+- T062 status: INCOMPLETE. Do not mark T062 complete until physical desktop-wide keypress delivery and denied-portal zero-emission behavior are verified manually.

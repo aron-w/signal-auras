@@ -98,6 +98,7 @@ pub struct RealWaylandAdapter {
     environment: Option<KdeEnvironment>,
     rejected_hotkeys: BTreeSet<String>,
     portal_session: Option<crate::portal::PortalInputSession>,
+    shortcut_bridge: Option<crate::kde_bridge::KwinShortcutBridge>,
 }
 
 impl RealWaylandAdapter {
@@ -111,6 +112,7 @@ impl RealWaylandAdapter {
             environment: Some(environment),
             rejected_hotkeys: BTreeSet::new(),
             portal_session: None,
+            shortcut_bridge: None,
         }
     }
 
@@ -131,6 +133,12 @@ impl RealWaylandAdapter {
     pub fn cleanup_report(&self) -> CleanupReport {
         CleanupReport::all_succeeded(self.registrations.len())
     }
+
+    pub fn next_shortcut_event(&mut self) -> Option<signal_auras_core::HotkeyId> {
+        self.shortcut_bridge
+            .as_mut()
+            .and_then(crate::kde_bridge::KwinShortcutBridge::next_shortcut_event)
+    }
 }
 
 impl ActiveProcessProvider for RealWaylandAdapter {
@@ -139,6 +147,9 @@ impl ActiveProcessProvider for RealWaylandAdapter {
     }
 
     fn active_process_context(&self) -> Result<ActiveProcessContext, DiagnosableError> {
+        if let Some(bridge) = &self.shortcut_bridge {
+            return Ok(bridge.active_process_context());
+        }
         Ok(ActiveProcessContext::unavailable(
             "active process metadata provider is unsupported",
         ))
@@ -159,12 +170,28 @@ impl HotkeyRegistrar for RealWaylandAdapter {
                 binding.hotkey.as_str(),
             ));
         }
-        let id = RegistrationId::new(format!("kde-{}", binding.hotkey.as_str()));
+        let id = if self.environment.is_some() {
+            RegistrationId::new(format!("kde-{}", binding.hotkey.as_str()))
+        } else {
+            if self.shortcut_bridge.is_none() {
+                self.shortcut_bridge = Some(crate::kde_bridge::KwinShortcutBridge::connect()?);
+            }
+            RegistrationId::new(
+                self.shortcut_bridge
+                    .as_mut()
+                    .expect("shortcut bridge was initialized")
+                    .register_shortcut(&binding)?,
+            )
+        };
         self.registrations.push(id.clone());
         Ok(id)
     }
 
     fn unregister_all(&mut self) -> Result<(), DiagnosableError> {
+        if let Some(bridge) = &mut self.shortcut_bridge {
+            let _ = bridge.unload()?;
+        }
+        self.shortcut_bridge = None;
         self.registrations.clear();
         Ok(())
     }
@@ -191,7 +218,11 @@ impl MacroExecutor for RealWaylandAdapter {
             return Err(error);
         }
         if self.portal_session.is_none() {
-            self.portal_session = Some(crate::portal::PortalInputSession::open());
+            self.portal_session = Some(if self.environment.is_some() {
+                crate::portal::PortalInputSession::open()
+            } else {
+                crate::portal::PortalInputSession::open_live()?
+            });
         }
         self.portal_session.as_ref().unwrap().synthesize(request)
     }

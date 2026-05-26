@@ -39,11 +39,35 @@ impl KdeServiceAvailability {
     }
 
     pub fn from_process_env() -> Self {
-        Self {
-            kwin: env_flag("SIGNAL_AURAS_KDE_KWIN"),
-            kglobalaccel: env_flag("SIGNAL_AURAS_KDE_GLOBAL_SHORTCUTS"),
-            portal: env_flag("SIGNAL_AURAS_KDE_PORTAL"),
+        if let Some(services) = Self::from_env_overrides() {
+            return services;
         }
+        Self::from_session_bus().unwrap_or_default()
+    }
+
+    pub fn from_env_overrides() -> Option<Self> {
+        let kwin = std::env::var("SIGNAL_AURAS_KDE_KWIN").ok();
+        let kglobalaccel = std::env::var("SIGNAL_AURAS_KDE_GLOBAL_SHORTCUTS").ok();
+        let portal = std::env::var("SIGNAL_AURAS_KDE_PORTAL").ok();
+        if kwin.is_none() && kglobalaccel.is_none() && portal.is_none() {
+            return None;
+        }
+        Some(Self {
+            kwin: kwin.as_deref().is_some_and(env_flag_value),
+            kglobalaccel: kglobalaccel.as_deref().is_some_and(env_flag_value),
+            portal: portal.as_deref().is_some_and(env_flag_value),
+        })
+    }
+
+    pub fn from_session_bus() -> Result<Self, DiagnosableError> {
+        let connection = zbus::blocking::Connection::session().map_err(dbus_probe_error)?;
+        let proxy = zbus::blocking::fdo::DBusProxy::new(&connection).map_err(dbus_probe_error)?;
+        Ok(Self {
+            kwin: name_has_owner(&proxy, "org.kde.KWin")?,
+            kglobalaccel: name_has_owner(&proxy, "org.kde.kglobalaccel")?,
+            portal: name_has_owner(&proxy, "org.freedesktop.portal.Desktop")?
+                && name_has_owner(&proxy, "org.freedesktop.impl.portal.desktop.kde")?,
+        })
     }
 }
 
@@ -216,8 +240,24 @@ fn session_error(message: impl Into<String>, source: impl Into<String>) -> Diagn
         .with_remediation("start Signal Auras from a KDE Plasma Wayland session")
 }
 
-fn env_flag(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "available"))
+fn name_has_owner(
+    proxy: &zbus::blocking::fdo::DBusProxy<'_>,
+    name: &'static str,
+) -> Result<bool, DiagnosableError> {
+    proxy
+        .name_has_owner(name.try_into().expect("static bus name is valid"))
+        .map_err(dbus_probe_error)
+}
+
+fn dbus_probe_error(error: impl std::fmt::Display) -> DiagnosableError {
+    DiagnosableError::new(
+        ErrorPhase::CapabilityProbe,
+        format!("failed to probe KDE session D-Bus services: {error}"),
+    )
+    .with_source("session-dbus")
+    .with_remediation("start Signal Auras inside the KDE Plasma Wayland user session")
+}
+
+fn env_flag_value(value: &str) -> bool {
+    matches!(value, "1" | "true" | "TRUE" | "yes" | "available")
 }

@@ -32,8 +32,7 @@ pub fn run_cli(
     let args = args.into_iter().collect::<Vec<_>>();
     let path = parse_run_args(&args)?;
     let mut adapter = RealWaylandAdapter::new();
-    let mut lifecycle = CtrlCShutdown::new();
-    start_real_runner_with_lifecycle(&path, prompt, &mut adapter, &mut lifecycle).map(|_| ())
+    start_live_real_runner(&path, prompt, &mut adapter).map(|_| ())
 }
 
 pub fn parse_run_args(args: &[String]) -> Result<PathBuf, DiagnosableError> {
@@ -216,6 +215,75 @@ where
     Ok(stats)
 }
 
+pub fn start_live_real_runner(
+    lua_file: &Path,
+    prompt: &mut impl ScopePrompt,
+    adapter: &mut RealWaylandAdapter,
+) -> Result<RuntimeStats, DiagnosableError> {
+    println!("startup script_path={}", lua_file.display());
+    let config = load_lua_file(lua_file)?;
+    println!("script_validation result=ok");
+
+    let scope = match config.scope.clone() {
+        Some(script_scope) => ScopeSelection::from_script(script_scope),
+        None => match prompt.resolve_missing_scope()?.into_scope()? {
+            Some(scope) => scope,
+            None => {
+                println!("scope_prompt result=cancelled");
+                return Ok(RuntimeStats::new());
+            }
+        },
+    };
+    println!("effective_scope {}", scope.describe());
+
+    let mut stats = RuntimeStats::new();
+    let bindings = config.bindings_for_scope(scope);
+    let required = CapabilitySet::for_bindings(&bindings);
+    println!("provider selected=kde-plasma-wayland");
+    let report = adapter.probe_capabilities(&required);
+    if let Some(error) = report.first_blocking_error(&required) {
+        stats.record_capability_probe_failure();
+        stats.record_permission_failure();
+        println!("capability_probe result=failed error={error}");
+        return Err(error);
+    }
+    stats.record_capability_probe_success();
+    println!("capability_probe result=ok");
+
+    for binding in &bindings {
+        stats.record_registration_attempt();
+        match adapter.register(binding.clone()) {
+            Ok(id) => {
+                stats.record_registration_success();
+                println!(
+                    "hotkey_registered hotkey={} id={}",
+                    binding.hotkey.as_str(),
+                    id.as_str()
+                );
+            }
+            Err(error) => {
+                stats.record_registration_failure();
+                cleanup_after_error(adapter, ErrorPhase::Registration)?;
+                return Err(error);
+            }
+        }
+    }
+
+    let shutdown_reason = match run_live_real_lifecycle(&bindings, adapter, &mut stats) {
+        Ok(reason) => reason,
+        Err(error) => {
+            println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
+            cleanup_after_error(adapter, ErrorPhase::Shutdown)?;
+            return Err(error);
+        }
+    };
+
+    println!("{}", stats.render_summary(shutdown_reason));
+    adapter.cancel_pending()?;
+    adapter.unregister_all()?;
+    Ok(stats)
+}
+
 pub trait RunnerLifecycle {
     fn next_event(&mut self) -> Result<RunnerEvent, DiagnosableError>;
 }
@@ -323,6 +391,34 @@ where
     }
 }
 
+fn run_live_real_lifecycle(
+    bindings: &[HotkeyBinding],
+    adapter: &mut RealWaylandAdapter,
+    stats: &mut RuntimeStats,
+) -> Result<ShutdownReason, DiagnosableError> {
+    CTRL_C_REQUESTED.store(false, Ordering::SeqCst);
+    install_ctrl_c_handler();
+    let mut scheduler = MacroScheduler::default();
+    loop {
+        if CTRL_C_REQUESTED.load(Ordering::SeqCst) {
+            return Ok(ShutdownReason::CtrlC);
+        }
+        if let Some(hotkey) = adapter.next_shortcut_event() {
+            if let Some(binding) = bindings.iter().find(|binding| binding.hotkey == hotkey) {
+                let active_context = adapter.active_process_context()?;
+                handle_trigger_with_context(
+                    binding,
+                    active_context,
+                    adapter,
+                    &mut scheduler,
+                    stats,
+                )?;
+            }
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn cleanup_after_error(
     registrar: &mut impl HotkeyRegistrar,
     phase: ErrorPhase,
@@ -343,8 +439,21 @@ where
     P: ActiveProcessProvider,
     E: MacroExecutor,
 {
-    stats.record_trigger(binding.hotkey.as_str());
     let active_context = active_process_provider.active_process_context()?;
+    handle_trigger_with_context(binding, active_context, executor, scheduler, stats)
+}
+
+fn handle_trigger_with_context<E>(
+    binding: &HotkeyBinding,
+    active_context: signal_auras_core::ActiveProcessContext,
+    executor: &mut E,
+    scheduler: &mut MacroScheduler,
+    stats: &mut RuntimeStats,
+) -> Result<(), DiagnosableError>
+where
+    E: MacroExecutor,
+{
+    stats.record_trigger(binding.hotkey.as_str());
     match binding.scope.decide_context(&active_context) {
         ScopeDecision::Allowed => {
             stats.record_active_process_match();
