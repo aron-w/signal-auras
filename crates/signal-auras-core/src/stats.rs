@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+const MOTION_LATENCY_BUCKETS_MS: [u64; 9] = [1, 2, 5, 10, 20, 50, 100, 250, u64::MAX];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShutdownReason {
     CtrlC,
@@ -30,6 +32,18 @@ pub struct RuntimeStats {
     pub synthesized_input_denied_count: u64,
     pub consumed_trigger_event_count: u64,
     pub passthrough_trigger_event_count: u64,
+    pub motion_input_event_count: u64,
+    pub motion_repeat_tick_count: u64,
+    pub motion_repeat_cancel_count: u64,
+    pub max_motion_dispatch_latency_ms: u64,
+    motion_dispatch_latency_total_ms: u64,
+    motion_dispatch_latency_buckets: [u64; MOTION_LATENCY_BUCKETS_MS.len()],
+    pub event_loop_wakeup_count: u64,
+    pub hotplug_add_count: u64,
+    pub hotplug_remove_count: u64,
+    pub output_queue_failure_count: u64,
+    pub cancelled_macro_run_count: u64,
+    pub max_output_queue_depth: u64,
     pub kde_bridge_setup_count: u64,
     pub kde_bridge_cleanup_count: u64,
     pub cleanup_success_count: u64,
@@ -65,6 +79,18 @@ impl RuntimeStats {
             synthesized_input_denied_count: 0,
             consumed_trigger_event_count: 0,
             passthrough_trigger_event_count: 0,
+            motion_input_event_count: 0,
+            motion_repeat_tick_count: 0,
+            motion_repeat_cancel_count: 0,
+            max_motion_dispatch_latency_ms: 0,
+            motion_dispatch_latency_total_ms: 0,
+            motion_dispatch_latency_buckets: [0; MOTION_LATENCY_BUCKETS_MS.len()],
+            event_loop_wakeup_count: 0,
+            hotplug_add_count: 0,
+            hotplug_remove_count: 0,
+            output_queue_failure_count: 0,
+            cancelled_macro_run_count: 0,
+            max_output_queue_depth: 0,
             kde_bridge_setup_count: 0,
             kde_bridge_cleanup_count: 0,
             cleanup_success_count: 0,
@@ -139,6 +165,84 @@ impl RuntimeStats {
         self.passthrough_trigger_event_count += 1;
     }
 
+    pub fn record_motion_input_event(&mut self, dispatch_latency_ms: u64) {
+        self.motion_input_event_count += 1;
+        self.max_motion_dispatch_latency_ms =
+            self.max_motion_dispatch_latency_ms.max(dispatch_latency_ms);
+        self.motion_dispatch_latency_total_ms += dispatch_latency_ms;
+        let bucket = MOTION_LATENCY_BUCKETS_MS
+            .iter()
+            .position(|upper_bound| dispatch_latency_ms <= *upper_bound)
+            .unwrap_or(MOTION_LATENCY_BUCKETS_MS.len() - 1);
+        self.motion_dispatch_latency_buckets[bucket] += 1;
+    }
+
+    pub fn average_motion_dispatch_latency_ms(&self) -> u64 {
+        if self.motion_input_event_count == 0 {
+            return 0;
+        }
+        self.motion_dispatch_latency_total_ms / self.motion_input_event_count
+    }
+
+    pub fn motion_dispatch_latency_p95_ms(&self) -> u64 {
+        self.motion_dispatch_latency_percentile_ms(95)
+    }
+
+    pub fn motion_dispatch_latency_p99_ms(&self) -> u64 {
+        self.motion_dispatch_latency_percentile_ms(99)
+    }
+
+    fn motion_dispatch_latency_percentile_ms(&self, percentile: u64) -> u64 {
+        if self.motion_input_event_count == 0 {
+            return 0;
+        }
+        let rank = (self.motion_input_event_count * percentile).div_ceil(100);
+        let mut seen = 0;
+        for (bucket, upper_bound) in self
+            .motion_dispatch_latency_buckets
+            .iter()
+            .zip(MOTION_LATENCY_BUCKETS_MS)
+        {
+            seen += *bucket;
+            if seen >= rank {
+                return upper_bound;
+            }
+        }
+        self.max_motion_dispatch_latency_ms
+    }
+
+    pub fn record_motion_repeat_tick(&mut self) {
+        self.motion_repeat_tick_count += 1;
+    }
+
+    pub fn record_motion_repeat_cancel(&mut self) {
+        self.motion_repeat_cancel_count += 1;
+    }
+
+    pub fn record_event_loop_wakeup(&mut self) {
+        self.event_loop_wakeup_count += 1;
+    }
+
+    pub fn record_hotplug_add(&mut self) {
+        self.hotplug_add_count += 1;
+    }
+
+    pub fn record_hotplug_remove(&mut self) {
+        self.hotplug_remove_count += 1;
+    }
+
+    pub fn record_output_queue_failure(&mut self) {
+        self.output_queue_failure_count += 1;
+    }
+
+    pub fn record_cancelled_macro_runs(&mut self, count: u64) {
+        self.cancelled_macro_run_count += count;
+    }
+
+    pub fn record_output_queue_depth(&mut self, depth: u64) {
+        self.max_output_queue_depth = self.max_output_queue_depth.max(depth);
+    }
+
     pub fn record_kde_bridge_setup(&mut self) {
         self.kde_bridge_setup_count += 1;
     }
@@ -157,7 +261,7 @@ impl RuntimeStats {
 
     pub fn render_summary(&self, reason: ShutdownReason) -> String {
         format!(
-            "final_summary reason={reason:?} elapsed_ms={} triggers={} successes={} failures={} denials={} permission_failures={} scope_mismatches={} capability_probe_successes={} capability_probe_failures={} ignored_events={} active_process_matches={} active_process_non_matches={} metadata_unavailable={} input_emitted={} input_denied={} consumed_events={} passthrough_events={} kde_bridge_setups={} kde_bridge_cleanups={} cleanup_successes={} cleanup_failures={}",
+            "final_summary reason={reason:?} elapsed_ms={} triggers={} successes={} failures={} denials={} permission_failures={} scope_mismatches={} capability_probe_successes={} capability_probe_failures={} ignored_events={} active_process_matches={} active_process_non_matches={} metadata_unavailable={} input_emitted={} input_denied={} consumed_events={} passthrough_events={} motion_inputs={} repeat_ticks={} repeat_cancels={} avg_motion_dispatch_latency_ms={} p95_motion_dispatch_latency_ms={} p99_motion_dispatch_latency_ms={} max_motion_dispatch_latency_ms={} event_loop_wakeups={} hotplug_adds={} hotplug_removes={} output_queue_failures={} cancelled_macro_runs={} max_output_queue_depth={} kde_bridge_setups={} kde_bridge_cleanups={} cleanup_successes={} cleanup_failures={}",
             self.elapsed_runtime().as_millis(),
             self.total_triggers(),
             self.macro_success_count,
@@ -175,6 +279,19 @@ impl RuntimeStats {
             self.synthesized_input_denied_count,
             self.consumed_trigger_event_count,
             self.passthrough_trigger_event_count,
+            self.motion_input_event_count,
+            self.motion_repeat_tick_count,
+            self.motion_repeat_cancel_count,
+            self.average_motion_dispatch_latency_ms(),
+            self.motion_dispatch_latency_p95_ms(),
+            self.motion_dispatch_latency_p99_ms(),
+            self.max_motion_dispatch_latency_ms,
+            self.event_loop_wakeup_count,
+            self.hotplug_add_count,
+            self.hotplug_remove_count,
+            self.output_queue_failure_count,
+            self.cancelled_macro_run_count,
+            self.max_output_queue_depth,
             self.kde_bridge_setup_count,
             self.kde_bridge_cleanup_count,
             self.cleanup_success_count,
@@ -235,5 +352,28 @@ mod tests {
         assert!(summary.contains("denials=1"));
         assert!(summary.contains("permission_failures=1"));
         assert!(summary.contains("scope_mismatches=1"));
+    }
+
+    #[test]
+    fn motion_latency_metrics_report_average_p95_and_p99() {
+        let mut stats = RuntimeStats::new();
+        for _ in 0..95 {
+            stats.record_motion_input_event(20);
+        }
+        for _ in 0..4 {
+            stats.record_motion_input_event(50);
+        }
+        stats.record_motion_input_event(100);
+
+        assert_eq!(stats.motion_input_event_count, 100);
+        assert_eq!(stats.average_motion_dispatch_latency_ms(), 22);
+        assert_eq!(stats.motion_dispatch_latency_p95_ms(), 20);
+        assert_eq!(stats.motion_dispatch_latency_p99_ms(), 50);
+        assert_eq!(stats.max_motion_dispatch_latency_ms, 100);
+
+        let summary = stats.render_summary(ShutdownReason::CtrlC);
+        assert!(summary.contains("avg_motion_dispatch_latency_ms=22"));
+        assert!(summary.contains("p95_motion_dispatch_latency_ms=20"));
+        assert!(summary.contains("p99_motion_dispatch_latency_ms=50"));
     }
 }

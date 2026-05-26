@@ -43,6 +43,7 @@
             kdePackages.kwin
             kdePackages.qttools
             kdePackages.xdg-desktop-portal-kde
+            systemd
           ];
 
           shellHook = ''

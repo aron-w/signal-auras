@@ -402,6 +402,68 @@ fn lifecycle_executes_motion_sequence_and_repeat_ticks_until_release() {
     assert_eq!(stats.total_triggers(), 2);
     assert_eq!(stats.consumed_trigger_event_count, 1);
     assert_eq!(stats.passthrough_trigger_event_count, 1);
+    assert_eq!(stats.motion_input_event_count, 7);
+    assert_eq!(stats.motion_repeat_tick_count, 1);
+    assert_eq!(stats.motion_repeat_cancel_count, 1);
+    assert_eq!(stats.max_motion_dispatch_latency_ms, 0);
+}
+
+#[test]
+fn lifecycle_does_not_emit_repeat_after_cancellation_release() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          leader = "F13",
+          motions = {
+            {
+              trigger = { "<Leader>", "<LClick>", "<LClick>" },
+              mode = "passthrough",
+              repeat = {
+                while_held = { "<Leader>", "<LClick>" },
+                interval_ms = { min = 50, max = 80 },
+                macro = macro { mouse_click "left" },
+              },
+            },
+          },
+        }
+        "#,
+    );
+    let mut prompt = Prompt::new(ConsentDecision::ExplicitGlobalConfirmed);
+    let mut registrar = Registrar::default();
+    let active = Active(Some(ProcessName::parse("poe2.exe").unwrap()));
+    let mut executor = Executor::default();
+    let repeat_trigger = MotionTrigger::parse(["<Leader>", "<LClick>", "<LClick>"]).unwrap();
+    let mut lifecycle = ScriptedLifecycle::new(vec![
+        RunnerEvent::MotionInput(MotionInputEvent::pressed(MotionToken::Leader)),
+        RunnerEvent::MotionInput(MotionInputEvent::pressed(MotionToken::MouseButton(
+            MouseButton::Left,
+        ))),
+        RunnerEvent::MotionInput(MotionInputEvent::released(MotionToken::MouseButton(
+            MouseButton::Left,
+        ))),
+        RunnerEvent::MotionInput(MotionInputEvent::pressed(MotionToken::MouseButton(
+            MouseButton::Left,
+        ))),
+        RunnerEvent::MotionInput(MotionInputEvent::released(MotionToken::MouseButton(
+            MouseButton::Left,
+        ))),
+        RunnerEvent::MotionRepeatTick(repeat_trigger),
+        RunnerEvent::Shutdown(signal_auras_core::ShutdownReason::CtrlC),
+    ]);
+
+    let stats = start_runner_with_lifecycle(
+        &lua_file,
+        &mut prompt,
+        &mut registrar,
+        &active,
+        &mut executor,
+        &mut lifecycle,
+    )
+    .unwrap();
+
+    assert_eq!(executor.actions, 0);
+    assert_eq!(stats.motion_repeat_cancel_count, 1);
+    assert_eq!(stats.motion_repeat_tick_count, 0);
 }
 
 #[test]

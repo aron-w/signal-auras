@@ -1,5 +1,5 @@
 return {
-  scope = { processes = { "steam_app_2694490" } },
+  -- scope = { processes = { "steam_app_2694490" } },
   input_provider = {
     backend = "evdev",
     mode = "observe",

@@ -2,16 +2,22 @@ use crate::prompt::{stdin_is_interactive, ScopePrompt, TerminalPrompt};
 use signal_auras_core::{
     execute_plan_with_inter_action_delay, ActiveProcessProvider, BindingMode, BindingTrigger,
     CapabilityKind, CapabilitySet, DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyId,
-    HotkeyRegistrar, MacroDefinition, MacroExecutor, MacroScheduler, MotionInputEvent,
-    MotionInputState, MotionRuntime, MotionRuntimeEvent, MotionTrigger, RuntimeMotion,
-    RuntimeStats, ScopeDecision, ScopeSelection, ShutdownReason, SynthesizedInputRequest,
+    HotkeyRegistrar, MacroDefinition, MacroExecutor, MacroRunId, MacroRunPoll, MacroRunState,
+    MacroScheduler, MotionInputEvent, MotionInputState, MotionRuntime, MotionRuntimeEvent,
+    MotionTrigger, RuntimeMotion, RuntimeStats, ScopeDecision, ScopeSelection, ShutdownReason,
+    SynthesizedInputRequest,
 };
 use signal_auras_lua::load_lua_file;
-use signal_auras_wayland::RealWaylandAdapter;
+use signal_auras_wayland::{
+    event_loop::{RuntimeSignalFd, RuntimeTimerFd},
+    RealWaylandAdapter,
+};
 use std::{
+    collections::BTreeSet,
     io,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
+    sync::Once,
     thread,
     time::{Duration, Instant},
 };
@@ -35,6 +41,7 @@ pub fn run_cli(
 ) -> Result<(), DiagnosableError> {
     let args = args.into_iter().collect::<Vec<_>>();
     let options = parse_run_args(&args)?;
+    init_runtime_logging(options.log);
     let mut adapter = RealWaylandAdapter::new();
     start_live_real_runner_with_options(&options.lua_file, prompt, &mut adapter, options.log)
         .map(|_| ())
@@ -70,7 +77,7 @@ impl RuntimeLog {
 
     fn debug(self, message: impl AsRef<str>) {
         if self.verbose {
-            println!("{}", self.render("DEBUG", message.as_ref()));
+            tracing::debug!("{}", self.render("DEBUG", message.as_ref()));
         }
     }
 
@@ -84,6 +91,26 @@ impl RuntimeLog {
         let timestamp = paint(self.color, "\x1b[2m", timestamp);
         format!("{timestamp}  {level}  {event}  {rest}")
     }
+}
+
+static TRACING_INIT: Once = Once::new();
+
+fn init_runtime_logging(log: RuntimeLog) {
+    TRACING_INIT.call_once(|| {
+        let filter = if log.verbose {
+            "signal_auras_cli=debug,signal_auras_wayland=debug"
+        } else {
+            "signal_auras_cli=info,signal_auras_wayland=warn"
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(log.color)
+            .with_target(false)
+            .with_level(false)
+            .with_writer(std::io::stderr)
+            .finish();
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    });
 }
 
 pub fn parse_run_args(args: &[String]) -> Result<RunOptions, DiagnosableError> {
@@ -348,6 +375,7 @@ pub fn start_live_real_runner_with_options(
     adapter: &mut RealWaylandAdapter,
     log: RuntimeLog,
 ) -> Result<RuntimeStats, DiagnosableError> {
+    init_runtime_logging(log);
     println!("startup script_path={}", lua_file.display());
     let config = load_lua_file(lua_file)?;
     println!("script_validation result=ok");
@@ -568,6 +596,7 @@ where
                 }
             }
             RunnerEvent::MotionInput(event) => {
+                stats.record_motion_input_event(0);
                 for event in motion_runtime.handle_input(event) {
                     handle_motion_runtime_event(
                         event,
@@ -608,9 +637,9 @@ fn run_live_real_lifecycle(
     stats: &mut RuntimeStats,
     log: RuntimeLog,
 ) -> Result<ShutdownReason, DiagnosableError> {
-    CTRL_C_REQUESTED.store(false, Ordering::SeqCst);
-    install_ctrl_c_handler();
-    let mut scheduler = MacroScheduler::default();
+    let mut signal_fd = RuntimeSignalFd::sigint()?;
+    let timer_fd = RuntimeTimerFd::new()?;
+    let mut macro_queue = LiveMacroQueue::default();
     let mut motion_runtime =
         MotionRuntime::new(motions.iter().map(|motion| motion.definition.clone()));
     let mut repeat_ticks = motions
@@ -625,9 +654,8 @@ fn run_live_real_lifecycle(
         .collect::<Vec<_>>();
     let mut last_repeat_ticks = std::collections::BTreeMap::new();
     loop {
-        if CTRL_C_REQUESTED.load(Ordering::SeqCst) {
-            return Ok(ShutdownReason::CtrlC);
-        }
+        stats.record_event_loop_wakeup();
+        macro_queue.drive_ready(adapter, stats)?;
         if let Some(hotkey) = adapter.next_shortcut_event() {
             log.debug(format!(
                 "event=shortcut_received hotkey={}",
@@ -649,57 +677,56 @@ fn run_live_real_lifecycle(
                     active_context.app_id.as_deref().unwrap_or("none"),
                     active_context.window_class.as_deref().unwrap_or("none")
                 ));
-                handle_trigger_with_context(
-                    binding,
-                    active_context,
-                    adapter,
-                    &mut scheduler,
-                    stats,
-                )?;
+                schedule_live_binding(binding, active_context, &mut macro_queue, stats)?;
             }
         }
-        while let Some(event) = adapter.next_motion_input_event()? {
-            log.debug(format!(
-                "event=motion_input token={} state={}",
-                event.token.describe(),
-                motion_input_state_label(event.state)
-            ));
-            for event in motion_runtime.handle_input(event) {
-                match &event {
-                    MotionRuntimeEvent::Triggered {
-                        trigger,
-                        starts_repeat,
-                    } => log.debug(format!(
-                        "event=motion_triggered trigger={} starts_repeat={starts_repeat}",
-                        trigger_label_for_log(trigger)
-                    )),
-                    MotionRuntimeEvent::RepeatCancelled { trigger } => log.debug(format!(
-                        "event=motion_repeat_cancelled trigger={}",
-                        trigger_label_for_log(trigger)
-                    )),
-                }
-                let active_context = adapter.active_process_context()?;
-                log.debug(format!(
-                    "event=active_process_context confidence={:?} visible_name={} app_id={} window_class={}",
-                    active_context.confidence,
-                    active_context
-                        .visible_name
-                        .as_ref()
-                        .map(signal_auras_core::ProcessName::as_str)
-                        .unwrap_or("none"),
-                    active_context.app_id.as_deref().unwrap_or("none"),
-                    active_context.window_class.as_deref().unwrap_or("none")
-                ));
-                handle_motion_runtime_event_with_context(
+        let wait_timeout =
+            next_live_wait_timeout(&repeat_ticks, &last_repeat_ticks, &motion_runtime)
+                .min(macro_queue.next_wait_timeout());
+        timer_fd.arm_after(wait_timeout)?;
+        let runtime_fds = [signal_fd.as_raw_fd(), timer_fd.as_raw_fd()];
+        match adapter.wait_next_motion_input_or_runtime_fd(
+            wait_timeout.min(Duration::from_millis(50)),
+            &runtime_fds,
+        )? {
+            signal_auras_wayland::evdev::EvdevWaitOutcome::Motion(event) => {
+                handle_observed_motion_input(
                     event,
                     motions,
-                    active_context,
                     adapter,
-                    &mut scheduler,
+                    &mut macro_queue,
+                    &mut motion_runtime,
                     stats,
+                    log,
                 )?;
             }
+            signal_auras_wayland::evdev::EvdevWaitOutcome::RuntimeFd(fd)
+                if fd == signal_fd.as_raw_fd() =>
+            {
+                if signal_fd.drain()? {
+                    return Ok(ShutdownReason::CtrlC);
+                }
+            }
+            signal_auras_wayland::evdev::EvdevWaitOutcome::RuntimeFd(fd)
+                if fd == timer_fd.as_raw_fd() =>
+            {
+                timer_fd.drain()?;
+            }
+            signal_auras_wayland::evdev::EvdevWaitOutcome::RuntimeFd(_) => {}
+            signal_auras_wayland::evdev::EvdevWaitOutcome::Timeout => {}
         }
+        while let Some(event) = adapter.wait_next_motion_input_event(Duration::ZERO)? {
+            handle_observed_motion_input(
+                event,
+                motions,
+                adapter,
+                &mut macro_queue,
+                &mut motion_runtime,
+                stats,
+                log,
+            )?;
+        }
+        macro_queue.drive_ready(adapter, stats)?;
         let now = Instant::now();
         for (trigger, interval_ms) in &mut repeat_ticks {
             if !motion_runtime.repeat_is_active(trigger) {
@@ -730,23 +757,203 @@ fn run_live_real_lifecycle(
                         active_context.app_id.as_deref().unwrap_or("none"),
                         active_context.window_class.as_deref().unwrap_or("none")
                     ));
-                    handle_motion_repeat_tick_with_context(
+                    schedule_live_motion_repeat_tick(
                         motion,
                         active_context,
-                        adapter,
-                        &mut scheduler,
+                        &mut macro_queue,
                         stats,
                     )?;
                 }
                 last_repeat_ticks.insert(trigger.clone(), now);
             }
         }
-        thread::sleep(Duration::from_millis(25));
+        macro_queue.drive_ready(adapter, stats)?;
     }
 }
 
 fn trigger_label_for_log(trigger: &MotionTrigger) -> String {
     trigger.describe().replace(' ', "/")
+}
+
+#[derive(Default)]
+struct LiveMacroQueue {
+    next_id: u64,
+    active_triggers: BTreeSet<String>,
+    runs: Vec<LiveMacroRun>,
+}
+
+struct LiveMacroRun {
+    trigger_label: String,
+    state: MacroRunState,
+}
+
+impl LiveMacroQueue {
+    fn schedule(
+        &mut self,
+        trigger_label: String,
+        definition: &MacroDefinition,
+        inter_action_delay_ms: u64,
+        stats: &mut RuntimeStats,
+    ) -> Result<MacroRunId, DiagnosableError> {
+        if !self.active_triggers.insert(trigger_label.clone()) {
+            stats.denied_action_count += 1;
+            return Err(DiagnosableError::new(
+                ErrorPhase::Trigger,
+                format!("macro for '{trigger_label}' is already running"),
+            ));
+        }
+        self.next_id += 1;
+        let id = MacroRunId::new(self.next_id);
+        self.runs.push(LiveMacroRun {
+            trigger_label,
+            state: MacroRunState::new(id, definition, inter_action_delay_ms, Instant::now()),
+        });
+        stats.record_output_queue_depth(self.runs.len() as u64);
+        Ok(id)
+    }
+
+    fn cancel_repeats(&mut self) -> usize {
+        let mut cancelled = 0;
+        for run in &mut self.runs {
+            if run.trigger_label.ends_with(" repeat") && !run.state.is_cancelled() {
+                run.state.cancel();
+                cancelled += 1;
+            }
+        }
+        cancelled
+    }
+
+    fn next_wait_timeout(&self) -> Duration {
+        let now = Instant::now();
+        self.runs
+            .iter()
+            .filter_map(|run| run.state.next_deadline())
+            .map(|deadline| deadline.saturating_duration_since(now))
+            .min()
+            .unwrap_or_else(|| Duration::from_millis(50))
+    }
+
+    fn drive_ready(
+        &mut self,
+        executor: &mut impl MacroExecutor,
+        stats: &mut RuntimeStats,
+    ) -> Result<(), DiagnosableError> {
+        let now = Instant::now();
+        let mut index = 0;
+        while index < self.runs.len() {
+            match self.runs[index].state.poll(now) {
+                MacroRunPoll::Ready(request) => {
+                    match executor.execute_input_request(request)? {
+                        signal_auras_core::InputEmission::Emitted => {
+                            stats.record_synthesized_input_emitted();
+                        }
+                        signal_auras_core::InputEmission::Denied => {
+                            stats.record_synthesized_input_denied();
+                            return Err(DiagnosableError::new(
+                                ErrorPhase::MacroExecution,
+                                "synthesized input was denied",
+                            ));
+                        }
+                        signal_auras_core::InputEmission::Failed => {
+                            return Err(DiagnosableError::new(
+                                ErrorPhase::MacroExecution,
+                                "synthesized input failed",
+                            ));
+                        }
+                        signal_auras_core::InputEmission::Cancelled => {
+                            return Err(DiagnosableError::new(
+                                ErrorPhase::Shutdown,
+                                "synthesized input was cancelled",
+                            ));
+                        }
+                    }
+                    index += 1;
+                }
+                MacroRunPoll::Pending(_) => index += 1,
+                MacroRunPoll::Complete => {
+                    let run = self.runs.remove(index);
+                    self.active_triggers.remove(&run.trigger_label);
+                    stats.macro_success_count += 1;
+                }
+                MacroRunPoll::Cancelled => {
+                    let run = self.runs.remove(index);
+                    self.active_triggers.remove(&run.trigger_label);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn next_live_wait_timeout(
+    repeat_ticks: &[(MotionTrigger, u64)],
+    last_repeat_ticks: &std::collections::BTreeMap<MotionTrigger, Instant>,
+    motion_runtime: &MotionRuntime,
+) -> Duration {
+    let mut timeout = Duration::from_millis(50);
+    let now = Instant::now();
+    for (trigger, interval_ms) in repeat_ticks {
+        if !motion_runtime.repeat_is_active(trigger) {
+            continue;
+        }
+        let due_in = match last_repeat_ticks.get(trigger) {
+            Some(last_tick) => {
+                let interval = Duration::from_millis(*interval_ms);
+                interval.saturating_sub(now.saturating_duration_since(*last_tick))
+            }
+            None => Duration::ZERO,
+        };
+        timeout = timeout.min(due_in);
+    }
+    timeout
+}
+
+fn handle_observed_motion_input(
+    observed: signal_auras_wayland::evdev::ObservedMotionInputEvent,
+    motions: &[RuntimeMotion],
+    adapter: &mut RealWaylandAdapter,
+    macro_queue: &mut LiveMacroQueue,
+    motion_runtime: &mut MotionRuntime,
+    stats: &mut RuntimeStats,
+    log: RuntimeLog,
+) -> Result<(), DiagnosableError> {
+    let latency_ms = observed.observed_at.elapsed().as_millis() as u64;
+    stats.record_motion_input_event(latency_ms);
+    log.debug(format!(
+        "event=motion_input token={} state={} source={} dispatch_latency_ms={latency_ms}",
+        observed.event.token.describe(),
+        motion_input_state_label(observed.event.state),
+        observed.source.display()
+    ));
+    for event in motion_runtime.handle_input(observed.event) {
+        match &event {
+            MotionRuntimeEvent::Triggered {
+                trigger,
+                starts_repeat,
+            } => log.debug(format!(
+                "event=motion_triggered trigger={} starts_repeat={starts_repeat}",
+                trigger_label_for_log(trigger)
+            )),
+            MotionRuntimeEvent::RepeatCancelled { trigger } => log.debug(format!(
+                "event=motion_repeat_cancelled trigger={}",
+                trigger_label_for_log(trigger)
+            )),
+        }
+        let active_context = adapter.active_process_context()?;
+        log.debug(format!(
+            "event=active_process_context confidence={:?} visible_name={} app_id={} window_class={}",
+            active_context.confidence,
+            active_context
+                .visible_name
+                .as_ref()
+                .map(signal_auras_core::ProcessName::as_str)
+                .unwrap_or("none"),
+            active_context.app_id.as_deref().unwrap_or("none"),
+            active_context.window_class.as_deref().unwrap_or("none")
+        ));
+        schedule_live_motion_runtime_event(event, motions, active_context, macro_queue, stats)?;
+    }
+    Ok(())
 }
 
 fn motion_input_state_label(state: MotionInputState) -> &'static str {
@@ -763,6 +970,140 @@ fn cleanup_after_error(
     registrar.unregister_all().map_err(|error| {
         DiagnosableError::new(phase, format!("cleanup failed after runner error: {error}"))
     })
+}
+
+fn schedule_live_binding(
+    binding: &HotkeyBinding,
+    active_context: signal_auras_core::ActiveProcessContext,
+    macro_queue: &mut LiveMacroQueue,
+    stats: &mut RuntimeStats,
+) -> Result<(), DiagnosableError> {
+    let trigger_label = binding.trigger_label();
+    stats.record_trigger(&trigger_label);
+    match binding.mode {
+        BindingMode::Consume => stats.record_consumed_trigger_event(),
+        BindingMode::Passthrough => stats.record_passthrough_trigger_event(),
+    }
+    match binding.scope.decide_context(&active_context) {
+        ScopeDecision::Allowed => {
+            stats.record_active_process_match();
+            macro_queue.schedule(trigger_label, &binding.macro_definition, 0, stats)?;
+        }
+        ScopeDecision::Denied { reason } => {
+            stats.denied_action_count += 1;
+            stats.scope_mismatch_count += 1;
+            stats.record_active_process_non_match();
+            if active_context.matchable_name().is_none() {
+                stats.record_metadata_unavailable();
+            }
+            println!("denied_trigger hotkey={} reason={reason}", trigger_label);
+        }
+    }
+    Ok(())
+}
+
+fn schedule_live_motion_runtime_event(
+    event: MotionRuntimeEvent,
+    motions: &[RuntimeMotion],
+    active_context: signal_auras_core::ActiveProcessContext,
+    macro_queue: &mut LiveMacroQueue,
+    stats: &mut RuntimeStats,
+) -> Result<(), DiagnosableError> {
+    match event {
+        MotionRuntimeEvent::Triggered { trigger, .. } => {
+            let Some(motion) = motions
+                .iter()
+                .find(|motion| motion.definition.trigger == trigger)
+            else {
+                return Ok(());
+            };
+            schedule_live_motion_trigger(motion, active_context, macro_queue, stats)
+        }
+        MotionRuntimeEvent::RepeatCancelled { trigger } => {
+            stats.record_motion_repeat_cancel();
+            let cancelled = macro_queue.cancel_repeats();
+            stats.record_cancelled_macro_runs(cancelled as u64);
+            println!(
+                "motion_repeat_cancelled trigger={} queued_macros_cancelled={cancelled}",
+                trigger.describe()
+            );
+            Ok(())
+        }
+    }
+}
+
+fn schedule_live_motion_trigger(
+    motion: &RuntimeMotion,
+    active_context: signal_auras_core::ActiveProcessContext,
+    macro_queue: &mut LiveMacroQueue,
+    stats: &mut RuntimeStats,
+) -> Result<(), DiagnosableError> {
+    let trigger_label = motion.definition.trigger.describe();
+    stats.record_trigger(&trigger_label);
+    match motion.definition.mode {
+        BindingMode::Consume => stats.record_consumed_trigger_event(),
+        BindingMode::Passthrough => stats.record_passthrough_trigger_event(),
+    }
+    match motion.scope.decide_context(&active_context) {
+        ScopeDecision::Allowed => {
+            stats.record_active_process_match();
+            if let Some(macro_definition) = &motion.definition.macro_definition {
+                macro_queue.schedule(
+                    trigger_label,
+                    macro_definition,
+                    motion.definition.inter_action_delay_ms,
+                    stats,
+                )?;
+            }
+        }
+        ScopeDecision::Denied { reason } => {
+            stats.denied_action_count += 1;
+            stats.scope_mismatch_count += 1;
+            stats.record_active_process_non_match();
+            if active_context.matchable_name().is_none() {
+                stats.record_metadata_unavailable();
+            }
+            println!("denied_motion trigger={} reason={reason}", trigger_label);
+        }
+    }
+    Ok(())
+}
+
+fn schedule_live_motion_repeat_tick(
+    motion: &RuntimeMotion,
+    active_context: signal_auras_core::ActiveProcessContext,
+    macro_queue: &mut LiveMacroQueue,
+    stats: &mut RuntimeStats,
+) -> Result<(), DiagnosableError> {
+    let Some(repeat) = &motion.definition.repeat else {
+        return Ok(());
+    };
+    let trigger_label = format!("{} repeat", motion.definition.trigger.describe());
+    match motion.scope.decide_context(&active_context) {
+        ScopeDecision::Allowed => {
+            stats.record_active_process_match();
+            stats.record_motion_repeat_tick();
+            macro_queue.schedule(
+                trigger_label,
+                &repeat.macro_definition,
+                motion.definition.inter_action_delay_ms,
+                stats,
+            )?;
+        }
+        ScopeDecision::Denied { reason } => {
+            stats.denied_action_count += 1;
+            stats.scope_mismatch_count += 1;
+            stats.record_active_process_non_match();
+            if active_context.matchable_name().is_none() {
+                stats.record_metadata_unavailable();
+            }
+            println!(
+                "denied_motion_repeat trigger={} reason={reason}",
+                trigger_label
+            );
+        }
+    }
+    Ok(())
 }
 
 pub fn handle_trigger<P, E>(
@@ -852,34 +1193,7 @@ where
             handle_motion_trigger(motion, active_process_provider, executor, scheduler, stats)
         }
         MotionRuntimeEvent::RepeatCancelled { trigger } => {
-            println!("motion_repeat_cancelled trigger={}", trigger.describe());
-            Ok(())
-        }
-    }
-}
-
-fn handle_motion_runtime_event_with_context<E>(
-    event: MotionRuntimeEvent,
-    motions: &[RuntimeMotion],
-    active_context: signal_auras_core::ActiveProcessContext,
-    executor: &mut E,
-    scheduler: &mut MacroScheduler,
-    stats: &mut RuntimeStats,
-) -> Result<(), DiagnosableError>
-where
-    E: MacroExecutor,
-{
-    match event {
-        MotionRuntimeEvent::Triggered { trigger, .. } => {
-            let Some(motion) = motions
-                .iter()
-                .find(|motion| motion.definition.trigger == trigger)
-            else {
-                return Ok(());
-            };
-            handle_motion_trigger_with_context(motion, active_context, executor, scheduler, stats)
-        }
-        MotionRuntimeEvent::RepeatCancelled { trigger } => {
+            stats.record_motion_repeat_cancel();
             println!("motion_repeat_cancelled trigger={}", trigger.describe());
             Ok(())
         }
@@ -979,6 +1293,7 @@ where
     match motion.scope.decide_context(&active_context) {
         ScopeDecision::Allowed => {
             stats.record_active_process_match();
+            stats.record_motion_repeat_tick();
             execute_motion_macro(
                 &trigger_label,
                 &repeat.macro_definition,

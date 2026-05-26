@@ -453,4 +453,49 @@ mod tests {
         );
         assert!(!runtime.repeat_is_active(&trigger));
     }
+
+    #[test]
+    fn repeat_cancellation_is_idempotent() {
+        let trigger = MotionTrigger::parse(["<Leader>", "<LClick>", "<LClick>"]).unwrap();
+        let motion = MotionDefinition::new(
+            trigger.clone(),
+            BindingMode::Passthrough,
+            None,
+            Some(RepeatDefinition::new(
+                MotionTrigger::parse(["<Leader>", "<LClick>"]).unwrap(),
+                RepeatInterval::new(50, 80).unwrap(),
+                macro_def(),
+            )),
+            0,
+        )
+        .unwrap();
+        let mut runtime = MotionRuntime::new([motion]);
+
+        runtime.handle_input(MotionInputEvent::pressed(MotionToken::Leader));
+        runtime.handle_input(MotionInputEvent::pressed(MotionToken::MouseButton(
+            MouseButton::Left,
+        )));
+        runtime.handle_input(MotionInputEvent::released(MotionToken::MouseButton(
+            MouseButton::Left,
+        )));
+        runtime.handle_input(MotionInputEvent::pressed(MotionToken::MouseButton(
+            MouseButton::Left,
+        )));
+
+        assert!(runtime.repeat_is_active(&trigger));
+        assert_eq!(
+            runtime
+                .handle_input(MotionInputEvent::released(MotionToken::MouseButton(
+                    MouseButton::Left,
+                )))
+                .len(),
+            1
+        );
+        assert!(runtime
+            .handle_input(MotionInputEvent::released(MotionToken::MouseButton(
+                MouseButton::Left,
+            )))
+            .is_empty());
+        assert!(!runtime.repeat_is_active(&trigger));
+    }
 }

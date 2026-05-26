@@ -24,7 +24,8 @@ pub use hotkey::{
 };
 pub use macro_plan::{
     execute_plan, execute_plan_with_inter_action_delay, InputEmission, MacroAction,
-    MacroDefinition, MacroScheduler, SynthesizedInputRequest, SynthesizedInputState,
+    MacroDefinition, MacroRunId, MacroRunPoll, MacroRunState, MacroScheduler,
+    SynthesizedInputRequest, SynthesizedInputState,
 };
 pub use motion::{
     AutomationDefaults, MotionDefinition, MotionInputEvent, MotionInputState, MotionRuntime,

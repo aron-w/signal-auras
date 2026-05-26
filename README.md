@@ -42,7 +42,10 @@ The runner accepts exactly one Lua file path. Startup output includes the script
 path, validation result, effective scope, capability probe result, and hotkey
 registration result. Press Ctrl-C to stop a successful run and print final
 runtime stats. Use `--verbose` while debugging provider setup and motion input;
-verbose logs use `level=... event=... key=value` fields.
+verbose logs use `level=... event=... key=value` fields. Motion diagnostics
+include the source evdev path, dispatch latency, repeat trigger/cancel/tick
+events, and provider device counts so delayed or missed input can be traced
+without logging macro text payloads.
 
 ## Consent Model
 
@@ -174,8 +177,11 @@ devices. `mode = "observe"` reads events without suppressing the original input;
 use `mode = "grab"` when this process should ask evdev for exclusive delivery.
 `output = "portal"` keeps generated input behind KDE portal permission;
 `output = "uinput"` writes generated input through `/dev/uinput`. To listen to
-all current evdev devices, set `devices = "all"`. Combining `devices = "all"`
-with grab mode also requires `acknowledge_risk = "GRAB_ALL_INPUTS"`.
+all current evdev devices and keep rescanning during the current run, set
+`devices = "all"`. Combining `devices = "all"` with grab mode also requires
+`acknowledge_risk = "GRAB_ALL_INPUTS"`. Device rescans are current-run only:
+added, removed, and skipped unreadable paths are reported in diagnostics, but no
+device list is persisted and no background service is installed.
 
 ```lua
 return {
@@ -218,6 +224,15 @@ inter-action defaults and one millisecond for explicit `delay` actions.
   bindings.
 - `examples/input-motions.lua`: uniform leader, keyboard, mouse, and repeat
   motion notation.
+
+## Input Performance Diagnostics
+
+The unsafe evdev provider waits on input-device readiness instead of relying on
+a fixed sleep between polls. When repeat motions are active, the live runner
+waits only until the next input readiness or repeat deadline and processes ready
+input before due repeat ticks so release events can cancel held repeats first.
+Final runtime stats include motion input count, repeat tick count, repeat cancel
+count, and maximum observed motion dispatch latency for the run.
 
 ## Verification
 

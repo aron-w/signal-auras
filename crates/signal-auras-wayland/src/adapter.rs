@@ -159,6 +159,7 @@ impl RealWaylandAdapter {
                     devices,
                     provider.mode,
                     leader.cloned(),
+                    provider.all_devices,
                 )?);
             }
         }
@@ -239,6 +240,35 @@ impl RealWaylandAdapter {
         provider.next_motion_event()
     }
 
+    pub fn wait_next_motion_input_event(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<Option<crate::evdev::ObservedMotionInputEvent>, DiagnosableError> {
+        let Some(provider) = &mut self.evdev_provider else {
+            if !timeout.is_zero() {
+                std::thread::sleep(timeout);
+            }
+            return Ok(None);
+        };
+        provider.wait_next_observed_motion_event(timeout)
+    }
+
+    pub fn wait_next_motion_input_or_runtime_fd(
+        &mut self,
+        timeout: std::time::Duration,
+        runtime_fds: &[std::os::fd::RawFd],
+    ) -> Result<crate::evdev::EvdevWaitOutcome, DiagnosableError> {
+        let Some(provider) = &mut self.evdev_provider else {
+            return wait_runtime_fd(timeout, runtime_fds).map(|fd| {
+                fd.map_or(
+                    crate::evdev::EvdevWaitOutcome::Timeout,
+                    crate::evdev::EvdevWaitOutcome::RuntimeFd,
+                )
+            });
+        };
+        provider.wait_next_observed_motion_event_or_runtime_fd(timeout, runtime_fds)
+    }
+
     pub fn input_provider_summary(&self) -> Option<String> {
         self.evdev_provider.as_ref().map(|provider| {
             format!(
@@ -254,6 +284,53 @@ impl RealWaylandAdapter {
             )
         })
     }
+}
+
+fn wait_runtime_fd(
+    timeout: std::time::Duration,
+    runtime_fds: &[std::os::fd::RawFd],
+) -> Result<Option<std::os::fd::RawFd>, DiagnosableError> {
+    if runtime_fds.is_empty() {
+        if !timeout.is_zero() {
+            std::thread::sleep(timeout);
+        }
+        return Ok(None);
+    }
+    let mut pollfds = runtime_fds
+        .iter()
+        .map(|fd| libc::pollfd {
+            fd: *fd,
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect::<Vec<_>>();
+    let timeout_ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    // Safety: poll is called with a valid mutable slice of pollfd values and
+    // the call does not outlive the runtime-owned descriptors.
+    let result = unsafe {
+        libc::poll(
+            pollfds.as_mut_ptr(),
+            pollfds.len() as libc::nfds_t,
+            timeout_ms,
+        )
+    };
+    if result < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+        return Ok(None);
+    }
+    if result < 0 {
+        return Err(DiagnosableError::new(
+            ErrorPhase::Trigger,
+            format!(
+                "cannot poll runtime fds: {}",
+                std::io::Error::last_os_error()
+            ),
+        )
+        .with_source("runtime-event-loop"));
+    }
+    Ok(pollfds
+        .iter()
+        .find(|pollfd| pollfd.revents & libc::POLLIN != 0)
+        .map(|pollfd| pollfd.fd))
 }
 
 impl ActiveProcessProvider for RealWaylandAdapter {

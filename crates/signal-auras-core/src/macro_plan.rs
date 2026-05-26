@@ -1,7 +1,7 @@
 use crate::{AdapterDiagnostic, DiagnosableError, ErrorPhase, MouseButton};
 use std::collections::BTreeSet;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MacroAction {
@@ -139,6 +139,121 @@ pub struct MacroRunGuard {
     hotkey: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MacroRunId(u64);
+
+impl MacroRunId {
+    pub fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MacroRunPoll {
+    Ready(SynthesizedInputRequest),
+    Pending(Duration),
+    Complete,
+    Cancelled,
+}
+
+#[derive(Debug, Clone)]
+pub struct MacroRunState {
+    id: MacroRunId,
+    actions: Vec<MacroAction>,
+    next_action: usize,
+    generated_actions: usize,
+    inter_action_delay_ms: u64,
+    inter_action_delay_armed: bool,
+    ready_at: Instant,
+    cancelled: bool,
+}
+
+impl MacroRunState {
+    pub fn new(
+        id: MacroRunId,
+        definition: &MacroDefinition,
+        inter_action_delay_ms: u64,
+        ready_at: Instant,
+    ) -> Self {
+        Self {
+            id,
+            actions: definition.actions().to_vec(),
+            next_action: 0,
+            generated_actions: 0,
+            inter_action_delay_ms,
+            inter_action_delay_armed: true,
+            ready_at,
+            cancelled: false,
+        }
+    }
+
+    pub fn id(&self) -> MacroRunId {
+        self.id
+    }
+
+    pub fn cancel(&mut self) {
+        self.cancelled = true;
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled
+    }
+
+    pub fn next_deadline(&self) -> Option<Instant> {
+        if self.cancelled || self.next_action >= self.actions.len() {
+            None
+        } else {
+            Some(self.ready_at)
+        }
+    }
+
+    pub fn poll(&mut self, now: Instant) -> MacroRunPoll {
+        if self.cancelled {
+            return MacroRunPoll::Cancelled;
+        }
+        if self.next_action >= self.actions.len() {
+            return MacroRunPoll::Complete;
+        }
+        if now < self.ready_at {
+            return MacroRunPoll::Pending(self.ready_at.duration_since(now));
+        }
+        let Some(action) = self.actions.get(self.next_action).cloned() else {
+            return MacroRunPoll::Complete;
+        };
+        self.next_action += 1;
+        match action {
+            MacroAction::Delay { duration_ms } => {
+                self.ready_at = now + Duration::from_millis(duration_ms);
+                MacroRunPoll::Pending(Duration::from_millis(duration_ms))
+            }
+            action => {
+                if self.generated_actions > 0
+                    && self.inter_action_delay_ms > 0
+                    && self.inter_action_delay_armed
+                {
+                    self.next_action -= 1;
+                    let delay = Duration::from_millis(self.inter_action_delay_ms);
+                    self.ready_at = now + delay;
+                    self.inter_action_delay_armed = false;
+                    MacroRunPoll::Pending(delay)
+                } else {
+                    self.generated_actions += 1;
+                    self.inter_action_delay_armed = true;
+                    self.ready_at = now;
+                    MacroRunPoll::Ready(SynthesizedInputRequest::new(
+                        action,
+                        self.generated_actions,
+                    ))
+                }
+            }
+        }
+    }
+}
+
 pub fn execute_plan<F>(
     definition: &MacroDefinition,
     mut execute_action: F,
@@ -202,5 +317,42 @@ mod tests {
         let mut scheduler = MacroScheduler::default();
         let _guard = scheduler.begin("F5").unwrap();
         assert!(scheduler.begin("F5").is_err());
+    }
+
+    #[test]
+    fn incremental_macro_run_waits_without_blocking() {
+        let definition = MacroDefinition::new(vec![
+            MacroAction::key("Enter").unwrap(),
+            MacroAction::delay(25).unwrap(),
+            MacroAction::text("x").unwrap(),
+        ])
+        .unwrap();
+        let now = Instant::now();
+        let mut run = MacroRunState::new(MacroRunId::new(1), &definition, 0, now);
+
+        assert!(matches!(run.poll(now), MacroRunPoll::Ready(_)));
+        assert!(matches!(
+            run.poll(now),
+            MacroRunPoll::Pending(duration) if duration == Duration::from_millis(25)
+        ));
+        assert!(matches!(
+            run.poll(now + Duration::from_millis(25)),
+            MacroRunPoll::Ready(_)
+        ));
+        assert_eq!(
+            run.poll(now + Duration::from_millis(25)),
+            MacroRunPoll::Complete
+        );
+    }
+
+    #[test]
+    fn incremental_macro_run_can_be_cancelled_before_output() {
+        let definition = MacroDefinition::new(vec![MacroAction::text("x").unwrap()]).unwrap();
+        let now = Instant::now();
+        let mut run = MacroRunState::new(MacroRunId::new(7), &definition, 0, now);
+
+        run.cancel();
+
+        assert_eq!(run.poll(now), MacroRunPoll::Cancelled);
     }
 }

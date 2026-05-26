@@ -8,6 +8,8 @@ version.workspace = true
 signal-auras-core = { path = "../signal-auras-core" }
 signal-auras-lua = { path = "../signal-auras-lua" }
 signal-auras-wayland = { path = "../signal-auras-wayland" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["ansi", "env-filter", "fmt"] }
 
 [lib]
 path = "src/lib.rs"

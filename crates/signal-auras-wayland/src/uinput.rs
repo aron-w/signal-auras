@@ -77,15 +77,19 @@ impl UinputOutputSession {
     ) -> Result<(), DiagnosableError> {
         match &request.action {
             MacroAction::TextInput { text } => {
+                let mut events = Vec::new();
                 for character in text.chars() {
-                    self.emit_character(character)?;
+                    self.push_character_events(character, &mut events)?;
                 }
+                self.write_events(&events)?;
                 Ok(())
             }
             MacroAction::KeyPress { key } => self.emit_named_key(key),
             MacroAction::MouseClick { button } => {
-                self.emit_key(mouse_button_code(*button), 1)?;
-                self.emit_key(mouse_button_code(*button), 0)
+                let mut events = Vec::new();
+                events.extend(key_events(mouse_button_code(*button), 1));
+                events.extend(key_events(mouse_button_code(*button), 0));
+                self.write_events(&events)
             }
             MacroAction::Delay { .. } => Ok(()),
         }
@@ -113,19 +117,23 @@ impl UinputOutputSession {
         Ok(())
     }
 
-    fn emit_character(&mut self, character: char) -> Result<(), DiagnosableError> {
+    fn push_character_events(
+        &self,
+        character: char,
+        events: &mut Vec<InputEvent>,
+    ) -> Result<(), DiagnosableError> {
         let key = character_to_key(character).ok_or_else(|| {
             uinput_error(format!(
                 "character '{character}' is unsupported by the uinput output path"
             ))
         })?;
         if key.shift {
-            self.emit_key(KEY_LEFTSHIFT, 1)?;
+            events.extend(key_events(KEY_LEFTSHIFT, 1));
         }
-        self.emit_key(key.code, 1)?;
-        self.emit_key(key.code, 0)?;
+        events.extend(key_events(key.code, 1));
+        events.extend(key_events(key.code, 0));
         if key.shift {
-            self.emit_key(KEY_LEFTSHIFT, 0)?;
+            events.extend(key_events(KEY_LEFTSHIFT, 0));
         }
         Ok(())
     }
@@ -141,19 +149,15 @@ impl UinputOutputSession {
     }
 
     fn emit_key(&mut self, code: u16, value: i32) -> Result<(), DiagnosableError> {
-        self.write_event(EV_KEY, code, value)?;
-        self.write_event(EV_SYN, SYN_REPORT, 0)
+        self.write_events(&key_events(code, value))
     }
 
-    fn write_event(
-        &mut self,
-        event_type: u16,
-        code: u16,
-        value: i32,
-    ) -> Result<(), DiagnosableError> {
-        let event = input_event(event_type, code, value);
-        let bytes = event_as_bytes(&event);
-        self.file.write_all(bytes).map_err(|error| {
+    fn write_events(&mut self, events: &[InputEvent]) -> Result<(), DiagnosableError> {
+        let mut bytes = Vec::with_capacity(std::mem::size_of_val(events));
+        for event in events {
+            bytes.extend_from_slice(event_as_bytes(event));
+        }
+        self.file.write_all(&bytes).map_err(|error| {
             uinput_error(format!(
                 "cannot write uinput event to '{}': {error}",
                 self.path.display()
@@ -187,6 +191,13 @@ impl UinputOutputSession {
         }
         Ok(())
     }
+}
+
+fn key_events(code: u16, value: i32) -> [InputEvent; 2] {
+    [
+        input_event(EV_KEY, code, value),
+        input_event(EV_SYN, SYN_REPORT, 0),
+    ]
 }
 
 impl Drop for UinputOutputSession {
