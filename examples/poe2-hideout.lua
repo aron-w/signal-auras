@@ -1,5 +1,5 @@
 return {
-  scope = { processes = { "poe2.exe" } },
+  scope = { processes = { "steam_app_2694490" } },
   hotkeys = {
     ["F5"] = macro {
       key "Enter",
