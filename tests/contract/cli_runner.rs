@@ -10,6 +10,7 @@ use signal_auras_core::{
 };
 use std::io::Cursor;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use signal_auras_wayland::RealWaylandAdapter;
@@ -592,12 +593,17 @@ impl MacroExecutor for CountingExecutor {
 }
 
 fn write_lua(source: &str) -> PathBuf {
+    static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(0);
     let mut path = std::env::temp_dir();
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    path.push(format!("signal-auras-cli-runner-{unique}.lua"));
+    let sequence = NEXT_FILE_ID.fetch_add(1, Ordering::SeqCst);
+    path.push(format!(
+        "signal-auras-cli-runner-{}-{unique}-{sequence}.lua",
+        std::process::id()
+    ));
     std::fs::write(&path, source).unwrap();
     path
 }

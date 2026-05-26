@@ -1,9 +1,10 @@
 use crate::prompt::{stdin_is_interactive, ScopePrompt, TerminalPrompt};
 use signal_auras_core::{
-    execute_plan, ActiveProcessProvider, BindingMode, BindingTrigger, CapabilitySet,
-    DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyId, HotkeyRegistrar, MacroExecutor,
-    MacroScheduler, RuntimeStats, ScopeDecision, ScopeSelection, ShutdownReason,
-    SynthesizedInputRequest,
+    execute_plan_with_inter_action_delay, ActiveProcessProvider, BindingMode, BindingTrigger,
+    CapabilitySet, DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyId, HotkeyRegistrar,
+    MacroDefinition, MacroExecutor, MacroScheduler, MotionInputEvent, MotionRuntime,
+    MotionRuntimeEvent, MotionTrigger, RuntimeMotion, RuntimeStats, ScopeDecision, ScopeSelection,
+    ShutdownReason, SynthesizedInputRequest,
 };
 use signal_auras_lua::load_lua_file;
 use signal_auras_wayland::RealWaylandAdapter;
@@ -11,7 +12,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub struct StdioPrompt;
 
@@ -101,7 +102,8 @@ where
     println!("capability_probe result=mock-adapter");
 
     let mut stats = RuntimeStats::new();
-    let bindings = config.bindings_for_scope(scope);
+    let bindings = config.bindings_for_scope(scope.clone());
+    let motions = config.motions_for_scope(scope);
     for binding in &bindings {
         stats.record_registration_attempt();
         match registrar.register(binding.clone()) {
@@ -124,6 +126,7 @@ where
 
     let shutdown_reason = match run_lifecycle(
         &bindings,
+        &motions,
         active_process_provider,
         executor,
         lifecycle,
@@ -168,9 +171,11 @@ where
     println!("effective_scope {}", scope.describe());
 
     let mut stats = RuntimeStats::new();
-    let bindings = config.bindings_for_scope(scope);
-    let required = CapabilitySet::for_bindings(&bindings);
+    let bindings = config.bindings_for_scope(scope.clone());
+    let motions = config.motions_for_scope(scope.clone());
+    let required = CapabilitySet::for_configuration_scope(&config, &scope);
     println!("provider selected=kde-plasma-wayland");
+    adapter.configure_input_provider(config.input_provider.as_ref(), config.leader.as_ref())?;
     let report = adapter.probe_capabilities(&required);
     if let Some(error) = report.first_blocking_error(&required) {
         stats.record_capability_probe_failure();
@@ -202,15 +207,21 @@ where
     }
 
     let active_adapter = RealWaylandAdapter::new();
-    let shutdown_reason =
-        match run_lifecycle(&bindings, &active_adapter, adapter, lifecycle, &mut stats) {
-            Ok(reason) => reason,
-            Err(error) => {
-                println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
-                cleanup_after_error(adapter, ErrorPhase::Shutdown)?;
-                return Err(error);
-            }
-        };
+    let shutdown_reason = match run_lifecycle(
+        &bindings,
+        &motions,
+        &active_adapter,
+        adapter,
+        lifecycle,
+        &mut stats,
+    ) {
+        Ok(reason) => reason,
+        Err(error) => {
+            println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
+            cleanup_after_error(adapter, ErrorPhase::Shutdown)?;
+            return Err(error);
+        }
+    };
 
     println!("{}", stats.render_summary(shutdown_reason));
     adapter.cancel_pending()?;
@@ -240,9 +251,11 @@ pub fn start_live_real_runner(
     println!("effective_scope {}", scope.describe());
 
     let mut stats = RuntimeStats::new();
-    let bindings = config.bindings_for_scope(scope);
-    let required = CapabilitySet::for_bindings(&bindings);
+    let bindings = config.bindings_for_scope(scope.clone());
+    let motions = config.motions_for_scope(scope.clone());
+    let required = CapabilitySet::for_configuration_scope(&config, &scope);
     println!("provider selected=kde-plasma-wayland");
+    adapter.configure_input_provider(config.input_provider.as_ref(), config.leader.as_ref())?;
     let report = adapter.probe_capabilities(&required);
     if let Some(error) = report.first_blocking_error(&required) {
         stats.record_capability_probe_failure();
@@ -273,7 +286,7 @@ pub fn start_live_real_runner(
         }
     }
 
-    let shutdown_reason = match run_live_real_lifecycle(&bindings, adapter, &mut stats) {
+    let shutdown_reason = match run_live_real_lifecycle(&bindings, &motions, adapter, &mut stats) {
         Ok(reason) => reason,
         Err(error) => {
             println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
@@ -296,6 +309,8 @@ pub trait RunnerLifecycle {
 pub enum RunnerEvent {
     Hotkey(HotkeyId),
     Trigger(BindingTrigger),
+    MotionInput(MotionInputEvent),
+    MotionRepeatTick(MotionTrigger),
     Shutdown(ShutdownReason),
     RuntimeError(DiagnosableError),
 }
@@ -366,6 +381,7 @@ fn install_ctrl_c_handler() {
 
 fn run_lifecycle<P, E, L>(
     bindings: &[HotkeyBinding],
+    motions: &[RuntimeMotion],
     active_process_provider: &P,
     executor: &mut E,
     lifecycle: &mut L,
@@ -377,6 +393,8 @@ where
     L: RunnerLifecycle,
 {
     let mut scheduler = MacroScheduler::default();
+    let mut motion_runtime =
+        MotionRuntime::new(motions.iter().map(|motion| motion.definition.clone()));
     loop {
         match lifecycle.next_event()? {
             RunnerEvent::Hotkey(hotkey) => {
@@ -404,6 +422,34 @@ where
                     )?;
                 }
             }
+            RunnerEvent::MotionInput(event) => {
+                for event in motion_runtime.handle_input(event) {
+                    handle_motion_runtime_event(
+                        event,
+                        motions,
+                        active_process_provider,
+                        executor,
+                        &mut scheduler,
+                        stats,
+                    )?;
+                }
+            }
+            RunnerEvent::MotionRepeatTick(trigger) => {
+                if motion_runtime.repeat_is_active(&trigger) {
+                    if let Some(motion) = motions
+                        .iter()
+                        .find(|motion| motion.definition.trigger == trigger)
+                    {
+                        handle_motion_repeat_tick(
+                            motion,
+                            active_process_provider,
+                            executor,
+                            &mut scheduler,
+                            stats,
+                        )?;
+                    }
+                }
+            }
             RunnerEvent::Shutdown(reason) => return Ok(reason),
             RunnerEvent::RuntimeError(error) => return Err(error),
         }
@@ -412,12 +458,27 @@ where
 
 fn run_live_real_lifecycle(
     bindings: &[HotkeyBinding],
+    motions: &[RuntimeMotion],
     adapter: &mut RealWaylandAdapter,
     stats: &mut RuntimeStats,
 ) -> Result<ShutdownReason, DiagnosableError> {
     CTRL_C_REQUESTED.store(false, Ordering::SeqCst);
     install_ctrl_c_handler();
     let mut scheduler = MacroScheduler::default();
+    let active_adapter = RealWaylandAdapter::new();
+    let mut motion_runtime =
+        MotionRuntime::new(motions.iter().map(|motion| motion.definition.clone()));
+    let mut repeat_ticks = motions
+        .iter()
+        .filter_map(|motion| {
+            motion
+                .definition
+                .repeat
+                .as_ref()
+                .map(|repeat| (motion.definition.trigger.clone(), repeat.interval.min_ms))
+        })
+        .collect::<Vec<_>>();
+    let mut last_repeat_ticks = std::collections::BTreeMap::new();
     loop {
         if CTRL_C_REQUESTED.load(Ordering::SeqCst) {
             return Ok(ShutdownReason::CtrlC);
@@ -435,6 +496,43 @@ fn run_live_real_lifecycle(
                     &mut scheduler,
                     stats,
                 )?;
+            }
+        }
+        while let Some(event) = adapter.next_motion_input_event()? {
+            for event in motion_runtime.handle_input(event) {
+                handle_motion_runtime_event(
+                    event,
+                    motions,
+                    &active_adapter,
+                    adapter,
+                    &mut scheduler,
+                    stats,
+                )?;
+            }
+        }
+        let now = Instant::now();
+        for (trigger, interval_ms) in &mut repeat_ticks {
+            if !motion_runtime.repeat_is_active(trigger) {
+                last_repeat_ticks.remove(trigger);
+                continue;
+            }
+            let due = last_repeat_ticks.get(trigger).is_none_or(|last_tick| {
+                now.duration_since(*last_tick).as_millis() >= *interval_ms as u128
+            });
+            if due {
+                if let Some(motion) = motions
+                    .iter()
+                    .find(|motion| motion.definition.trigger == *trigger)
+                {
+                    handle_motion_repeat_tick(
+                        motion,
+                        &active_adapter,
+                        adapter,
+                        &mut scheduler,
+                        stats,
+                    )?;
+                }
+                last_repeat_ticks.insert(trigger.clone(), now);
             }
         }
         thread::sleep(Duration::from_millis(25));
@@ -491,32 +589,7 @@ where
                     return Err(error);
                 }
             };
-            let mut sequence = 0usize;
-            let result = execute_plan(&binding.macro_definition, |action| {
-                sequence += 1;
-                let request = SynthesizedInputRequest::new(action.clone(), sequence);
-                match executor.execute_input_request(request)? {
-                    signal_auras_core::InputEmission::Emitted => {
-                        stats.record_synthesized_input_emitted();
-                        Ok(())
-                    }
-                    signal_auras_core::InputEmission::Denied => {
-                        stats.record_synthesized_input_denied();
-                        Err(DiagnosableError::new(
-                            ErrorPhase::MacroExecution,
-                            "synthesized input was denied",
-                        ))
-                    }
-                    signal_auras_core::InputEmission::Failed => Err(DiagnosableError::new(
-                        ErrorPhase::MacroExecution,
-                        "synthesized input failed",
-                    )),
-                    signal_auras_core::InputEmission::Cancelled => Err(DiagnosableError::new(
-                        ErrorPhase::Shutdown,
-                        "synthesized input was cancelled",
-                    )),
-                }
-            });
+            let result = execute_macro_definition(&binding.macro_definition, 0, executor, stats);
             scheduler.finish(guard);
             match result {
                 Ok(()) => stats.macro_success_count += 1,
@@ -537,4 +610,191 @@ where
         }
     }
     Ok(())
+}
+
+fn handle_motion_runtime_event<P, E>(
+    event: MotionRuntimeEvent,
+    motions: &[RuntimeMotion],
+    active_process_provider: &P,
+    executor: &mut E,
+    scheduler: &mut MacroScheduler,
+    stats: &mut RuntimeStats,
+) -> Result<(), DiagnosableError>
+where
+    P: ActiveProcessProvider,
+    E: MacroExecutor,
+{
+    match event {
+        MotionRuntimeEvent::Triggered { trigger, .. } => {
+            let Some(motion) = motions
+                .iter()
+                .find(|motion| motion.definition.trigger == trigger)
+            else {
+                return Ok(());
+            };
+            handle_motion_trigger(motion, active_process_provider, executor, scheduler, stats)
+        }
+        MotionRuntimeEvent::RepeatCancelled { trigger } => {
+            println!("motion_repeat_cancelled trigger={}", trigger.describe());
+            Ok(())
+        }
+    }
+}
+
+fn handle_motion_trigger<P, E>(
+    motion: &RuntimeMotion,
+    active_process_provider: &P,
+    executor: &mut E,
+    scheduler: &mut MacroScheduler,
+    stats: &mut RuntimeStats,
+) -> Result<(), DiagnosableError>
+where
+    P: ActiveProcessProvider,
+    E: MacroExecutor,
+{
+    let active_context = active_process_provider.active_process_context()?;
+    let trigger_label = motion.definition.trigger.describe();
+    stats.record_trigger(&trigger_label);
+    match motion.definition.mode {
+        BindingMode::Consume => stats.record_consumed_trigger_event(),
+        BindingMode::Passthrough => stats.record_passthrough_trigger_event(),
+    }
+    match motion.scope.decide_context(&active_context) {
+        ScopeDecision::Allowed => {
+            stats.record_active_process_match();
+            if let Some(macro_definition) = &motion.definition.macro_definition {
+                execute_motion_macro(
+                    &trigger_label,
+                    macro_definition,
+                    motion.definition.inter_action_delay_ms,
+                    executor,
+                    scheduler,
+                    stats,
+                )?;
+            }
+        }
+        ScopeDecision::Denied { reason } => {
+            stats.denied_action_count += 1;
+            stats.scope_mismatch_count += 1;
+            stats.record_active_process_non_match();
+            if active_context.matchable_name().is_none() {
+                stats.record_metadata_unavailable();
+            }
+            println!("denied_motion trigger={} reason={reason}", trigger_label);
+        }
+    }
+    Ok(())
+}
+
+fn handle_motion_repeat_tick<P, E>(
+    motion: &RuntimeMotion,
+    active_process_provider: &P,
+    executor: &mut E,
+    scheduler: &mut MacroScheduler,
+    stats: &mut RuntimeStats,
+) -> Result<(), DiagnosableError>
+where
+    P: ActiveProcessProvider,
+    E: MacroExecutor,
+{
+    let Some(repeat) = &motion.definition.repeat else {
+        return Ok(());
+    };
+    let active_context = active_process_provider.active_process_context()?;
+    let trigger_label = format!("{} repeat", motion.definition.trigger.describe());
+    match motion.scope.decide_context(&active_context) {
+        ScopeDecision::Allowed => {
+            stats.record_active_process_match();
+            execute_motion_macro(
+                &trigger_label,
+                &repeat.macro_definition,
+                motion.definition.inter_action_delay_ms,
+                executor,
+                scheduler,
+                stats,
+            )?;
+        }
+        ScopeDecision::Denied { reason } => {
+            stats.denied_action_count += 1;
+            stats.scope_mismatch_count += 1;
+            stats.record_active_process_non_match();
+            if active_context.matchable_name().is_none() {
+                stats.record_metadata_unavailable();
+            }
+            println!(
+                "denied_motion_repeat trigger={} reason={reason}",
+                trigger_label
+            );
+        }
+    }
+    Ok(())
+}
+
+fn execute_motion_macro<E>(
+    trigger_label: &str,
+    macro_definition: &MacroDefinition,
+    inter_action_delay_ms: u64,
+    executor: &mut E,
+    scheduler: &mut MacroScheduler,
+    stats: &mut RuntimeStats,
+) -> Result<(), DiagnosableError>
+where
+    E: MacroExecutor,
+{
+    let guard = match scheduler.begin(trigger_label) {
+        Ok(guard) => guard,
+        Err(error) => {
+            stats.denied_action_count += 1;
+            return Err(error);
+        }
+    };
+    let result = execute_macro_definition(macro_definition, inter_action_delay_ms, executor, stats);
+    scheduler.finish(guard);
+    match result {
+        Ok(()) => {
+            stats.macro_success_count += 1;
+            Ok(())
+        }
+        Err(error) => {
+            stats.macro_failure_count += 1;
+            Err(error)
+        }
+    }
+}
+
+fn execute_macro_definition<E>(
+    macro_definition: &MacroDefinition,
+    inter_action_delay_ms: u64,
+    executor: &mut E,
+    stats: &mut RuntimeStats,
+) -> Result<(), DiagnosableError>
+where
+    E: MacroExecutor,
+{
+    let mut sequence = 0usize;
+    execute_plan_with_inter_action_delay(macro_definition, inter_action_delay_ms, |action| {
+        sequence += 1;
+        let request = SynthesizedInputRequest::new(action.clone(), sequence);
+        match executor.execute_input_request(request)? {
+            signal_auras_core::InputEmission::Emitted => {
+                stats.record_synthesized_input_emitted();
+                Ok(())
+            }
+            signal_auras_core::InputEmission::Denied => {
+                stats.record_synthesized_input_denied();
+                Err(DiagnosableError::new(
+                    ErrorPhase::MacroExecution,
+                    "synthesized input was denied",
+                ))
+            }
+            signal_auras_core::InputEmission::Failed => Err(DiagnosableError::new(
+                ErrorPhase::MacroExecution,
+                "synthesized input failed",
+            )),
+            signal_auras_core::InputEmission::Cancelled => Err(DiagnosableError::new(
+                ErrorPhase::Shutdown,
+                "synthesized input was cancelled",
+            )),
+        }
+    })
 }

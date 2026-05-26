@@ -5,10 +5,12 @@ use signal_auras_cli::runner::{
 use signal_auras_core::{
     ActiveProcessProvider, BindingMode, BindingTrigger, CompositeTrigger, ConsentDecision,
     DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyId, HotkeyRegistrar, MacroAction,
-    MacroDefinition, MacroExecutor, MacroScheduler, ModifierSet, MouseTrigger, ProcessName,
-    RegistrationId, RegistrationState, RuntimeStats, ScopeSelection, WheelDirection,
+    MacroDefinition, MacroExecutor, MacroScheduler, ModifierSet, MotionInputEvent, MotionToken,
+    MotionTrigger, MouseButton, MouseTrigger, ProcessName, RegistrationId, RegistrationState,
+    RuntimeStats, ScopeSelection, WheelDirection,
 };
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 struct Active(Option<ProcessName>);
@@ -338,6 +340,71 @@ fn lifecycle_executes_composite_trigger_events_and_records_consumption_mode() {
 }
 
 #[test]
+fn lifecycle_executes_motion_sequence_and_repeat_ticks_until_release() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          leader = "F13",
+          motions = {
+            {
+              trigger = { "<Leader>", "f", "f" },
+              macro = macro { text "/search" },
+            },
+            {
+              trigger = { "<Leader>", "<LClick>", "<LClick>" },
+              mode = "passthrough",
+              repeat = {
+                while_held = { "<Leader>", "<LClick>" },
+                interval_ms = { min = 50, max = 80 },
+                macro = macro { mouse_click "left" },
+              },
+            },
+          },
+        }
+        "#,
+    );
+    let mut prompt = Prompt::new(ConsentDecision::ExplicitGlobalConfirmed);
+    let mut registrar = Registrar::default();
+    let active = Active(Some(ProcessName::parse("poe2.exe").unwrap()));
+    let mut executor = Executor::default();
+    let repeat_trigger = MotionTrigger::parse(["<Leader>", "<LClick>", "<LClick>"]).unwrap();
+    let mut lifecycle = ScriptedLifecycle::new(vec![
+        RunnerEvent::MotionInput(MotionInputEvent::pressed(MotionToken::Leader)),
+        RunnerEvent::MotionInput(MotionInputEvent::pressed(MotionToken::Key("f".into()))),
+        RunnerEvent::MotionInput(MotionInputEvent::pressed(MotionToken::Key("f".into()))),
+        RunnerEvent::MotionInput(MotionInputEvent::pressed(MotionToken::MouseButton(
+            MouseButton::Left,
+        ))),
+        RunnerEvent::MotionInput(MotionInputEvent::released(MotionToken::MouseButton(
+            MouseButton::Left,
+        ))),
+        RunnerEvent::MotionInput(MotionInputEvent::pressed(MotionToken::MouseButton(
+            MouseButton::Left,
+        ))),
+        RunnerEvent::MotionRepeatTick(repeat_trigger.clone()),
+        RunnerEvent::MotionInput(MotionInputEvent::released(MotionToken::Leader)),
+        RunnerEvent::MotionRepeatTick(repeat_trigger),
+        RunnerEvent::Shutdown(signal_auras_core::ShutdownReason::CtrlC),
+    ]);
+
+    let stats = start_runner_with_lifecycle(
+        &lua_file,
+        &mut prompt,
+        &mut registrar,
+        &active,
+        &mut executor,
+        &mut lifecycle,
+    )
+    .unwrap();
+
+    assert_eq!(executor.actions, 2);
+    assert_eq!(stats.macro_success_count, 2);
+    assert_eq!(stats.total_triggers(), 2);
+    assert_eq!(stats.consumed_trigger_event_count, 1);
+    assert_eq!(stats.passthrough_trigger_event_count, 1);
+}
+
+#[test]
 fn partial_registration_failure_cleans_up_successful_handles() {
     let lua_file = write_lua(
         r#"
@@ -538,6 +605,148 @@ fn unsupported_composite_consume_capability_fails_before_activation() {
     assert_eq!(adapter.cleanup_report().attempted, 0);
 }
 
+#[test]
+fn unsupported_motion_observation_fails_before_activation() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          leader = "F13",
+          motions = {
+            {
+              trigger = { "<Leader>", "f", "f" },
+              macro = macro { text "/search" },
+            },
+          },
+        }
+        "#,
+    );
+    let mut prompt = Prompt::new(ConsentDecision::ExplicitGlobalConfirmed);
+    let mut adapter = signal_auras_wayland::RealWaylandAdapter::from_environment(
+        signal_auras_wayland::capability::KdeEnvironment {
+            wayland_display: Some("wayland-0".into()),
+            session_type: Some("wayland".into()),
+            current_desktop: Some("KDE".into()),
+            services: signal_auras_wayland::capability::KdeServiceAvailability::available(),
+        },
+    );
+    let mut lifecycle = ScriptedLifecycle::new(vec![RunnerEvent::Shutdown(
+        signal_auras_core::ShutdownReason::CtrlC,
+    )]);
+
+    let error = signal_auras_cli::runner::start_real_runner_with_lifecycle(
+        &lua_file,
+        &mut prompt,
+        &mut adapter,
+        &mut lifecycle,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.phase, ErrorPhase::CapabilityProbe);
+    assert_eq!(
+        error.capability,
+        Some(signal_auras_core::Capability::CompositePointerObservation)
+    );
+    assert_eq!(adapter.cleanup_report().attempted, 0);
+}
+
+#[test]
+fn evdev_observe_provider_satisfies_passthrough_motion_observation() {
+    let device = write_temp_input_device();
+    let lua_file = write_lua(&format!(
+        r#"
+        return {{
+          input_provider = {{
+            backend = "evdev",
+            mode = "observe",
+            output = "portal",
+            devices = {{ "{}" }},
+          }},
+          leader = "F13",
+          motions = {{
+            {{
+              trigger = {{ "<Leader>", "<LClick>", "<LClick>" }},
+              mode = "passthrough",
+              macro = macro {{ delay(1) }},
+            }},
+          }},
+        }}
+        "#,
+        device.display()
+    ));
+    let mut prompt = Prompt::new(ConsentDecision::ExplicitGlobalConfirmed);
+    let mut adapter = signal_auras_wayland::RealWaylandAdapter::from_environment(
+        signal_auras_wayland::capability::KdeEnvironment {
+            wayland_display: Some("wayland-0".into()),
+            session_type: Some("wayland".into()),
+            current_desktop: Some("KDE".into()),
+            services: signal_auras_wayland::capability::KdeServiceAvailability::available(),
+        },
+    );
+    let mut lifecycle = ScriptedLifecycle::new(vec![RunnerEvent::Shutdown(
+        signal_auras_core::ShutdownReason::CtrlC,
+    )]);
+
+    let stats = signal_auras_cli::runner::start_real_runner_with_lifecycle(
+        &lua_file,
+        &mut prompt,
+        &mut adapter,
+        &mut lifecycle,
+    )
+    .unwrap();
+
+    assert_eq!(stats.permission_failure_count, 0);
+    assert_eq!(adapter.cleanup_report().attempted, 0);
+}
+
+#[test]
+fn evdev_observe_provider_does_not_claim_consumption() {
+    let device = write_temp_input_device();
+    let lua_file = write_lua(&format!(
+        r#"
+        return {{
+          input_provider = {{
+            backend = "evdev",
+            devices = {{ "{}" }},
+          }},
+          leader = "F13",
+          motions = {{
+            {{
+              trigger = {{ "<Leader>", "<LClick>", "<LClick>" }},
+              macro = macro {{ delay(1) }},
+            }},
+          }},
+        }}
+        "#,
+        device.display()
+    ));
+    let mut prompt = Prompt::new(ConsentDecision::ExplicitGlobalConfirmed);
+    let mut adapter = signal_auras_wayland::RealWaylandAdapter::from_environment(
+        signal_auras_wayland::capability::KdeEnvironment {
+            wayland_display: Some("wayland-0".into()),
+            session_type: Some("wayland".into()),
+            current_desktop: Some("KDE".into()),
+            services: signal_auras_wayland::capability::KdeServiceAvailability::available(),
+        },
+    );
+    let mut lifecycle = ScriptedLifecycle::new(vec![RunnerEvent::Shutdown(
+        signal_auras_core::ShutdownReason::CtrlC,
+    )]);
+
+    let error = signal_auras_cli::runner::start_real_runner_with_lifecycle(
+        &lua_file,
+        &mut prompt,
+        &mut adapter,
+        &mut lifecycle,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.phase, ErrorPhase::CapabilityProbe);
+    assert_eq!(
+        error.capability,
+        Some(signal_auras_core::Capability::CompositePointerConsumption)
+    );
+}
+
 #[derive(Default)]
 struct FailsOnSecondRegistration {
     register_attempts: usize,
@@ -627,12 +836,33 @@ impl RunnerLifecycle for ScriptedLifecycle {
 }
 
 fn write_lua(source: &str) -> PathBuf {
+    static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(0);
     let mut path = std::env::temp_dir();
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    path.push(format!("signal-auras-runner-flow-{unique}.lua"));
+    let sequence = NEXT_FILE_ID.fetch_add(1, Ordering::SeqCst);
+    path.push(format!(
+        "signal-auras-runner-flow-{}-{unique}-{sequence}.lua",
+        std::process::id()
+    ));
     std::fs::write(&path, source).unwrap();
+    path
+}
+
+fn write_temp_input_device() -> PathBuf {
+    static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(0);
+    let mut path = std::env::temp_dir();
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let sequence = NEXT_FILE_ID.fetch_add(1, Ordering::SeqCst);
+    path.push(format!(
+        "signal-auras-input-device-{}-{unique}-{sequence}.event",
+        std::process::id()
+    ));
+    std::fs::write(&path, []).unwrap();
     path
 }

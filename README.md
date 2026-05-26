@@ -15,10 +15,14 @@ handles, converts KDE/KWin active-window snapshots into conservative
 process-matching contexts, and gates synthesized input through a portal-oriented
 validation/session boundary.
 
-The KDE provider now has current-run KWin/KGlobalAccel callback wiring and a KDE
-RemoteDesktop portal emission path. T062 remains open until physical desktop
-keypress delivery and the denied-portal zero-emission path are manually verified.
-Unsupported sessions fail closed instead of falling back to hidden behavior.
+The KDE provider now has current-run KWin/KGlobalAccel callback wiring and KDE
+RemoteDesktop portal emission. Motions can opt into an unsafe evdev backend for
+explicitly listed `/dev/input/event*` devices; this is for high-trust local use,
+requires device permissions, and supports observe or grab mode. Generated input
+can use the KDE portal or `/dev/uinput`. T062 remains open until physical
+desktop keypress delivery and the denied-portal zero-emission path are manually
+verified. Unsupported sessions fail closed instead of falling back to hidden
+behavior.
 
 ## Usage
 
@@ -81,9 +85,11 @@ The Lua surface is intentionally small:
 - `macro { ... }` creates one ordered macro.
 - `key "<key-name>"` sends a key action.
 - `text "<string>"` sends text input.
+- `mouse_click "<left|right|middle>"` sends a mouse button click action.
 - `delay <milliseconds>` waits before the next action.
 - `hotkeys = { ["F5"] = macro { ... } }` keeps the legacy keyboard binding shape.
 - `bindings = { ... }` accepts structured triggers with modifiers, mouse buttons, mouse wheel directions, and an explicit mode.
+- `motions = { ... }` accepts uniform sequence notation for leader, keyboard, and mouse tokens.
 
 Structured composite bindings use one primary trigger and optional modifiers:
 
@@ -125,6 +131,82 @@ suppression of the original click or wheel event.
 Lua scripts do not receive ambient filesystem, network, process, shell,
 environment, compositor, active-process, global-input, or synthesized-input
 access. Unsupported or malformed scripts are rejected before registration.
+Synthesized keyboard and pointer output is requested through the KDE
+RemoteDesktop portal and requires user-granted portal permission for the
+current run. Global input observation for motions requires either the explicit
+unsafe evdev backend below or a future KDE/KWin-side provider; normal Wayland
+clients are not granted ambient event capture.
+
+Motions model multi-input sequences as one logical unit:
+
+```lua
+return {
+  leader = "F13",
+  defaults = {
+    inter_action_delay_ms = 0,
+  },
+  motions = {
+    {
+      trigger = { "<Leader>", "f", "f" },
+      mode = "consume",
+      macro = macro {
+        text "/search",
+      },
+    },
+    {
+      trigger = { "<Leader>", "<LClick>", "<LClick>" },
+      mode = "passthrough",
+      repeat = {
+        while_held = { "<Leader>", "<LClick>" },
+        interval_ms = { min = 50, max = 80 },
+        macro = macro {
+          mouse_click "left",
+        },
+      },
+    },
+  },
+}
+```
+
+For local high-trust testing on KDE Wayland, a script may explicitly name evdev
+devices. `mode = "observe"` reads events without suppressing the original input;
+use `mode = "grab"` when this process should ask evdev for exclusive delivery.
+`output = "portal"` keeps generated input behind KDE portal permission;
+`output = "uinput"` writes generated input through `/dev/uinput`. To listen to
+all current evdev devices, set `devices = "all"`. Combining `devices = "all"`
+with grab mode also requires `acknowledge_risk = "GRAB_ALL_INPUTS"`.
+
+```lua
+return {
+  input_provider = {
+    backend = "evdev",
+    mode = "grab",
+    output = "uinput",
+    devices = "all",
+    acknowledge_risk = "GRAB_ALL_INPUTS",
+  },
+
+  leader = "F13",
+  motions = {
+    {
+      trigger = { "<Leader>", "<LClick>", "<LClick>" },
+      mode = "passthrough",
+      repeat = {
+        while_held = { "<Leader>", "<LClick>" },
+        interval_ms = { min = 50, max = 80 },
+        macro = macro {
+          mouse_click "left",
+        },
+      },
+    },
+  },
+}
+```
+
+`defaults.inter_action_delay_ms` applies between generated macro actions;
+`motion.inter_action_delay_ms` overrides it for one motion. Explicit
+`delay(ms)` actions remain part of macros. Delays are valid from zero for
+inter-action defaults and one millisecond for explicit `delay` actions.
 
 ## Examples
 
@@ -133,6 +215,8 @@ access. Unsupported or malformed scripts are rejected before registration.
   consent prompt.
 - `examples/composite-bindings.lua`: structured `Ctrl` plus wheel and left-click
   bindings.
+- `examples/input-motions.lua`: uniform leader, keyboard, mouse, and repeat
+  motion notation.
 
 ## Verification
 

@@ -8,7 +8,8 @@ use crate::{capability::environment_probe, diagnostics::unsupported_protocol};
 
 use ashpd::desktop::{
     remote_desktop::{
-        DeviceType, KeyState, NotifyKeyboardKeysymOptions, RemoteDesktop, SelectDevicesOptions,
+        DeviceType, KeyState, NotifyKeyboardKeysymOptions, NotifyPointerButtonOptions,
+        RemoteDesktop, SelectDevicesOptions,
     },
     Session,
 };
@@ -72,7 +73,8 @@ impl PortalInputSession {
             proxy
                 .select_devices(
                     &session,
-                    SelectDevicesOptions::default().set_devices(Some(DeviceType::Keyboard.into())),
+                    SelectDevicesOptions::default()
+                        .set_devices(DeviceType::Keyboard | DeviceType::Pointer),
                 )
                 .await?
                 .response()?;
@@ -144,6 +146,11 @@ fn emit_request(
             })?;
             emit_keysym(proxy, session, keysym)
         }
+        MacroAction::MouseClick { button } => {
+            let evdev_button = mouse_button_to_evdev(*button);
+            emit_pointer_button(proxy, session, evdev_button, KeyState::Pressed)?;
+            emit_pointer_button(proxy, session, evdev_button, KeyState::Released)
+        }
         MacroAction::Delay { .. } => Ok(()),
     }
 }
@@ -172,6 +179,33 @@ fn emit_keysym(
             .await
     })
     .map_err(portal_error)
+}
+
+fn emit_pointer_button(
+    proxy: &RemoteDesktop,
+    session: &Session<RemoteDesktop>,
+    button: i32,
+    state: KeyState,
+) -> Result<(), DiagnosableError> {
+    portal_block_on(async {
+        proxy
+            .notify_pointer_button(
+                session,
+                button,
+                state,
+                NotifyPointerButtonOptions::default(),
+            )
+            .await
+    })
+    .map_err(portal_error)
+}
+
+fn mouse_button_to_evdev(button: signal_auras_core::MouseButton) -> i32 {
+    match button {
+        signal_auras_core::MouseButton::Left => 0x110,
+        signal_auras_core::MouseButton::Right => 0x111,
+        signal_auras_core::MouseButton::Middle => 0x112,
+    }
 }
 
 fn text_char_to_keysym(character: char) -> i32 {

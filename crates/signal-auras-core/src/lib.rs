@@ -3,11 +3,14 @@ mod consent;
 mod error;
 mod hotkey;
 mod macro_plan;
+mod motion;
 mod scope;
 mod stats;
 
 pub use config::{
-    BindingDefinition, BindingMode, HotkeyBinding, LuaAutomationConfiguration, RegistrationState,
+    BindingDefinition, BindingMode, HotkeyBinding, InputProviderBackend, InputProviderConfig,
+    InputProviderMode, InputProviderOutput, LuaAutomationConfiguration, RegistrationState,
+    RuntimeMotion,
 };
 pub use consent::ConsentDecision;
 pub use error::{
@@ -20,8 +23,12 @@ pub use hotkey::{
     WheelDirection,
 };
 pub use macro_plan::{
-    execute_plan, InputEmission, MacroAction, MacroDefinition, MacroScheduler,
-    SynthesizedInputRequest, SynthesizedInputState,
+    execute_plan, execute_plan_with_inter_action_delay, InputEmission, MacroAction,
+    MacroDefinition, MacroScheduler, SynthesizedInputRequest, SynthesizedInputState,
+};
+pub use motion::{
+    AutomationDefaults, MotionDefinition, MotionInputEvent, MotionInputState, MotionRuntime,
+    MotionRuntimeEvent, MotionToken, MotionTrigger, RepeatDefinition, RepeatInterval,
 };
 pub use scope::{
     ActiveProcessConfidence, ActiveProcessContext, ProcessName, ScopeDecision, ScopeSelection,

@@ -1,5 +1,15 @@
 return {
   scope = { processes = { "steam_app_2694490" } },
+  input_provider = {
+    backend = "evdev",
+    mode = "observe",
+    output = "uinput",
+    devices = "all",
+  },
+  leader = "F3",
+  defaults = {
+    inter_action_delay_ms = 200,
+  },
   hotkeys = {
     ["F5"] = macro {
       key "Enter",
@@ -8,23 +18,16 @@ return {
       key "Enter",
     },
   },
-  bindings = {
+  motions = {
     {
-      trigger = {
-        modifiers = { "Ctrl" },
-        mouse = { wheel = "up" },
-      },
-      macro = macro {
-        key "Left",
-      },
-    },
-    {
-      trigger = {
-        modifiers = { "Ctrl" },
-        mouse = { wheel = "down" },
-      },
-      macro = macro {
-        key "Right",
+      trigger = { "<Leader>", "<LClick>", "<LClick>" },
+      mode = "passthrough",
+      repeat = {
+        while_held = { "<Leader>", "<LClick>" },
+        interval_ms = { min = 50, max = 80 },
+        macro = macro {
+          mouse_click "left",
+        },
       },
     },
   },

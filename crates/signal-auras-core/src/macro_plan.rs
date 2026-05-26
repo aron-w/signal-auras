@@ -1,14 +1,13 @@
-use crate::{AdapterDiagnostic, DiagnosableError, ErrorPhase};
+use crate::{AdapterDiagnostic, DiagnosableError, ErrorPhase, MouseButton};
 use std::collections::BTreeSet;
 use std::thread;
 use std::time::Duration;
-
-const MAX_DELAY_MS: u64 = 60_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MacroAction {
     KeyPress { key: String },
     TextInput { text: String },
+    MouseClick { button: MouseButton },
     Delay { duration_ms: u64 },
 }
 
@@ -77,11 +76,15 @@ impl MacroAction {
         Ok(Self::TextInput { text })
     }
 
+    pub fn mouse_click(button: MouseButton) -> Self {
+        Self::MouseClick { button }
+    }
+
     pub fn delay(duration_ms: u64) -> Result<Self, DiagnosableError> {
-        if duration_ms == 0 || duration_ms > MAX_DELAY_MS {
+        if duration_ms == 0 {
             return Err(DiagnosableError::new(
                 ErrorPhase::ScriptValidation,
-                "delay must be between 1 and 60000 ms",
+                "delay must be 1 ms or greater",
             ));
         }
         Ok(Self::Delay { duration_ms })
@@ -143,12 +146,30 @@ pub fn execute_plan<F>(
 where
     F: FnMut(&MacroAction) -> Result<(), DiagnosableError>,
 {
+    execute_plan_with_inter_action_delay(definition, 0, &mut execute_action)
+}
+
+pub fn execute_plan_with_inter_action_delay<F>(
+    definition: &MacroDefinition,
+    inter_action_delay_ms: u64,
+    mut execute_action: F,
+) -> Result<(), DiagnosableError>
+where
+    F: FnMut(&MacroAction) -> Result<(), DiagnosableError>,
+{
+    let mut generated_actions = 0usize;
     for action in definition.actions() {
         match action {
             MacroAction::Delay { duration_ms } => {
                 thread::sleep(Duration::from_millis(*duration_ms))
             }
-            _ => execute_action(action)?,
+            _ => {
+                if generated_actions > 0 && inter_action_delay_ms > 0 {
+                    thread::sleep(Duration::from_millis(inter_action_delay_ms));
+                }
+                execute_action(action)?;
+                generated_actions += 1;
+            }
         }
     }
     Ok(())

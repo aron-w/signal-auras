@@ -212,8 +212,45 @@ impl CapabilitySet {
                     action,
                     crate::macro_plan::MacroAction::KeyPress { .. }
                         | crate::macro_plan::MacroAction::TextInput { .. }
+                        | crate::macro_plan::MacroAction::MouseClick { .. }
                 )
             }) {
+                required.push(CapabilityKind::SynthesizedInput);
+            }
+        }
+        Self::new(required)
+    }
+
+    pub fn for_configuration(config: &crate::config::LuaAutomationConfiguration) -> Self {
+        Self::for_configuration_scope(config, &crate::scope::ScopeSelection::ExplicitGlobal)
+    }
+
+    pub fn for_configuration_scope(
+        config: &crate::config::LuaAutomationConfiguration,
+        scope: &crate::scope::ScopeSelection,
+    ) -> Self {
+        let mut required = Vec::new();
+        for binding in config.bindings_for_scope(scope.clone()).iter() {
+            required.extend(Self::for_bindings([binding]).iter());
+        }
+        if !config.motions().is_empty()
+            && matches!(scope, crate::scope::ScopeSelection::ProcessList { .. })
+        {
+            required.push(CapabilityKind::ActiveProcessMetadata);
+        }
+        for motion in config.motions().values() {
+            required.push(CapabilityKind::CompositePointerObservation);
+            if motion.mode == crate::config::BindingMode::Consume {
+                required.push(CapabilityKind::CompositePointerConsumption);
+            }
+            let has_generated_input = motion
+                .macro_definition
+                .as_ref()
+                .is_some_and(macro_requires_synthesized_input)
+                || motion.repeat.as_ref().is_some_and(|repeat| {
+                    macro_requires_synthesized_input(&repeat.macro_definition)
+                });
+            if has_generated_input {
                 required.push(CapabilityKind::SynthesizedInput);
             }
         }
@@ -246,6 +283,11 @@ impl CapabilityReport {
 
     pub fn status(&self, kind: CapabilityKind) -> Option<&CapabilityStatus> {
         self.statuses.get(&kind)
+    }
+
+    pub fn with_status(mut self, status: CapabilityStatus) -> Self {
+        self.statuses.insert(status.kind, status);
+        self
     }
 
     pub fn all_available(&self, required: &CapabilitySet) -> bool {
@@ -291,6 +333,17 @@ impl CapabilityReport {
         }
         None
     }
+}
+
+fn macro_requires_synthesized_input(definition: &crate::macro_plan::MacroDefinition) -> bool {
+    definition.actions().iter().any(|action| {
+        matches!(
+            action,
+            crate::macro_plan::MacroAction::KeyPress { .. }
+                | crate::macro_plan::MacroAction::TextInput { .. }
+                | crate::macro_plan::MacroAction::MouseClick { .. }
+        )
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

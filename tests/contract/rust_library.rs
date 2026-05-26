@@ -2,9 +2,10 @@ use signal_auras_core::{
     ActiveProcessConfidence, ActiveProcessContext, ActiveProcessProvider, BindingMode,
     BindingTrigger, Capability, CapabilityAvailability, CapabilityKind, CapabilityReport,
     CapabilitySet, CapabilityStatus, CompositeTrigger, DiagnosableError, ErrorPhase, HotkeyBinding,
-    HotkeyRegistrar, InputEmission, MacroAction, MacroDefinition, MacroExecutor, ModifierSet,
-    MouseTrigger, ProcessName, RegistrationId, RuntimeStats, ShortcutRegistrationState,
-    SynthesizedInputRequest, WheelDirection,
+    HotkeyRegistrar, InputEmission, LuaAutomationConfiguration, MacroAction, MacroDefinition,
+    MacroExecutor, ModifierSet, MotionDefinition, MotionTrigger, MouseTrigger, ProcessName,
+    RegistrationId, RuntimeStats, ShortcutRegistrationState, SynthesizedInputRequest,
+    WheelDirection,
 };
 
 struct FailingRegistrar;
@@ -122,6 +123,66 @@ fn composite_passthrough_bindings_do_not_require_consumption_capability() {
     };
 
     let required = CapabilitySet::for_bindings([&binding]);
+
+    assert!(required.contains(CapabilityKind::CompositePointerObservation));
+    assert!(!required.contains(CapabilityKind::CompositePointerConsumption));
+}
+
+#[test]
+fn motion_consume_requires_input_observation_consumption_and_synthesized_input() {
+    let motion = MotionDefinition::new(
+        MotionTrigger::parse(["<Leader>", "<LClick>", "<LClick>"]).unwrap(),
+        BindingMode::Consume,
+        None,
+        Some(signal_auras_core::RepeatDefinition::new(
+            MotionTrigger::parse(["<Leader>", "<LClick>"]).unwrap(),
+            signal_auras_core::RepeatInterval::new(50, 80).unwrap(),
+            MacroDefinition::new(vec![MacroAction::mouse_click(
+                signal_auras_core::MouseButton::Left,
+            )])
+            .unwrap(),
+        )),
+        0,
+    )
+    .unwrap();
+    let config = LuaAutomationConfiguration::with_bindings_and_motions(
+        None,
+        None,
+        signal_auras_core::AutomationDefaults::default(),
+        None,
+        Vec::new(),
+        vec![motion],
+    )
+    .unwrap();
+
+    let required = CapabilitySet::for_configuration(&config);
+
+    assert!(required.contains(CapabilityKind::CompositePointerObservation));
+    assert!(required.contains(CapabilityKind::CompositePointerConsumption));
+    assert!(required.contains(CapabilityKind::SynthesizedInput));
+}
+
+#[test]
+fn motion_passthrough_does_not_require_input_consumption() {
+    let motion = MotionDefinition::new(
+        MotionTrigger::parse(["<Leader>", "<LClick>", "<LClick>"]).unwrap(),
+        BindingMode::Passthrough,
+        Some(MacroDefinition::new(vec![MacroAction::text("x").unwrap()]).unwrap()),
+        None,
+        0,
+    )
+    .unwrap();
+    let config = LuaAutomationConfiguration::with_bindings_and_motions(
+        None,
+        None,
+        signal_auras_core::AutomationDefaults::default(),
+        None,
+        Vec::new(),
+        vec![motion],
+    )
+    .unwrap();
+
+    let required = CapabilitySet::for_configuration(&config);
 
     assert!(required.contains(CapabilityKind::CompositePointerObservation));
     assert!(!required.contains(CapabilityKind::CompositePointerConsumption));
@@ -395,4 +456,15 @@ fn portal_input_session_closes_idempotently() {
     assert_eq!(session.synthesize(request).unwrap(), InputEmission::Emitted);
     assert_eq!(session.close().attempted, 1);
     assert_eq!(session.close().attempted, 0);
+}
+
+#[test]
+fn portal_input_session_accepts_mouse_click_requests() {
+    let session = signal_auras_wayland::portal::PortalInputSession::open();
+    let request = SynthesizedInputRequest::new(
+        MacroAction::mouse_click(signal_auras_core::MouseButton::Left),
+        1,
+    );
+
+    assert_eq!(session.synthesize(request).unwrap(), InputEmission::Emitted);
 }

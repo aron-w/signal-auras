@@ -29,6 +29,8 @@ pub fn validate_request_for_portal(
             ErrorPhase::MacroExecution,
             "key input cannot be empty",
         )),
-        MacroAction::KeyPress { .. } | MacroAction::Delay { .. } => Ok(()),
+        MacroAction::KeyPress { .. }
+        | MacroAction::MouseClick { .. }
+        | MacroAction::Delay { .. } => Ok(()),
     }
 }

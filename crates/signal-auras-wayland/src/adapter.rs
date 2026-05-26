@@ -1,7 +1,8 @@
 use signal_auras_core::{
     ActiveProcessContext, ActiveProcessProvider, Capability, CapabilityKind, CapabilityReport,
-    CapabilitySet, CleanupReport, DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyRegistrar,
-    InputEmission, MacroAction, MacroExecutor, ProcessName, RegistrationId,
+    CapabilitySet, CapabilityStatus, CleanupReport, DiagnosableError, ErrorPhase, HotkeyBinding,
+    HotkeyRegistrar, InputEmission, InputProviderBackend, InputProviderConfig, MacroAction,
+    MacroExecutor, MotionInputEvent, MotionToken, ProcessName, RegistrationId,
     SynthesizedInputRequest,
 };
 use std::collections::BTreeSet;
@@ -98,7 +99,9 @@ pub struct RealWaylandAdapter {
     environment: Option<KdeEnvironment>,
     rejected_hotkeys: BTreeSet<String>,
     portal_session: Option<crate::portal::PortalInputSession>,
+    uinput_session: Option<crate::uinput::UinputOutputSession>,
     shortcut_bridge: Option<crate::kde_bridge::KwinShortcutBridge>,
+    evdev_provider: Option<crate::evdev::EvdevObservationProvider>,
 }
 
 impl RealWaylandAdapter {
@@ -112,7 +115,9 @@ impl RealWaylandAdapter {
             environment: Some(environment),
             rejected_hotkeys: BTreeSet::new(),
             portal_session: None,
+            uinput_session: None,
             shortcut_bridge: None,
+            evdev_provider: None,
         }
     }
 
@@ -120,13 +125,85 @@ impl RealWaylandAdapter {
         self.rejected_hotkeys.insert(hotkey.into());
     }
 
+    pub fn configure_input_provider(
+        &mut self,
+        provider: Option<&InputProviderConfig>,
+        leader: Option<&MotionToken>,
+    ) -> Result<(), DiagnosableError> {
+        let Some(provider) = provider else {
+            self.evdev_provider = None;
+            self.uinput_session = None;
+            return Ok(());
+        };
+        match provider.backend {
+            InputProviderBackend::Evdev => {
+                let devices = if provider.all_devices {
+                    crate::evdev::discover_event_devices()?
+                } else {
+                    provider.devices.clone()
+                };
+                self.evdev_provider = Some(crate::evdev::EvdevObservationProvider::open(
+                    devices,
+                    provider.mode,
+                    leader.cloned(),
+                )?);
+            }
+        }
+        if provider.output == signal_auras_core::InputProviderOutput::Uinput {
+            self.uinput_session = Some(crate::uinput::UinputOutputSession::open()?);
+        } else {
+            self.uinput_session = None;
+        }
+        Ok(())
+    }
+
     // This is the side-effect boundary for live Wayland session probing. It
     // intentionally fails closed until a compositor-specific provider is wired
     // behind the adapter contracts.
     pub fn probe_capabilities(&self, required: &CapabilitySet) -> CapabilityReport {
-        match &self.environment {
+        let report = match &self.environment {
             Some(environment) => crate::capability::kde_capability_report(required, environment),
             None => environment_probe(required),
+        };
+        if self.evdev_provider.is_some()
+            && required.contains(CapabilityKind::CompositePointerObservation)
+        {
+            let report = report.with_status(CapabilityStatus::available(
+                CapabilityKind::CompositePointerObservation,
+                "evdev",
+            ));
+            let report = if self
+                .evdev_provider
+                .as_ref()
+                .is_some_and(crate::evdev::EvdevObservationProvider::is_grabbed)
+                && required.contains(CapabilityKind::CompositePointerConsumption)
+            {
+                report.with_status(CapabilityStatus::available(
+                    CapabilityKind::CompositePointerConsumption,
+                    "evdev-grab",
+                ))
+            } else {
+                report
+            };
+            if self.uinput_session.is_some() && required.contains(CapabilityKind::SynthesizedInput)
+            {
+                report.with_status(CapabilityStatus::available(
+                    CapabilityKind::SynthesizedInput,
+                    "uinput",
+                ))
+            } else {
+                report
+            }
+        } else {
+            if self.uinput_session.is_some() && required.contains(CapabilityKind::SynthesizedInput)
+            {
+                report.with_status(CapabilityStatus::available(
+                    CapabilityKind::SynthesizedInput,
+                    "uinput",
+                ))
+            } else {
+                report
+            }
         }
     }
 
@@ -138,6 +215,15 @@ impl RealWaylandAdapter {
         self.shortcut_bridge
             .as_mut()
             .and_then(crate::kde_bridge::KwinShortcutBridge::next_shortcut_event)
+    }
+
+    pub fn next_motion_input_event(
+        &mut self,
+    ) -> Result<Option<MotionInputEvent>, DiagnosableError> {
+        let Some(provider) = &mut self.evdev_provider else {
+            return Ok(None);
+        };
+        provider.next_motion_event()
     }
 }
 
@@ -225,6 +311,10 @@ impl MacroExecutor for RealWaylandAdapter {
         {
             return Err(error);
         }
+        if let Some(session) = &mut self.uinput_session {
+            session.synthesize(&request)?;
+            return Ok(InputEmission::Emitted);
+        }
         if self.portal_session.is_none() {
             self.portal_session = Some(if self.environment.is_some() {
                 crate::portal::PortalInputSession::open()
@@ -240,6 +330,7 @@ impl MacroExecutor for RealWaylandAdapter {
             let _ = session.close();
         }
         self.portal_session = None;
+        self.uinput_session = None;
         Ok(())
     }
 }

@@ -6,6 +6,7 @@ version.workspace = true
 
 [dependencies]
 ashpd = { version = "0.13.11", features = ["remote_desktop", "screencast"] }
+libc = "0.2"
 signal-auras-core = { path = "../signal-auras-core" }
 zbus = "5.15.0"
 

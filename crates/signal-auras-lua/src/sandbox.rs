@@ -1,10 +1,11 @@
 use signal_auras_core::{
-    BindingDefinition, BindingMode, BindingTrigger, CompositeTrigger, DiagnosableError, ErrorPhase,
-    HotkeyId, LuaAutomationConfiguration, MacroAction, MacroDefinition, ModifierSet, MouseButton,
-    MouseTrigger, ProcessName, ScriptScope, WheelDirection,
+    AutomationDefaults, BindingDefinition, BindingMode, BindingTrigger, CompositeTrigger,
+    DiagnosableError, ErrorPhase, HotkeyId, InputProviderBackend, InputProviderConfig,
+    InputProviderMode, InputProviderOutput, LuaAutomationConfiguration, MacroAction,
+    MacroDefinition, ModifierSet, MotionDefinition, MotionTrigger, MouseButton, MouseTrigger,
+    ProcessName, RepeatDefinition, RepeatInterval, ScriptScope, WheelDirection,
 };
-use std::fs;
-use std::path::Path;
+use std::{fs, path::Path};
 
 const DENIED_TOKENS: &[&str] = &[
     "io.", "os.", "require", "package", "debug", "dofile", "loadfile", "load(", "socket",
@@ -30,14 +31,21 @@ pub fn load_lua_source(source: &str) -> Result<LuaAutomationConfiguration, Diagn
             ));
         }
     }
-    if !source.contains("return") || !(source.contains("hotkeys") || source.contains("bindings")) {
+    if !source.contains("return")
+        || !(source.contains("hotkeys")
+            || source.contains("bindings")
+            || source.contains("motions"))
+    {
         return Err(DiagnosableError::new(
             ErrorPhase::ScriptValidation,
-            "Lua script must return a table with hotkeys or bindings",
+            "Lua script must return a table with hotkeys, bindings, or motions",
         ));
     }
 
     let scope = parse_scope(source)?;
+    let leader = parse_leader(source)?;
+    let defaults = parse_defaults(source)?;
+    let input_provider = parse_input_provider(source)?;
     let mut bindings = parse_hotkeys(source)?
         .into_iter()
         .map(|(hotkey, macro_definition)| {
@@ -49,19 +57,33 @@ pub fn load_lua_source(source: &str) -> Result<LuaAutomationConfiguration, Diagn
         })
         .collect::<Vec<_>>();
     bindings.extend(parse_bindings(source)?);
-    LuaAutomationConfiguration::with_bindings(scope, bindings)
+    let motions = parse_motions(source, &defaults, leader.is_some())?;
+    LuaAutomationConfiguration::with_bindings_and_motions(
+        scope,
+        leader,
+        defaults,
+        input_provider,
+        bindings,
+        motions,
+    )
 }
 
 fn parse_scope(source: &str) -> Result<Option<ScriptScope>, DiagnosableError> {
     let Some(scope_index) = source.find("scope") else {
         return Ok(None);
     };
-    let end = [source.find("hotkeys"), source.find("bindings")]
-        .into_iter()
-        .flatten()
-        .filter(|index| *index > scope_index)
-        .min()
-        .unwrap_or(source.len());
+    let end = [
+        source.find("defaults"),
+        source.find("input_provider"),
+        source.find("hotkeys"),
+        source.find("bindings"),
+        source.find("motions"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|index| *index > scope_index)
+    .min()
+    .unwrap_or(source.len());
     let scope_source = &source[scope_index..end];
     if scope_source.contains("global") {
         return Err(DiagnosableError::new(
@@ -74,6 +96,65 @@ fn parse_scope(source: &str) -> Result<Option<ScriptScope>, DiagnosableError> {
         processes.push(ProcessName::parse(value)?);
     }
     Ok(Some(ScriptScope::processes(processes)?))
+}
+
+fn parse_defaults(source: &str) -> Result<AutomationDefaults, DiagnosableError> {
+    let Some(defaults_body) = table_body_after(source, "defaults")? else {
+        return Ok(AutomationDefaults::default());
+    };
+    Ok(AutomationDefaults::new(
+        field_u64(defaults_body, "inter_action_delay_ms")?.unwrap_or(0),
+    ))
+}
+
+fn parse_leader(source: &str) -> Result<Option<signal_auras_core::MotionToken>, DiagnosableError> {
+    let leader = field_string(source, "leader")
+        .map(signal_auras_core::MotionToken::parse)
+        .transpose()?;
+    if leader
+        .as_ref()
+        .is_some_and(|token| !matches!(token, signal_auras_core::MotionToken::Key(_)))
+    {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "leader must be a concrete key token",
+        ));
+    }
+    Ok(leader)
+}
+
+fn parse_input_provider(source: &str) -> Result<Option<InputProviderConfig>, DiagnosableError> {
+    let Some(provider_body) = table_body_after(source, "input_provider")? else {
+        return Ok(None);
+    };
+    let backend =
+        InputProviderBackend::parse(field_string(provider_body, "backend").ok_or_else(|| {
+            DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                "input_provider requires backend",
+            )
+        })?)?;
+    let mode = InputProviderMode::parse(field_string(provider_body, "mode"))?;
+    let output = InputProviderOutput::parse(field_string(provider_body, "output"))?;
+    let acknowledge_risk = field_string(provider_body, "acknowledge_risk");
+    match (backend, mode) {
+        (InputProviderBackend::Evdev, InputProviderMode::Observe | InputProviderMode::Grab) => {
+            if field_string(provider_body, "devices") == Some("all") {
+                return InputProviderConfig::evdev_all(mode, output, acknowledge_risk).map(Some);
+            }
+            let devices_body = table_body_after(provider_body, "devices")?.ok_or_else(|| {
+                DiagnosableError::new(
+                    ErrorPhase::ScriptValidation,
+                    "input_provider requires devices",
+                )
+            })?;
+            let devices = quoted_strings(devices_body)
+                .into_iter()
+                .map(std::path::PathBuf::from)
+                .collect::<Vec<_>>();
+            InputProviderConfig::evdev(devices, mode, output).map(Some)
+        }
+    }
 }
 
 fn parse_hotkeys(source: &str) -> Result<Vec<(HotkeyId, MacroDefinition)>, DiagnosableError> {
@@ -120,6 +201,82 @@ fn parse_bindings(source: &str) -> Result<Vec<BindingDefinition>, DiagnosableErr
         result.push(parse_binding_entry(entry)?);
     }
     Ok(result)
+}
+
+fn parse_motions(
+    source: &str,
+    defaults: &AutomationDefaults,
+    leader_defined: bool,
+) -> Result<Vec<MotionDefinition>, DiagnosableError> {
+    let Some(motions_body) = table_body_after(source, "motions")? else {
+        return Ok(Vec::new());
+    };
+    let mut result = Vec::new();
+    for entry in top_level_tables(motions_body) {
+        result.push(parse_motion_entry(entry, defaults, leader_defined)?);
+    }
+    Ok(result)
+}
+
+fn parse_motion_entry(
+    source: &str,
+    defaults: &AutomationDefaults,
+    leader_defined: bool,
+) -> Result<MotionDefinition, DiagnosableError> {
+    let mode = BindingMode::parse(field_string(source, "mode"))?;
+    let trigger_body = table_body_after(source, "trigger")?.ok_or_else(|| {
+        DiagnosableError::new(ErrorPhase::ScriptValidation, "motion requires trigger")
+    })?;
+    let trigger = MotionTrigger::parse(quoted_strings(trigger_body))?;
+    if trigger.contains_leader() && !leader_defined {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "motion trigger uses <Leader> but leader is not configured",
+        ));
+    }
+    let inter_action_delay_ms =
+        field_u64(source, "inter_action_delay_ms")?.unwrap_or(defaults.inter_action_delay_ms);
+
+    let before_repeat = source
+        .find("repeat")
+        .map(|index| &source[..index])
+        .unwrap_or(source);
+    let macro_definition = if before_repeat.contains("macro") {
+        Some(parse_macro_field(before_repeat)?)
+    } else {
+        None
+    };
+    let repeat = table_body_after(source, "repeat")?
+        .map(parse_repeat_definition)
+        .transpose()?;
+    MotionDefinition::new(
+        trigger,
+        mode,
+        macro_definition,
+        repeat,
+        inter_action_delay_ms,
+    )
+}
+
+fn parse_repeat_definition(source: &str) -> Result<RepeatDefinition, DiagnosableError> {
+    let while_held_body = table_body_after(source, "while_held")?.ok_or_else(|| {
+        DiagnosableError::new(ErrorPhase::ScriptValidation, "repeat requires while_held")
+    })?;
+    let interval_body = table_body_after(source, "interval_ms")?.ok_or_else(|| {
+        DiagnosableError::new(ErrorPhase::ScriptValidation, "repeat requires interval_ms")
+    })?;
+    let min = field_u64(interval_body, "min")?.ok_or_else(|| {
+        DiagnosableError::new(ErrorPhase::ScriptValidation, "repeat interval requires min")
+    })?;
+    let max = field_u64(interval_body, "max")?.ok_or_else(|| {
+        DiagnosableError::new(ErrorPhase::ScriptValidation, "repeat interval requires max")
+    })?;
+    let macro_definition = parse_macro_field(source)?;
+    Ok(RepeatDefinition::new(
+        MotionTrigger::parse(quoted_strings(while_held_body))?,
+        RepeatInterval::new(min, max)?,
+        macro_definition,
+    ))
 }
 
 fn parse_binding_entry(source: &str) -> Result<BindingDefinition, DiagnosableError> {
@@ -200,6 +357,15 @@ fn parse_actions(source: &str) -> Result<Vec<MacroAction>, DiagnosableError> {
             actions.push(MacroAction::text(first_quoted(rest).ok_or_else(|| {
                 DiagnosableError::new(ErrorPhase::ScriptValidation, "text action needs a string")
             })?)?);
+        } else if let Some(rest) = line.strip_prefix("mouse_click ") {
+            actions.push(MacroAction::mouse_click(MouseButton::parse(
+                first_quoted(rest).ok_or_else(|| {
+                    DiagnosableError::new(
+                        ErrorPhase::ScriptValidation,
+                        "mouse_click action needs a string",
+                    )
+                })?,
+            )?));
         } else if let Some(rest) = line.strip_prefix("delay") {
             let number = parse_delay_milliseconds(rest)?;
             actions.push(MacroAction::delay(number)?);
@@ -212,6 +378,40 @@ fn parse_actions(source: &str) -> Result<Vec<MacroAction>, DiagnosableError> {
         }
     }
     Ok(actions)
+}
+
+fn field_u64(source: &str, field: &str) -> Result<Option<u64>, DiagnosableError> {
+    let Some(index) = source.find(field) else {
+        return Ok(None);
+    };
+    let after_field = &source[index + field.len()..];
+    let Some(equals) = after_field.find('=') else {
+        return Ok(None);
+    };
+    let value = after_field[equals + 1..]
+        .trim_start()
+        .chars()
+        .take_while(|character| character.is_ascii_digit() || *character == '-')
+        .collect::<String>();
+    if value.is_empty() {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!("{field} needs milliseconds"),
+        ));
+    }
+    let parsed = value.parse::<i64>().map_err(|_| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!("{field} needs milliseconds"),
+        )
+    })?;
+    if parsed < 0 {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!("{field} cannot be negative"),
+        ));
+    }
+    Ok(Some(parsed as u64))
 }
 
 fn parse_delay_milliseconds(source: &str) -> Result<u64, DiagnosableError> {
@@ -399,6 +599,222 @@ mod tests {
         let binding = config.bindings().values().next().unwrap();
         assert_eq!(binding.mode, BindingMode::Passthrough);
         assert_eq!(binding.macro_definition.actions().len(), 3);
+    }
+
+    #[test]
+    fn parses_uniform_keyboard_and_mouse_motions() {
+        let source = r#"
+            return {
+              leader = "F13",
+              defaults = {
+                inter_action_delay_ms = 0,
+              },
+              motions = {
+                {
+                  trigger = { "<Leader>", "f", "f" },
+                  mode = "consume",
+                  macro = macro {
+                    text "/search",
+                  },
+                },
+                {
+                  trigger = { "<Leader>", "<LClick>", "<LClick>" },
+                  mode = "passthrough",
+                  repeat = {
+                    while_held = { "<Leader>", "<LClick>" },
+                    interval_ms = { min = 50, max = 80 },
+                    macro = macro {
+                      mouse_click "left",
+                    },
+                  },
+                },
+              },
+            }
+        "#;
+
+        let config = load_lua_source(source).unwrap();
+
+        assert_eq!(config.motions().len(), 2);
+        assert!(config
+            .motions()
+            .contains_key(&MotionTrigger::parse(["<Leader>", "f", "f"]).unwrap()));
+        let repeat_motion = config
+            .motions()
+            .get(&MotionTrigger::parse(["<Leader>", "<LClick>", "<LClick>"]).unwrap())
+            .unwrap();
+        assert_eq!(repeat_motion.mode, BindingMode::Passthrough);
+        assert!(repeat_motion.repeat.is_some());
+    }
+
+    #[test]
+    fn motion_delay_override_takes_precedence_over_defaults() {
+        let source = r#"
+            return {
+              leader = "F13",
+              defaults = { inter_action_delay_ms = 10 },
+              motions = {
+                {
+                  trigger = { "<Leader>", "f", "f" },
+                  inter_action_delay_ms = 25,
+                  macro = macro {
+                    text "/search",
+                  },
+                },
+              },
+            }
+        "#;
+
+        let config = load_lua_source(source).unwrap();
+        let motion = config.motions().values().next().unwrap();
+
+        assert_eq!(config.defaults.inter_action_delay_ms, 10);
+        assert_eq!(motion.inter_action_delay_ms, 25);
+    }
+
+    #[test]
+    fn parses_explicit_evdev_observation_provider() {
+        let source = r#"
+            return {
+              leader = "F13",
+              input_provider = {
+                backend = "evdev",
+                mode = "observe",
+                output = "portal",
+                devices = {
+                  "/dev/input/by-id/test-keyboard",
+                  "/dev/input/by-id/test-mouse",
+                },
+              },
+              motions = {
+                {
+                  trigger = { "<Leader>", "f", "f" },
+                  macro = macro { text "/search" },
+                },
+              },
+            }
+        "#;
+
+        let config = load_lua_source(source).unwrap();
+        let provider = config.input_provider.unwrap();
+
+        assert_eq!(provider.backend, InputProviderBackend::Evdev);
+        assert_eq!(provider.mode, InputProviderMode::Observe);
+        assert_eq!(provider.output, InputProviderOutput::Portal);
+        assert_eq!(provider.devices.len(), 2);
+    }
+
+    #[test]
+    fn parses_explicit_evdev_grab_and_uinput_provider() {
+        let source = r#"
+            return {
+              leader = "F13",
+              input_provider = {
+                backend = "evdev",
+                mode = "grab",
+                output = "uinput",
+                devices = { "/dev/input/by-id/test-mouse" },
+              },
+              motions = {
+                {
+                  trigger = { "<Leader>", "<LClick>", "<LClick>" },
+                  macro = macro { mouse_click "left" },
+                },
+              },
+            }
+        "#;
+
+        let config = load_lua_source(source).unwrap();
+        let provider = config.input_provider.unwrap();
+
+        assert_eq!(provider.mode, InputProviderMode::Grab);
+        assert_eq!(provider.output, InputProviderOutput::Uinput);
+    }
+
+    #[test]
+    fn parses_explicit_all_device_observation_provider() {
+        let source = r#"
+            return {
+              leader = "F13",
+              input_provider = {
+                backend = "evdev",
+                mode = "observe",
+                devices = "all",
+              },
+              motions = {
+                {
+                  trigger = { "<Leader>", "f", "f" },
+                  macro = macro { text "/search" },
+                },
+              },
+            }
+        "#;
+
+        let config = load_lua_source(source).unwrap();
+        let provider = config.input_provider.unwrap();
+
+        assert!(provider.all_devices);
+        assert!(provider.devices.is_empty());
+        assert_eq!(provider.mode, InputProviderMode::Observe);
+    }
+
+    #[test]
+    fn all_device_grab_requires_explicit_acknowledgement() {
+        let denied = r#"
+            return {
+              leader = "F13",
+              input_provider = {
+                backend = "evdev",
+                mode = "grab",
+                devices = "all",
+              },
+              motions = {
+                {
+                  trigger = { "<Leader>", "f", "f" },
+                  macro = macro { text "/search" },
+                },
+              },
+            }
+        "#;
+
+        assert!(load_lua_source(denied).is_err());
+
+        let accepted = r#"
+            return {
+              leader = "F13",
+              input_provider = {
+                backend = "evdev",
+                mode = "grab",
+                devices = "all",
+                acknowledge_risk = "GRAB_ALL_INPUTS",
+              },
+              motions = {
+                {
+                  trigger = { "<Leader>", "f", "f" },
+                  macro = macro { text "/search" },
+                },
+              },
+            }
+        "#;
+
+        let provider = load_lua_source(accepted).unwrap().input_provider.unwrap();
+        assert!(provider.all_devices);
+        assert_eq!(provider.mode, InputProviderMode::Grab);
+    }
+
+    #[test]
+    fn rejects_invalid_motion_shapes() {
+        for source in [
+            r#"return { motions = { { trigger = {}, macro = macro { text "x" } } } }"#,
+            r#"return { motions = { { trigger = { "<Bad>" }, macro = macro { text "x" } } } }"#,
+            r#"return { defaults = { inter_action_delay_ms = -1 }, motions = { { trigger = { "f" }, macro = macro { text "x" } } } }"#,
+            r#"return { motions = { { trigger = { "f" }, repeat = { while_held = { "f" }, interval_ms = { min = 80, max = 50 }, macro = macro { text "x" } } } } }"#,
+            r#"return { motions = { { trigger = { "f" }, repeat = { while_held = { "f" }, interval_ms = { min = 50, max = 80 } } } } }"#,
+        ] {
+            assert!(
+                load_lua_source(source).is_err(),
+                "source should be denied: {source}"
+            );
+        }
     }
 
     #[test]
