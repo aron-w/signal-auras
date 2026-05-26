@@ -10,20 +10,22 @@ return {
   defaults = {
     inter_action_delay_ms = 200,
   },
-  hotkeys = {
-    ["F5"] = macro {
-      key "Enter",
-      text "/hideout",
-      delay(50),
-      key "Enter",
-    },
-  },
   motions = {
+    {
+      trigger = { "F5" },
+      mode = "passthrough",
+      macro = macro {
+        key "Enter",
+        text "/hideout",
+        delay(50),
+        key "Enter",
+      },
+    },
     {
       trigger = { "<Leader>", "<LClick>", "<LClick>" },
       mode = "passthrough",
       repeat = {
-        while_held = { "<Leader>", "<LClick>" },
+        while_held = { "<LClick>" },
         interval_ms = { min = 50, max = 80 },
         macro = macro {
           mouse_click "left",

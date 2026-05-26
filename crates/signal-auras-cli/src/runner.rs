@@ -605,7 +605,6 @@ fn run_live_real_lifecycle(
     CTRL_C_REQUESTED.store(false, Ordering::SeqCst);
     install_ctrl_c_handler();
     let mut scheduler = MacroScheduler::default();
-    let active_adapter = RealWaylandAdapter::new();
     let mut motion_runtime =
         MotionRuntime::new(motions.iter().map(|motion| motion.definition.clone()));
     let mut repeat_ticks = motions
@@ -673,10 +672,22 @@ fn run_live_real_lifecycle(
                         trigger_label_for_log(trigger)
                     )),
                 }
-                handle_motion_runtime_event(
+                let active_context = adapter.active_process_context()?;
+                log.debug(format!(
+                    "event=active_process_context confidence={:?} visible_name={} app_id={} window_class={}",
+                    active_context.confidence,
+                    active_context
+                        .visible_name
+                        .as_ref()
+                        .map(signal_auras_core::ProcessName::as_str)
+                        .unwrap_or("none"),
+                    active_context.app_id.as_deref().unwrap_or("none"),
+                    active_context.window_class.as_deref().unwrap_or("none")
+                ));
+                handle_motion_runtime_event_with_context(
                     event,
                     motions,
-                    &active_adapter,
+                    active_context,
                     adapter,
                     &mut scheduler,
                     stats,
@@ -701,9 +712,21 @@ fn run_live_real_lifecycle(
                         "event=motion_repeat_tick trigger={} interval_ms={interval_ms}",
                         trigger_label_for_log(trigger)
                     ));
-                    handle_motion_repeat_tick(
+                    let active_context = adapter.active_process_context()?;
+                    log.debug(format!(
+                        "event=active_process_context confidence={:?} visible_name={} app_id={} window_class={}",
+                        active_context.confidence,
+                        active_context
+                            .visible_name
+                            .as_ref()
+                            .map(signal_auras_core::ProcessName::as_str)
+                            .unwrap_or("none"),
+                        active_context.app_id.as_deref().unwrap_or("none"),
+                        active_context.window_class.as_deref().unwrap_or("none")
+                    ));
+                    handle_motion_repeat_tick_with_context(
                         motion,
-                        &active_adapter,
+                        active_context,
                         adapter,
                         &mut scheduler,
                         stats,
@@ -829,6 +852,34 @@ where
     }
 }
 
+fn handle_motion_runtime_event_with_context<E>(
+    event: MotionRuntimeEvent,
+    motions: &[RuntimeMotion],
+    active_context: signal_auras_core::ActiveProcessContext,
+    executor: &mut E,
+    scheduler: &mut MacroScheduler,
+    stats: &mut RuntimeStats,
+) -> Result<(), DiagnosableError>
+where
+    E: MacroExecutor,
+{
+    match event {
+        MotionRuntimeEvent::Triggered { trigger, .. } => {
+            let Some(motion) = motions
+                .iter()
+                .find(|motion| motion.definition.trigger == trigger)
+            else {
+                return Ok(());
+            };
+            handle_motion_trigger_with_context(motion, active_context, executor, scheduler, stats)
+        }
+        MotionRuntimeEvent::RepeatCancelled { trigger } => {
+            println!("motion_repeat_cancelled trigger={}", trigger.describe());
+            Ok(())
+        }
+    }
+}
+
 fn handle_motion_trigger<P, E>(
     motion: &RuntimeMotion,
     active_process_provider: &P,
@@ -841,6 +892,19 @@ where
     E: MacroExecutor,
 {
     let active_context = active_process_provider.active_process_context()?;
+    handle_motion_trigger_with_context(motion, active_context, executor, scheduler, stats)
+}
+
+fn handle_motion_trigger_with_context<E>(
+    motion: &RuntimeMotion,
+    active_context: signal_auras_core::ActiveProcessContext,
+    executor: &mut E,
+    scheduler: &mut MacroScheduler,
+    stats: &mut RuntimeStats,
+) -> Result<(), DiagnosableError>
+where
+    E: MacroExecutor,
+{
     let trigger_label = motion.definition.trigger.describe();
     stats.record_trigger(&trigger_label);
     match motion.definition.mode {
@@ -885,10 +949,26 @@ where
     P: ActiveProcessProvider,
     E: MacroExecutor,
 {
+    if motion.definition.repeat.is_none() {
+        return Ok(());
+    }
+    let active_context = active_process_provider.active_process_context()?;
+    handle_motion_repeat_tick_with_context(motion, active_context, executor, scheduler, stats)
+}
+
+fn handle_motion_repeat_tick_with_context<E>(
+    motion: &RuntimeMotion,
+    active_context: signal_auras_core::ActiveProcessContext,
+    executor: &mut E,
+    scheduler: &mut MacroScheduler,
+    stats: &mut RuntimeStats,
+) -> Result<(), DiagnosableError>
+where
+    E: MacroExecutor,
+{
     let Some(repeat) = &motion.definition.repeat else {
         return Ok(());
     };
-    let active_context = active_process_provider.active_process_context()?;
     let trigger_label = format!("{} repeat", motion.definition.trigger.describe());
     match motion.scope.decide_context(&active_context) {
         ScopeDecision::Allowed => {
