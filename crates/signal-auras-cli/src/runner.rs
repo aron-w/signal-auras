@@ -1,10 +1,10 @@
 use crate::prompt::{stdin_is_interactive, ScopePrompt, TerminalPrompt};
 use signal_auras_core::{
     execute_plan_with_inter_action_delay, ActiveProcessProvider, BindingMode, BindingTrigger,
-    CapabilitySet, DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyId, HotkeyRegistrar,
-    MacroDefinition, MacroExecutor, MacroScheduler, MotionInputEvent, MotionInputState,
-    MotionRuntime, MotionRuntimeEvent, MotionTrigger, RuntimeMotion, RuntimeStats, ScopeDecision,
-    ScopeSelection, ShutdownReason, SynthesizedInputRequest,
+    CapabilityKind, CapabilitySet, DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyId,
+    HotkeyRegistrar, MacroDefinition, MacroExecutor, MacroScheduler, MotionInputEvent,
+    MotionInputState, MotionRuntime, MotionRuntimeEvent, MotionTrigger, RuntimeMotion,
+    RuntimeStats, ScopeDecision, ScopeSelection, ShutdownReason, SynthesizedInputRequest,
 };
 use signal_auras_lua::load_lua_file;
 use signal_auras_wayland::RealWaylandAdapter;
@@ -403,6 +403,12 @@ pub fn start_live_real_runner_with_options(
     }
     stats.record_capability_probe_success();
     println!("capability_probe result=ok");
+    if required.contains(CapabilityKind::ActiveProcessMetadata) {
+        log.debug("event=active_process_provider_start provider=kwin-script");
+        adapter.ensure_active_process_provider()?;
+        stats.record_kde_bridge_setup();
+        log.debug("event=active_process_provider_ready provider=kwin-script");
+    }
 
     for binding in &bindings {
         stats.record_registration_attempt();

@@ -88,6 +88,7 @@ pub struct KwinShortcutBridge {
     actions: BTreeMap<String, HotkeyId>,
     active_process: ActiveProcessContext,
     scripts: Vec<KwinScriptHandle>,
+    active_process_monitor: Option<KwinScriptHandle>,
     next_index: usize,
     callback_bus_name: String,
     callback_object_path: String,
@@ -114,6 +115,7 @@ impl KwinShortcutBridge {
                 "KDE active-process metadata has not been received yet",
             ),
             scripts: Vec::new(),
+            active_process_monitor: None,
             next_index: 0,
             callback_bus_name,
             callback_object_path,
@@ -167,6 +169,52 @@ impl KwinShortcutBridge {
         Ok(format!("kde-kwin-script:{script_id}:{}", hotkey.as_str()))
     }
 
+    pub fn ensure_active_process_monitor(&mut self) -> Result<(), DiagnosableError> {
+        if self.active_process_monitor.is_some() {
+            return Ok(());
+        }
+        self.next_index += 1;
+        let action_name = format!(
+            "SignalAurasActiveProcess_{}_{}",
+            std::process::id(),
+            self.next_index
+        );
+        let script_id = format!(
+            "signal-auras-active-process-{}-{}",
+            std::process::id(),
+            self.next_index
+        );
+        let script_path = std::env::temp_dir().join(format!("{script_id}.js"));
+        let script = kwin_active_process_script(
+            &action_name,
+            &self.callback_bus_name,
+            &self.callback_object_path,
+        );
+        fs::write(&script_path, script).map_err(bridge_error)?;
+
+        let proxy = kwin_scripting_proxy(&self.connection)?;
+        let loaded_id: i32 = proxy
+            .call(
+                "loadScript",
+                &(script_path.to_string_lossy().as_ref(), script_id.as_str()),
+            )
+            .map_err(bridge_error)?;
+        if loaded_id < 0 {
+            let _ = fs::remove_file(&script_path);
+            return Err(bridge_diagnostic(
+                "KWin refused to load the active-process metadata script",
+            ));
+        }
+        proxy.call::<_, _, ()>("start", &()).map_err(bridge_error)?;
+
+        self.active_process_monitor = Some(KwinScriptHandle {
+            action_name,
+            script_id,
+            script_path,
+        });
+        Ok(())
+    }
+
     pub fn next_shortcut_event(&mut self) -> Option<HotkeyId> {
         while let Ok(event) = self.receiver.try_recv() {
             self.active_process = event.active_process;
@@ -183,19 +231,28 @@ impl KwinShortcutBridge {
 
     pub fn unload(&mut self) -> Result<CleanupReport, DiagnosableError> {
         let attempted = self.scripts.len();
+        let attempted = attempted + usize::from(self.active_process_monitor.is_some());
         if attempted == 0 {
             return Ok(CleanupReport::empty());
         }
         let proxy = kwin_scripting_proxy(&self.connection)?;
         let kglobalaccel = kglobalaccel_proxy(&self.connection)?;
         let mut failures = 0usize;
-        for script in self.scripts.drain(..) {
+        let mut scripts = self.scripts.drain(..).collect::<Vec<_>>();
+        if let Some(script) = self.active_process_monitor.take() {
+            scripts.push(script);
+        }
+        for script in scripts {
             let unloaded = proxy
                 .call::<_, _, bool>("unloadScript", &script.script_id.as_str())
                 .unwrap_or(false);
-            let unregistered = kglobalaccel
-                .call::<_, _, bool>("unregister", &("kwin", script.action_name.as_str()))
-                .unwrap_or(false);
+            let unregistered = if self.actions.contains_key(&script.action_name) {
+                kglobalaccel
+                    .call::<_, _, bool>("unregister", &("kwin", script.action_name.as_str()))
+                    .unwrap_or(false)
+            } else {
+                true
+            };
             if !unloaded || !unregistered {
                 failures += 1;
             }
@@ -357,6 +414,34 @@ fn kwin_shortcut_script(
         action = action_name,
         description = description,
         shortcut = shortcut,
+        bus = bus_name,
+        path = object_path,
+    )
+}
+
+fn kwin_active_process_script(action_name: &str, bus_name: &str, object_path: &str) -> String {
+    format!(
+        "function signalAurasValue(value) {{ return value === undefined || value === null ? \"\" : value.toString(); }}\n\
+         function signalAurasReportActiveWindow() {{\n\
+             var window = workspace.activeWindow;\n\
+             var caption = \"\";\n\
+             var appId = \"\";\n\
+             var windowClass = \"\";\n\
+             var pid = \"\";\n\
+             try {{\n\
+                 if (window) {{\n\
+                     caption = signalAurasValue(window.caption);\n\
+                     appId = signalAurasValue(window.resourceClass);\n\
+                     windowClass = signalAurasValue(window.windowClass);\n\
+                     pid = signalAurasValue(window.pid);\n\
+                 }}\n\
+             }} catch (error) {{\n\
+             }}\n\
+             callDBus({bus:?}, {path:?}, \"org.signalAuras.KWinBridge\", \"triggered\", {action:?}, caption, appId, windowClass, pid);\n\
+         }}\n\
+         signalAurasReportActiveWindow();\n\
+         workspace.windowActivated.connect(function(window) {{ signalAurasReportActiveWindow(); }});\n",
+        action = action_name,
         bus = bus_name,
         path = object_path,
     )

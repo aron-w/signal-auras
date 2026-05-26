@@ -125,6 +125,19 @@ impl RealWaylandAdapter {
         self.rejected_hotkeys.insert(hotkey.into());
     }
 
+    pub fn ensure_active_process_provider(&mut self) -> Result<(), DiagnosableError> {
+        if self.environment.is_some() {
+            return Ok(());
+        }
+        if self.shortcut_bridge.is_none() {
+            self.shortcut_bridge = Some(crate::kde_bridge::KwinShortcutBridge::connect()?);
+        }
+        self.shortcut_bridge
+            .as_mut()
+            .expect("shortcut bridge was initialized")
+            .ensure_active_process_monitor()
+    }
+
     pub fn configure_input_provider(
         &mut self,
         provider: Option<&InputProviderConfig>,
