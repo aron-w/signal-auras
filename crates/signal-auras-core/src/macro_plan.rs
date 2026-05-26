@@ -1,4 +1,4 @@
-use crate::{DiagnosableError, ErrorPhase};
+use crate::{AdapterDiagnostic, DiagnosableError, ErrorPhase};
 use std::collections::BTreeSet;
 use std::thread;
 use std::time::Duration;
@@ -10,6 +10,48 @@ pub enum MacroAction {
     KeyPress { key: String },
     TextInput { text: String },
     Delay { duration_ms: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SynthesizedInputState {
+    Pending,
+    Emitted,
+    Denied,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SynthesizedInputRequest {
+    pub action: MacroAction,
+    pub sequence: usize,
+    pub state: SynthesizedInputState,
+    pub diagnostic: Option<AdapterDiagnostic>,
+}
+
+impl SynthesizedInputRequest {
+    pub fn new(action: MacroAction, sequence: usize) -> Self {
+        Self {
+            action,
+            sequence,
+            state: SynthesizedInputState::Pending,
+            diagnostic: None,
+        }
+    }
+
+    pub fn denied(mut self, diagnostic: AdapterDiagnostic) -> Self {
+        self.state = SynthesizedInputState::Denied;
+        self.diagnostic = Some(diagnostic);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputEmission {
+    Emitted,
+    Denied,
+    Failed,
+    Cancelled,
 }
 
 impl MacroAction {

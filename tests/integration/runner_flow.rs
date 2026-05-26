@@ -271,6 +271,67 @@ fn lifecycle_executes_hotkey_events_until_ctrl_c_shutdown() {
     assert_eq!(registrar.unregisters, 1);
 }
 
+#[test]
+fn partial_registration_failure_cleans_up_successful_handles() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          scope = { processes = { "poe2.exe" } },
+          hotkeys = {
+            ["F5"] = macro { text "one" },
+            ["F6"] = macro { text "two" },
+          },
+        }
+        "#,
+    );
+    let mut prompt = Prompt::new(ConsentDecision::Cancel);
+    let mut registrar = FailsOnSecondRegistration::default();
+    let active = Active(Some(ProcessName::parse("poe2.exe").unwrap()));
+    let mut executor = Executor::default();
+    let mut lifecycle = ScriptedLifecycle::new(vec![RunnerEvent::Shutdown(
+        signal_auras_core::ShutdownReason::CtrlC,
+    )]);
+
+    let error = start_runner_with_lifecycle(
+        &lua_file,
+        &mut prompt,
+        &mut registrar,
+        &active,
+        &mut executor,
+        &mut lifecycle,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.phase, ErrorPhase::Registration);
+    assert_eq!(registrar.register_attempts, 2);
+    assert_eq!(registrar.unregisters, 1);
+}
+
+#[derive(Default)]
+struct FailsOnSecondRegistration {
+    register_attempts: usize,
+    unregisters: usize,
+}
+
+impl HotkeyRegistrar for FailsOnSecondRegistration {
+    fn register(&mut self, _binding: HotkeyBinding) -> Result<RegistrationId, DiagnosableError> {
+        self.register_attempts += 1;
+        if self.register_attempts == 2 {
+            Err(DiagnosableError::new(
+                ErrorPhase::Registration,
+                "second registration failed",
+            ))
+        } else {
+            Ok(RegistrationId::new("first"))
+        }
+    }
+
+    fn unregister_all(&mut self) -> Result<(), DiagnosableError> {
+        self.unregisters += 1;
+        Ok(())
+    }
+}
+
 struct Prompt {
     decision: ConsentDecision,
     calls: usize,

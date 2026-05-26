@@ -41,3 +41,17 @@ fn lua_api_denies_process_shell_environment_and_dynamic_loading() {
         );
     }
 }
+
+#[test]
+fn lua_api_denies_compositor_metadata_and_raw_input_apis() {
+    for source in [
+        r#"return { hotkeys = {}, leak = active_process() }"#,
+        r#"return { hotkeys = {}, leak = synthesize_input("x") }"#,
+        r#"return { hotkeys = {}, leak = wayland.global_shortcut("F5") }"#,
+    ] {
+        assert!(
+            load_lua_source(source).is_err(),
+            "source should be denied: {source}"
+        );
+    }
+}

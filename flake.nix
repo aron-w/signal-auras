@@ -35,6 +35,8 @@
             uv
             wayland
             wayland-protocols
+            dbus
+            xdg-desktop-portal
           ];
 
           shellHook = ''

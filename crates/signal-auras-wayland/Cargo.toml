@@ -7,5 +7,9 @@ version.workspace = true
 [dependencies]
 signal-auras-core = { path = "../signal-auras-core" }
 
+# The first real adapter layer uses std/env session detection and fail-closed
+# provider contracts. Add compositor-specific crates here when a backend is
+# selected behind the adapter traits.
+
 [lib]
 path = "src/lib.rs"

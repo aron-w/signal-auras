@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,12 +49,235 @@ impl fmt::Display for Capability {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CapabilityKind {
+    GlobalShortcut,
+    ActiveProcessMetadata,
+    SynthesizedInput,
+}
+
+impl CapabilityKind {
+    pub fn legacy_capability(self) -> Capability {
+        match self {
+            Self::GlobalShortcut => Capability::GlobalShortcut,
+            Self::ActiveProcessMetadata => Capability::ActiveProcess,
+            Self::SynthesizedInput => Capability::SynthesizedInput,
+        }
+    }
+}
+
+impl fmt::Display for CapabilityKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::GlobalShortcut => "global_shortcut",
+            Self::ActiveProcessMetadata => "active_process_metadata",
+            Self::SynthesizedInput => "synthesized_input",
+        };
+        f.write_str(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityAvailability {
+    Available,
+    Unsupported,
+    PermissionRequired,
+    Denied,
+    Revoked,
+    Invalidated,
+}
+
+impl CapabilityAvailability {
+    pub fn allows_activation(self) -> bool {
+        matches!(self, Self::Available)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdapterDiagnostic {
+    pub phase: ErrorPhase,
+    pub capability: Option<CapabilityKind>,
+    pub message: String,
+    pub remediation: Option<String>,
+    pub source: Option<String>,
+}
+
+impl AdapterDiagnostic {
+    pub fn new(phase: ErrorPhase, message: impl Into<String>) -> Self {
+        Self {
+            phase,
+            capability: None,
+            message: message.into(),
+            remediation: None,
+            source: None,
+        }
+    }
+
+    pub fn with_capability(mut self, capability: CapabilityKind) -> Self {
+        self.capability = Some(capability);
+        self
+    }
+
+    pub fn with_remediation(mut self, remediation: impl Into<String>) -> Self {
+        self.remediation = Some(remediation.into());
+        self
+    }
+
+    pub fn with_source(mut self, source: impl Into<String>) -> Self {
+        self.source = Some(source.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityStatus {
+    pub kind: CapabilityKind,
+    pub availability: CapabilityAvailability,
+    pub source: Option<String>,
+    pub diagnostic: Option<AdapterDiagnostic>,
+}
+
+impl CapabilityStatus {
+    pub fn available(kind: CapabilityKind, source: impl Into<String>) -> Self {
+        Self {
+            kind,
+            availability: CapabilityAvailability::Available,
+            source: Some(source.into()),
+            diagnostic: None,
+        }
+    }
+
+    pub fn unavailable(
+        kind: CapabilityKind,
+        availability: CapabilityAvailability,
+        diagnostic: AdapterDiagnostic,
+    ) -> Self {
+        Self {
+            kind,
+            availability,
+            source: diagnostic.source.clone(),
+            diagnostic: Some(diagnostic),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CapabilitySet {
+    required: Vec<CapabilityKind>,
+}
+
+impl CapabilitySet {
+    pub fn new(required: impl IntoIterator<Item = CapabilityKind>) -> Self {
+        let mut required = required.into_iter().collect::<Vec<_>>();
+        required.sort();
+        required.dedup();
+        Self { required }
+    }
+
+    pub fn for_bindings<'a>(
+        bindings: impl IntoIterator<Item = &'a crate::config::HotkeyBinding>,
+    ) -> Self {
+        let mut required = vec![CapabilityKind::GlobalShortcut];
+        for binding in bindings {
+            if matches!(
+                binding.scope,
+                crate::scope::ScopeSelection::ProcessList { .. }
+            ) {
+                required.push(CapabilityKind::ActiveProcessMetadata);
+            }
+            if binding.macro_definition.actions().iter().any(|action| {
+                matches!(
+                    action,
+                    crate::macro_plan::MacroAction::KeyPress { .. }
+                        | crate::macro_plan::MacroAction::TextInput { .. }
+                )
+            }) {
+                required.push(CapabilityKind::SynthesizedInput);
+            }
+        }
+        Self::new(required)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = CapabilityKind> + '_ {
+        self.required.iter().copied()
+    }
+
+    pub fn contains(&self, kind: CapabilityKind) -> bool {
+        self.required.contains(&kind)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CapabilityReport {
+    statuses: BTreeMap<CapabilityKind, CapabilityStatus>,
+}
+
+impl CapabilityReport {
+    pub fn from_statuses(statuses: impl IntoIterator<Item = CapabilityStatus>) -> Self {
+        Self {
+            statuses: statuses
+                .into_iter()
+                .map(|status| (status.kind, status))
+                .collect(),
+        }
+    }
+
+    pub fn status(&self, kind: CapabilityKind) -> Option<&CapabilityStatus> {
+        self.statuses.get(&kind)
+    }
+
+    pub fn all_available(&self, required: &CapabilitySet) -> bool {
+        required.iter().all(|kind| {
+            self.status(kind)
+                .is_some_and(|status| status.availability.allows_activation())
+        })
+    }
+
+    pub fn first_blocking_error(&self, required: &CapabilitySet) -> Option<DiagnosableError> {
+        for kind in required.iter() {
+            let Some(status) = self.status(kind) else {
+                return Some(
+                    DiagnosableError::new(
+                        ErrorPhase::CapabilityProbe,
+                        format!("required capability '{kind}' was not probed"),
+                    )
+                    .with_capability(kind.legacy_capability()),
+                );
+            };
+            if !status.availability.allows_activation() {
+                return Some(
+                    DiagnosableError::new(
+                        ErrorPhase::CapabilityProbe,
+                        status
+                            .diagnostic
+                            .as_ref()
+                            .map(|diagnostic| diagnostic.message.clone())
+                            .unwrap_or_else(|| {
+                                format!("required capability '{kind}' is unavailable")
+                            }),
+                    )
+                    .with_capability(kind.legacy_capability())
+                    .with_optional_remediation(
+                        status
+                            .diagnostic
+                            .as_ref()
+                            .and_then(|diagnostic| diagnostic.remediation.clone()),
+                    )
+                    .with_optional_source(status.source.clone()),
+                );
+            }
+        }
+        None
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnosableError {
     pub phase: ErrorPhase,
     pub capability: Option<Capability>,
     pub message: String,
     pub remediation: Option<String>,
+    pub source: Option<String>,
 }
 
 impl DiagnosableError {
@@ -63,6 +287,7 @@ impl DiagnosableError {
             capability: None,
             message: message.into(),
             remediation: None,
+            source: None,
         }
     }
 
@@ -75,6 +300,21 @@ impl DiagnosableError {
         self.remediation = Some(remediation.into());
         self
     }
+
+    pub fn with_optional_remediation(mut self, remediation: Option<String>) -> Self {
+        self.remediation = remediation;
+        self
+    }
+
+    pub fn with_source(mut self, source: impl Into<String>) -> Self {
+        self.source = Some(source.into());
+        self
+    }
+
+    pub fn with_optional_source(mut self, source: Option<String>) -> Self {
+        self.source = source;
+        self
+    }
 }
 
 impl fmt::Display for DiagnosableError {
@@ -85,6 +325,9 @@ impl fmt::Display for DiagnosableError {
         }
         if let Some(remediation) = &self.remediation {
             write!(f, " remediation: {remediation}")?;
+        }
+        if let Some(source) = &self.source {
+            write!(f, " source: {source}")?;
         }
         Ok(())
     }

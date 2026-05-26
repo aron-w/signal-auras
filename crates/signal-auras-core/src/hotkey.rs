@@ -49,6 +49,59 @@ impl RegistrationId {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortcutRegistrationState {
+    Pending,
+    Registered,
+    Rejected,
+    Unregistering,
+    Unregistered,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShortcutRegistrationHandle {
+    id: RegistrationId,
+}
+
+impl ShortcutRegistrationHandle {
+    pub fn new(id: RegistrationId) -> Self {
+        Self { id }
+    }
+
+    pub fn id(&self) -> &RegistrationId {
+        &self.id
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanupReport {
+    pub attempted: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+}
+
+impl CleanupReport {
+    pub fn empty() -> Self {
+        Self {
+            attempted: 0,
+            succeeded: 0,
+            failed: 0,
+        }
+    }
+
+    pub fn all_succeeded(attempted: usize) -> Self {
+        Self {
+            attempted,
+            succeeded: attempted,
+            failed: 0,
+        }
+    }
+
+    pub fn is_success(&self) -> bool {
+        self.failed == 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

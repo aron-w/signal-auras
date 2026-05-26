@@ -1,4 +1,5 @@
-use crate::{DiagnosableError, ErrorPhase};
+use crate::{AdapterDiagnostic, DiagnosableError, ErrorPhase};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProcessName(String);
@@ -49,6 +50,103 @@ pub enum ScopeDecision {
     Denied { reason: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveProcessConfidence {
+    Exact,
+    NameOnly,
+    Ambiguous,
+    Unavailable,
+    Denied,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveProcessContext {
+    pub visible_name: Option<ProcessName>,
+    pub process_id: Option<u32>,
+    pub app_id: Option<String>,
+    pub confidence: ActiveProcessConfidence,
+    pub captured_at: Instant,
+    pub diagnostic: Option<AdapterDiagnostic>,
+}
+
+impl ActiveProcessContext {
+    pub fn exact(visible_name: ProcessName, process_id: Option<u32>) -> Self {
+        Self {
+            visible_name: Some(visible_name),
+            process_id,
+            app_id: None,
+            confidence: ActiveProcessConfidence::Exact,
+            captured_at: Instant::now(),
+            diagnostic: None,
+        }
+    }
+
+    pub fn name_only(visible_name: ProcessName) -> Self {
+        Self {
+            visible_name: Some(visible_name),
+            process_id: None,
+            app_id: None,
+            confidence: ActiveProcessConfidence::NameOnly,
+            captured_at: Instant::now(),
+            diagnostic: None,
+        }
+    }
+
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            visible_name: None,
+            process_id: None,
+            app_id: None,
+            confidence: ActiveProcessConfidence::Unavailable,
+            captured_at: Instant::now(),
+            diagnostic: Some(AdapterDiagnostic::new(
+                ErrorPhase::CapabilityProbe,
+                reason.into(),
+            )),
+        }
+    }
+
+    pub fn denied(reason: impl Into<String>) -> Self {
+        Self {
+            visible_name: None,
+            process_id: None,
+            app_id: None,
+            confidence: ActiveProcessConfidence::Denied,
+            captured_at: Instant::now(),
+            diagnostic: Some(AdapterDiagnostic::new(
+                ErrorPhase::CapabilityProbe,
+                reason.into(),
+            )),
+        }
+    }
+
+    pub fn ambiguous(reason: impl Into<String>) -> Self {
+        Self {
+            visible_name: None,
+            process_id: None,
+            app_id: None,
+            confidence: ActiveProcessConfidence::Ambiguous,
+            captured_at: Instant::now(),
+            diagnostic: Some(AdapterDiagnostic::new(ErrorPhase::Trigger, reason.into())),
+        }
+    }
+
+    pub fn is_stale(&self, max_age: Duration) -> bool {
+        self.captured_at.elapsed() > max_age
+    }
+
+    pub fn matchable_name(&self) -> Option<&ProcessName> {
+        match self.confidence {
+            ActiveProcessConfidence::Exact | ActiveProcessConfidence::NameOnly => {
+                self.visible_name.as_ref()
+            }
+            ActiveProcessConfidence::Ambiguous
+            | ActiveProcessConfidence::Unavailable
+            | ActiveProcessConfidence::Denied => None,
+        }
+    }
+}
+
 impl ScopeSelection {
     pub fn from_script(scope: ScriptScope) -> Self {
         match scope {
@@ -94,6 +192,31 @@ impl ScopeSelection {
                     reason: "active process is unavailable".to_string(),
                 },
             },
+        }
+    }
+
+    pub fn decide_context(&self, active_context: &ActiveProcessContext) -> ScopeDecision {
+        if matches!(self, Self::ExplicitGlobal) {
+            return ScopeDecision::Allowed;
+        }
+        if active_context.is_stale(Duration::from_secs(2)) {
+            return ScopeDecision::Denied {
+                reason: "active process metadata is stale".to_string(),
+            };
+        }
+        match active_context.confidence {
+            ActiveProcessConfidence::Ambiguous => ScopeDecision::Denied {
+                reason: "active process metadata is ambiguous".to_string(),
+            },
+            ActiveProcessConfidence::Unavailable => ScopeDecision::Denied {
+                reason: "active process metadata is unavailable".to_string(),
+            },
+            ActiveProcessConfidence::Denied => ScopeDecision::Denied {
+                reason: "active process metadata permission was denied".to_string(),
+            },
+            ActiveProcessConfidence::Exact | ActiveProcessConfidence::NameOnly => {
+                self.decide(active_context.matchable_name())
+            }
         }
     }
 

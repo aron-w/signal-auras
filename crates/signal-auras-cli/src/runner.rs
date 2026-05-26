@@ -1,11 +1,11 @@
 use crate::prompt::{stdin_is_interactive, ScopePrompt, TerminalPrompt};
 use signal_auras_core::{
-    execute_plan, ActiveProcessProvider, DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyId,
-    HotkeyRegistrar, MacroExecutor, MacroScheduler, RuntimeStats, ScopeDecision, ScopeSelection,
-    ShutdownReason,
+    execute_plan, ActiveProcessProvider, CapabilitySet, DiagnosableError, ErrorPhase,
+    HotkeyBinding, HotkeyId, HotkeyRegistrar, MacroExecutor, MacroScheduler, RuntimeStats,
+    ScopeDecision, ScopeSelection, ShutdownReason, SynthesizedInputRequest,
 };
 use signal_auras_lua::load_lua_file;
-use signal_auras_wayland::MockableWaylandAdapter;
+use signal_auras_wayland::RealWaylandAdapter;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,19 +31,9 @@ pub fn run_cli(
 ) -> Result<(), DiagnosableError> {
     let args = args.into_iter().collect::<Vec<_>>();
     let path = parse_run_args(&args)?;
-    let mut registrar = MockableWaylandAdapter::default();
-    let active_process_provider = MockableWaylandAdapter::default();
-    let mut executor = MockableWaylandAdapter::default();
+    let mut adapter = RealWaylandAdapter::new();
     let mut lifecycle = CtrlCShutdown::new();
-    start_runner_with_lifecycle(
-        &path,
-        prompt,
-        &mut registrar,
-        &active_process_provider,
-        &mut executor,
-        &mut lifecycle,
-    )
-    .map(|_| ())
+    start_real_runner_with_lifecycle(&path, prompt, &mut adapter, &mut lifecycle).map(|_| ())
 }
 
 pub fn parse_run_args(args: &[String]) -> Result<PathBuf, DiagnosableError> {
@@ -148,6 +138,80 @@ where
 
     println!("{}", stats.render_summary(shutdown_reason));
     registrar.unregister_all()?;
+    Ok(stats)
+}
+
+pub fn start_real_runner_with_lifecycle<L>(
+    lua_file: &Path,
+    prompt: &mut impl ScopePrompt,
+    adapter: &mut RealWaylandAdapter,
+    lifecycle: &mut L,
+) -> Result<RuntimeStats, DiagnosableError>
+where
+    L: RunnerLifecycle,
+{
+    println!("startup script_path={}", lua_file.display());
+    let config = load_lua_file(lua_file)?;
+    println!("script_validation result=ok");
+
+    let scope = match config.scope.clone() {
+        Some(script_scope) => ScopeSelection::from_script(script_scope),
+        None => match prompt.resolve_missing_scope()?.into_scope()? {
+            Some(scope) => scope,
+            None => {
+                println!("scope_prompt result=cancelled");
+                return Ok(RuntimeStats::new());
+            }
+        },
+    };
+    println!("effective_scope {}", scope.describe());
+
+    let mut stats = RuntimeStats::new();
+    let bindings = config.bindings_for_scope(scope);
+    let required = CapabilitySet::for_bindings(&bindings);
+    let report = adapter.probe_capabilities(&required);
+    if let Some(error) = report.first_blocking_error(&required) {
+        stats.record_capability_probe_failure();
+        stats.record_permission_failure();
+        println!("capability_probe result=failed error={error}");
+        return Err(error);
+    }
+    stats.record_capability_probe_success();
+    println!("capability_probe result=ok");
+
+    for binding in &bindings {
+        stats.record_registration_attempt();
+        match adapter.register(binding.clone()) {
+            Ok(id) => {
+                stats.record_registration_success();
+                println!(
+                    "hotkey_registered hotkey={} id={}",
+                    binding.hotkey.as_str(),
+                    id.as_str()
+                );
+            }
+            Err(error) => {
+                stats.record_registration_failure();
+                cleanup_after_error(adapter, ErrorPhase::Registration)?;
+                return Err(error);
+            }
+        }
+    }
+
+    let active_adapter = RealWaylandAdapter::new();
+    let shutdown_reason =
+        match run_lifecycle(&bindings, &active_adapter, adapter, lifecycle, &mut stats) {
+            Ok(reason) => reason,
+            Err(error) => {
+                println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
+                cleanup_after_error(adapter, ErrorPhase::Shutdown)?;
+                return Err(error);
+            }
+        };
+
+    println!("{}", stats.render_summary(shutdown_reason));
+    adapter.cancel_pending()?;
+    adapter.unregister_all()?;
     Ok(stats)
 }
 
@@ -279,9 +343,10 @@ where
     E: MacroExecutor,
 {
     stats.record_trigger(binding.hotkey.as_str());
-    let active_process = active_process_provider.active_process_name()?;
-    match binding.scope.decide(active_process.as_ref()) {
+    let active_context = active_process_provider.active_process_context()?;
+    match binding.scope.decide_context(&active_context) {
         ScopeDecision::Allowed => {
+            stats.record_active_process_match();
             let guard = match scheduler.begin(binding.hotkey.as_str()) {
                 Ok(guard) => guard,
                 Err(error) => {
@@ -289,8 +354,31 @@ where
                     return Err(error);
                 }
             };
+            let mut sequence = 0usize;
             let result = execute_plan(&binding.macro_definition, |action| {
-                executor.execute_action(action)
+                sequence += 1;
+                let request = SynthesizedInputRequest::new(action.clone(), sequence);
+                match executor.execute_input_request(request)? {
+                    signal_auras_core::InputEmission::Emitted => {
+                        stats.record_synthesized_input_emitted();
+                        Ok(())
+                    }
+                    signal_auras_core::InputEmission::Denied => {
+                        stats.record_synthesized_input_denied();
+                        Err(DiagnosableError::new(
+                            ErrorPhase::MacroExecution,
+                            "synthesized input was denied",
+                        ))
+                    }
+                    signal_auras_core::InputEmission::Failed => Err(DiagnosableError::new(
+                        ErrorPhase::MacroExecution,
+                        "synthesized input failed",
+                    )),
+                    signal_auras_core::InputEmission::Cancelled => Err(DiagnosableError::new(
+                        ErrorPhase::Shutdown,
+                        "synthesized input was cancelled",
+                    )),
+                }
             });
             scheduler.finish(guard);
             match result {
@@ -304,6 +392,10 @@ where
         ScopeDecision::Denied { reason } => {
             stats.denied_action_count += 1;
             stats.scope_mismatch_count += 1;
+            stats.record_active_process_non_match();
+            if active_context.matchable_name().is_none() {
+                stats.record_metadata_unavailable();
+            }
             println!(
                 "denied_trigger hotkey={} reason={reason}",
                 binding.hotkey.as_str()

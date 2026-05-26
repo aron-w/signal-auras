@@ -20,6 +20,16 @@ pub struct RuntimeStats {
     pub denied_action_count: u64,
     pub permission_failure_count: u64,
     pub scope_mismatch_count: u64,
+    pub capability_probe_success_count: u64,
+    pub capability_probe_failure_count: u64,
+    pub shortcut_event_ignored_count: u64,
+    pub active_process_match_count: u64,
+    pub active_process_non_match_count: u64,
+    pub metadata_unavailable_count: u64,
+    pub synthesized_input_emitted_count: u64,
+    pub synthesized_input_denied_count: u64,
+    pub cleanup_success_count: u64,
+    pub cleanup_failure_count: u64,
 }
 
 impl Default for RuntimeStats {
@@ -41,6 +51,16 @@ impl RuntimeStats {
             denied_action_count: 0,
             permission_failure_count: 0,
             scope_mismatch_count: 0,
+            capability_probe_success_count: 0,
+            capability_probe_failure_count: 0,
+            shortcut_event_ignored_count: 0,
+            active_process_match_count: 0,
+            active_process_non_match_count: 0,
+            metadata_unavailable_count: 0,
+            synthesized_input_emitted_count: 0,
+            synthesized_input_denied_count: 0,
+            cleanup_success_count: 0,
+            cleanup_failure_count: 0,
         }
     }
 
@@ -75,16 +95,62 @@ impl RuntimeStats {
         self.permission_failure_count += 1;
     }
 
+    pub fn record_capability_probe_success(&mut self) {
+        self.capability_probe_success_count += 1;
+    }
+
+    pub fn record_capability_probe_failure(&mut self) {
+        self.capability_probe_failure_count += 1;
+    }
+
+    pub fn record_active_process_match(&mut self) {
+        self.active_process_match_count += 1;
+    }
+
+    pub fn record_active_process_non_match(&mut self) {
+        self.active_process_non_match_count += 1;
+    }
+
+    pub fn record_metadata_unavailable(&mut self) {
+        self.metadata_unavailable_count += 1;
+    }
+
+    pub fn record_synthesized_input_emitted(&mut self) {
+        self.synthesized_input_emitted_count += 1;
+    }
+
+    pub fn record_synthesized_input_denied(&mut self) {
+        self.synthesized_input_denied_count += 1;
+    }
+
+    pub fn record_cleanup_success(&mut self) {
+        self.cleanup_success_count += 1;
+    }
+
+    pub fn record_cleanup_failure(&mut self) {
+        self.cleanup_failure_count += 1;
+    }
+
     pub fn render_summary(&self, reason: ShutdownReason) -> String {
         format!(
-            "final_summary reason={reason:?} elapsed_ms={} triggers={} successes={} failures={} denials={} permission_failures={} scope_mismatches={}",
+            "final_summary reason={reason:?} elapsed_ms={} triggers={} successes={} failures={} denials={} permission_failures={} scope_mismatches={} capability_probe_successes={} capability_probe_failures={} ignored_events={} active_process_matches={} active_process_non_matches={} metadata_unavailable={} input_emitted={} input_denied={} cleanup_successes={} cleanup_failures={}",
             self.elapsed_runtime().as_millis(),
             self.total_triggers(),
             self.macro_success_count,
             self.macro_failure_count,
             self.denied_action_count,
             self.permission_failure_count,
-            self.scope_mismatch_count
+            self.scope_mismatch_count,
+            self.capability_probe_success_count,
+            self.capability_probe_failure_count,
+            self.shortcut_event_ignored_count,
+            self.active_process_match_count,
+            self.active_process_non_match_count,
+            self.metadata_unavailable_count,
+            self.synthesized_input_emitted_count,
+            self.synthesized_input_denied_count,
+            self.cleanup_success_count,
+            self.cleanup_failure_count
         )
     }
 }

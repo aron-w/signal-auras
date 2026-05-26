@@ -1,6 +1,7 @@
 use signal_auras_cli::prompt::{ScopePrompt, TerminalPrompt};
 use signal_auras_cli::runner::{
-    parse_run_args, start_runner, start_runner_with_lifecycle, RunnerEvent, RunnerLifecycle,
+    parse_run_args, start_real_runner_with_lifecycle, start_runner, start_runner_with_lifecycle,
+    RunnerEvent, RunnerLifecycle,
 };
 use signal_auras_core::{
     ActiveProcessProvider, ConsentDecision, DiagnosableError, ErrorPhase, HotkeyBinding,
@@ -10,6 +11,8 @@ use signal_auras_core::{
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use signal_auras_wayland::RealWaylandAdapter;
 
 #[test]
 fn cli_requires_run_and_one_path() {
@@ -233,6 +236,82 @@ fn registration_failure_runs_startup_cleanup() {
 
     assert_eq!(error.phase, ErrorPhase::Registration);
     assert_eq!(registrar.unregister_calls, 1);
+}
+
+#[test]
+fn real_runner_fails_before_registration_when_global_shortcut_capability_is_unsupported() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          scope = { processes = { "poe2.exe" } },
+          hotkeys = {
+            ["F5"] = macro {
+              text "/hideout",
+            },
+          },
+        }
+        "#,
+    );
+    let mut prompt = FixedPrompt(ConsentDecision::Cancel);
+    let mut adapter = RealWaylandAdapter::new();
+    let mut lifecycle = ScriptedLifecycle::new(vec![RunnerEvent::Shutdown(ShutdownReason::CtrlC)]);
+
+    let error =
+        start_real_runner_with_lifecycle(&lua_file, &mut prompt, &mut adapter, &mut lifecycle)
+            .unwrap_err();
+
+    assert_eq!(error.phase, ErrorPhase::CapabilityProbe);
+    assert_eq!(
+        error.capability,
+        Some(signal_auras_core::Capability::GlobalShortcut)
+    );
+}
+
+#[test]
+fn synthesized_input_denial_is_reported_before_macro_success() {
+    struct DenyingExecutor;
+
+    impl MacroExecutor for DenyingExecutor {
+        fn execute_action(&mut self, _action: &MacroAction) -> Result<(), DiagnosableError> {
+            unreachable!("execute_input_request handles text input")
+        }
+
+        fn execute_input_request(
+            &mut self,
+            _request: signal_auras_core::SynthesizedInputRequest,
+        ) -> Result<signal_auras_core::InputEmission, DiagnosableError> {
+            Ok(signal_auras_core::InputEmission::Denied)
+        }
+    }
+
+    let binding = HotkeyBinding {
+        hotkey: signal_auras_core::HotkeyId::parse("F5").unwrap(),
+        scope: ScopeSelection::ExplicitGlobal,
+        macro_definition: signal_auras_core::MacroDefinition::new(vec![MacroAction::text(
+            "/hideout",
+        )
+        .unwrap()])
+        .unwrap(),
+        registration_state: signal_auras_core::RegistrationState::Registered,
+    };
+    let active = StaticActive(Some(ProcessName::parse("poe2.exe").unwrap()));
+    let mut executor = DenyingExecutor;
+    let mut scheduler = signal_auras_core::MacroScheduler::default();
+    let mut stats = signal_auras_core::RuntimeStats::new();
+
+    let error = signal_auras_cli::runner::handle_trigger(
+        &binding,
+        &active,
+        &mut executor,
+        &mut scheduler,
+        &mut stats,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.phase, ErrorPhase::MacroExecution);
+    assert_eq!(stats.synthesized_input_emitted_count, 0);
+    assert_eq!(stats.synthesized_input_denied_count, 1);
+    assert_eq!(stats.macro_success_count, 0);
 }
 
 #[derive(Clone)]

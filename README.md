@@ -8,10 +8,12 @@ the run stops.
 ## Current Status
 
 The repository currently contains the first Lua hotkey runner implementation and
-mock-friendly Wayland adapter contracts. Real compositor protocol support for
-global shortcut registration, active-process metadata, and synthesized input is
-not implemented yet. When those capabilities are unavailable, the runner must
-fail with diagnosable errors instead of falling back to hidden behavior.
+a real Wayland adapter boundary that probes the current session and fails closed
+when no supported compositor provider is configured. Successful desktop-wide
+global shortcut registration, active-process metadata, and synthesized input
+still require a compositor-specific backend behind that boundary. When those
+capabilities are unavailable, the runner fails with diagnosable errors instead
+of falling back to hidden behavior.
 
 ## Usage
 
@@ -106,7 +108,7 @@ just failures
 ```
 
 Manual compositor verification is documented in
-`tests/compositor/manual-wayland-verification.md`. Until a real compositor
-adapter replaces the mock-friendly skeleton, that procedure can verify startup,
-validation, consent, cleanup, and diagnosable unsupported-capability behavior,
-but it cannot prove real global shortcut or synthesized input behavior.
+`tests/compositor/manual-wayland-verification.md`. Until a compositor-specific
+provider is enabled, that procedure can verify startup, validation, consent,
+cleanup, session probing, and diagnosable unsupported-capability behavior, but
+it cannot prove successful global shortcut or synthesized input behavior.
