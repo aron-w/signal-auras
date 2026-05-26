@@ -35,13 +35,14 @@ nix develop -c cargo run -p signal-auras-cli -- run ./examples/poe2-hideout.lua
 The command shape is:
 
 ```text
-signal-auras run <lua-file>
+signal-auras run [--verbose|-v] <lua-file>
 ```
 
 The runner accepts exactly one Lua file path. Startup output includes the script
 path, validation result, effective scope, capability probe result, and hotkey
 registration result. Press Ctrl-C to stop a successful run and print final
-runtime stats.
+runtime stats. Use `--verbose` while debugging provider setup and motion input;
+verbose logs use `level=... event=... key=value` fields.
 
 ## Consent Model
 
@@ -234,6 +235,7 @@ The repository also includes a `justfile` with a shell-rendered command guide:
 just
 just check
 just run
+just run-verbose
 just failures
 ```
 

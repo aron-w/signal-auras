@@ -225,6 +225,22 @@ impl RealWaylandAdapter {
         };
         provider.next_motion_event()
     }
+
+    pub fn input_provider_summary(&self) -> Option<String> {
+        self.evdev_provider.as_ref().map(|provider| {
+            format!(
+                "backend=evdev devices={} active_devices={} grabbed={} output={}",
+                provider.device_count(),
+                provider.active_device_count(),
+                provider.is_grabbed(),
+                if self.uinput_session.is_some() {
+                    "uinput"
+                } else {
+                    "portal"
+                }
+            )
+        })
+    }
 }
 
 impl ActiveProcessProvider for RealWaylandAdapter {

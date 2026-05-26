@@ -2,17 +2,19 @@ use crate::prompt::{stdin_is_interactive, ScopePrompt, TerminalPrompt};
 use signal_auras_core::{
     execute_plan_with_inter_action_delay, ActiveProcessProvider, BindingMode, BindingTrigger,
     CapabilitySet, DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyId, HotkeyRegistrar,
-    MacroDefinition, MacroExecutor, MacroScheduler, MotionInputEvent, MotionRuntime,
-    MotionRuntimeEvent, MotionTrigger, RuntimeMotion, RuntimeStats, ScopeDecision, ScopeSelection,
-    ShutdownReason, SynthesizedInputRequest,
+    MacroDefinition, MacroExecutor, MacroScheduler, MotionInputEvent, MotionInputState,
+    MotionRuntime, MotionRuntimeEvent, MotionTrigger, RuntimeMotion, RuntimeStats, ScopeDecision,
+    ScopeSelection, ShutdownReason, SynthesizedInputRequest,
 };
 use signal_auras_lua::load_lua_file;
 use signal_auras_wayland::RealWaylandAdapter;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
+    thread,
+    time::{Duration, Instant},
+};
 
 pub struct StdioPrompt;
 
@@ -32,19 +34,122 @@ pub fn run_cli(
     prompt: &mut impl ScopePrompt,
 ) -> Result<(), DiagnosableError> {
     let args = args.into_iter().collect::<Vec<_>>();
-    let path = parse_run_args(&args)?;
+    let options = parse_run_args(&args)?;
     let mut adapter = RealWaylandAdapter::new();
-    start_live_real_runner(&path, prompt, &mut adapter).map(|_| ())
+    start_live_real_runner_with_options(&options.lua_file, prompt, &mut adapter, options.log)
+        .map(|_| ())
 }
 
-pub fn parse_run_args(args: &[String]) -> Result<PathBuf, DiagnosableError> {
-    if args.len() != 2 || args[0] != "run" {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunOptions {
+    pub lua_file: PathBuf,
+    pub log: RuntimeLog,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeLog {
+    pub verbose: bool,
+    color: bool,
+    started_at: Instant,
+}
+
+impl Default for RuntimeLog {
+    fn default() -> Self {
+        Self::new(false)
+    }
+}
+
+impl RuntimeLog {
+    pub fn new(verbose: bool) -> Self {
+        Self {
+            verbose,
+            color: std::env::var_os("NO_COLOR").is_none(),
+            started_at: Instant::now(),
+        }
+    }
+
+    fn debug(self, message: impl AsRef<str>) {
+        if self.verbose {
+            println!("{}", self.render("DEBUG", message.as_ref()));
+        }
+    }
+
+    fn render(self, level: &'static str, message: &str) -> String {
+        let elapsed = self.started_at.elapsed();
+        let timestamp = format!("{:>5}.{:03}s", elapsed.as_secs(), elapsed.subsec_millis());
+        let event = field_value(message, "event").unwrap_or("runtime");
+        let rest = without_field(message, "event");
+        let level = paint(self.color, level_color(level), format!("{level:<5}"));
+        let event = paint(self.color, "\x1b[36m", format!("{event:<30}"));
+        let timestamp = paint(self.color, "\x1b[2m", timestamp);
+        format!("{timestamp}  {level}  {event}  {rest}")
+    }
+}
+
+pub fn parse_run_args(args: &[String]) -> Result<RunOptions, DiagnosableError> {
+    if args.first().map(String::as_str) != Some("run") {
         return Err(DiagnosableError::new(
             ErrorPhase::ArgumentValidation,
-            "usage: signal-auras run <lua-file>",
+            "usage: signal-auras run [--verbose|-v] <lua-file>",
         ));
     }
-    Ok(PathBuf::from(&args[1]))
+    let mut verbose = false;
+    let mut paths = Vec::new();
+    for arg in &args[1..] {
+        match arg.as_str() {
+            "--verbose" | "-v" => verbose = true,
+            value if value.starts_with('-') => {
+                return Err(DiagnosableError::new(
+                    ErrorPhase::ArgumentValidation,
+                    format!("unsupported run option '{value}'"),
+                ));
+            }
+            value => paths.push(PathBuf::from(value)),
+        }
+    }
+    if paths.len() != 1 {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ArgumentValidation,
+            "usage: signal-auras run [--verbose|-v] <lua-file>",
+        ));
+    }
+    Ok(RunOptions {
+        lua_file: paths.remove(0),
+        log: RuntimeLog::new(verbose),
+    })
+}
+
+fn level_color(level: &str) -> &'static str {
+    match level {
+        "DEBUG" => "\x1b[34m",
+        "WARN" => "\x1b[33m",
+        "ERROR" => "\x1b[31m",
+        _ => "\x1b[37m",
+    }
+}
+
+fn paint(enabled: bool, color: &str, value: impl AsRef<str>) -> String {
+    if enabled {
+        format!("{color}{}\x1b[0m", value.as_ref())
+    } else {
+        value.as_ref().to_string()
+    }
+}
+
+fn field_value<'a>(message: &'a str, field: &str) -> Option<&'a str> {
+    let prefix = format!("{field}=");
+    message
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix(&prefix))
+}
+
+fn without_field(message: &str, field: &str) -> String {
+    let prefix = format!("{field}=");
+    message
+        .split_whitespace()
+        .filter(|part| !part.starts_with(&prefix))
+        .collect::<Vec<_>>()
+        .join("  ")
 }
 
 pub fn start_runner<R, P, E>(
@@ -234,9 +339,29 @@ pub fn start_live_real_runner(
     prompt: &mut impl ScopePrompt,
     adapter: &mut RealWaylandAdapter,
 ) -> Result<RuntimeStats, DiagnosableError> {
+    start_live_real_runner_with_options(lua_file, prompt, adapter, RuntimeLog::default())
+}
+
+pub fn start_live_real_runner_with_options(
+    lua_file: &Path,
+    prompt: &mut impl ScopePrompt,
+    adapter: &mut RealWaylandAdapter,
+    log: RuntimeLog,
+) -> Result<RuntimeStats, DiagnosableError> {
     println!("startup script_path={}", lua_file.display());
     let config = load_lua_file(lua_file)?;
     println!("script_validation result=ok");
+    log.debug(format!(
+        "event=config_loaded bindings={} motions={} input_provider={} leader={}",
+        config.bindings().len(),
+        config.motions().len(),
+        config.input_provider.is_some(),
+        config
+            .leader
+            .as_ref()
+            .map(signal_auras_core::MotionToken::describe)
+            .unwrap_or_else(|| "none".to_string())
+    ));
 
     let scope = match config.scope.clone() {
         Some(script_scope) => ScopeSelection::from_script(script_scope),
@@ -256,6 +381,19 @@ pub fn start_live_real_runner(
     let required = CapabilitySet::for_configuration_scope(&config, &scope);
     println!("provider selected=kde-plasma-wayland");
     adapter.configure_input_provider(config.input_provider.as_ref(), config.leader.as_ref())?;
+    if let Some(summary) = adapter.input_provider_summary() {
+        log.debug(format!("event=input_provider_configured {summary}"));
+    } else {
+        log.debug("event=input_provider_configured provider=none");
+    }
+    log.debug(format!(
+        "event=capability_probe_start required={}",
+        required
+            .iter()
+            .map(|kind| kind.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    ));
     let report = adapter.probe_capabilities(&required);
     if let Some(error) = report.first_blocking_error(&required) {
         stats.record_capability_probe_failure();
@@ -286,14 +424,15 @@ pub fn start_live_real_runner(
         }
     }
 
-    let shutdown_reason = match run_live_real_lifecycle(&bindings, &motions, adapter, &mut stats) {
-        Ok(reason) => reason,
-        Err(error) => {
-            println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
-            cleanup_after_error(adapter, ErrorPhase::Shutdown)?;
-            return Err(error);
-        }
-    };
+    let shutdown_reason =
+        match run_live_real_lifecycle(&bindings, &motions, adapter, &mut stats, log) {
+            Ok(reason) => reason,
+            Err(error) => {
+                println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
+                cleanup_after_error(adapter, ErrorPhase::Shutdown)?;
+                return Err(error);
+            }
+        };
 
     println!("{}", stats.render_summary(shutdown_reason));
     adapter.cancel_pending()?;
@@ -461,6 +600,7 @@ fn run_live_real_lifecycle(
     motions: &[RuntimeMotion],
     adapter: &mut RealWaylandAdapter,
     stats: &mut RuntimeStats,
+    log: RuntimeLog,
 ) -> Result<ShutdownReason, DiagnosableError> {
     CTRL_C_REQUESTED.store(false, Ordering::SeqCst);
     install_ctrl_c_handler();
@@ -484,11 +624,26 @@ fn run_live_real_lifecycle(
             return Ok(ShutdownReason::CtrlC);
         }
         if let Some(hotkey) = adapter.next_shortcut_event() {
+            log.debug(format!(
+                "event=shortcut_received hotkey={}",
+                hotkey.as_str()
+            ));
             if let Some(binding) = bindings
                 .iter()
                 .find(|binding| binding.trigger == BindingTrigger::Keyboard(hotkey.clone()))
             {
                 let active_context = adapter.active_process_context()?;
+                log.debug(format!(
+                    "event=active_process_context confidence={:?} visible_name={} app_id={} window_class={}",
+                    active_context.confidence,
+                    active_context
+                        .visible_name
+                        .as_ref()
+                        .map(signal_auras_core::ProcessName::as_str)
+                        .unwrap_or("none"),
+                    active_context.app_id.as_deref().unwrap_or("none"),
+                    active_context.window_class.as_deref().unwrap_or("none")
+                ));
                 handle_trigger_with_context(
                     binding,
                     active_context,
@@ -499,7 +654,25 @@ fn run_live_real_lifecycle(
             }
         }
         while let Some(event) = adapter.next_motion_input_event()? {
+            log.debug(format!(
+                "event=motion_input token={} state={}",
+                event.token.describe(),
+                motion_input_state_label(event.state)
+            ));
             for event in motion_runtime.handle_input(event) {
+                match &event {
+                    MotionRuntimeEvent::Triggered {
+                        trigger,
+                        starts_repeat,
+                    } => log.debug(format!(
+                        "event=motion_triggered trigger={} starts_repeat={starts_repeat}",
+                        trigger_label_for_log(trigger)
+                    )),
+                    MotionRuntimeEvent::RepeatCancelled { trigger } => log.debug(format!(
+                        "event=motion_repeat_cancelled trigger={}",
+                        trigger_label_for_log(trigger)
+                    )),
+                }
                 handle_motion_runtime_event(
                     event,
                     motions,
@@ -524,6 +697,10 @@ fn run_live_real_lifecycle(
                     .iter()
                     .find(|motion| motion.definition.trigger == *trigger)
                 {
+                    log.debug(format!(
+                        "event=motion_repeat_tick trigger={} interval_ms={interval_ms}",
+                        trigger_label_for_log(trigger)
+                    ));
                     handle_motion_repeat_tick(
                         motion,
                         &active_adapter,
@@ -536,6 +713,17 @@ fn run_live_real_lifecycle(
             }
         }
         thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn trigger_label_for_log(trigger: &MotionTrigger) -> String {
+    trigger.describe().replace(' ', "/")
+}
+
+fn motion_input_state_label(state: MotionInputState) -> &'static str {
+    match state {
+        MotionInputState::Pressed => "pressed",
+        MotionInputState::Released => "released",
     }
 }
 

@@ -76,6 +76,14 @@ impl EvdevObservationProvider {
         self.grabbed
     }
 
+    pub fn device_count(&self) -> usize {
+        self.devices.len()
+    }
+
+    pub fn active_device_count(&self) -> usize {
+        self.devices.iter().filter(|device| device.active).count()
+    }
+
     fn grab_all(&mut self) -> Result<(), DiagnosableError> {
         for device in &self.devices {
             device.set_grabbed(true)?;
@@ -172,6 +180,10 @@ impl EvdevDevice {
             Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
             Err(error) if error.raw_os_error() == Some(libc::ENODEV) => {
                 self.active = false;
+                eprintln!(
+                    "level=warn event=evdev_device_removed path={}",
+                    self.path.display()
+                );
                 Ok(None)
             }
             Err(error) => Err(evdev_error(
