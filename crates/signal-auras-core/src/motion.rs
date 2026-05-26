@@ -1,4 +1,4 @@
-use crate::{DiagnosableError, ErrorPhase, MacroDefinition, MouseButton};
+use crate::{DiagnosableError, ErrorPhase, MacroDefinition, MouseButton, WheelDirection};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +25,7 @@ pub enum MotionToken {
     Leader,
     Key(String),
     MouseButton(MouseButton),
+    Wheel(WheelDirection),
 }
 
 impl MotionToken {
@@ -41,6 +42,8 @@ impl MotionToken {
             "<LClick>" => Ok(Self::MouseButton(MouseButton::Left)),
             "<RClick>" => Ok(Self::MouseButton(MouseButton::Right)),
             "<MClick>" => Ok(Self::MouseButton(MouseButton::Middle)),
+            "<WheelUp>" => Ok(Self::Wheel(WheelDirection::Up)),
+            "<WheelDown>" => Ok(Self::Wheel(WheelDirection::Down)),
             value if supported_key_token(value) => Ok(Self::Key(value.to_string())),
             value => Err(DiagnosableError::new(
                 ErrorPhase::ScriptValidation,
@@ -56,11 +59,13 @@ impl MotionToken {
             Self::MouseButton(MouseButton::Left) => "<LClick>".to_string(),
             Self::MouseButton(MouseButton::Right) => "<RClick>".to_string(),
             Self::MouseButton(MouseButton::Middle) => "<MClick>".to_string(),
+            Self::Wheel(WheelDirection::Up) => "<WheelUp>".to_string(),
+            Self::Wheel(WheelDirection::Down) => "<WheelDown>".to_string(),
         }
     }
 
     pub fn requires_pointer_observation(&self) -> bool {
-        matches!(self, Self::MouseButton(_))
+        matches!(self, Self::MouseButton(_) | Self::Wheel(_))
     }
 }
 
@@ -386,6 +391,18 @@ mod tests {
                 trigger,
                 starts_repeat: false,
             }]
+        );
+    }
+
+    #[test]
+    fn parses_wheel_motion_tokens() {
+        assert_eq!(
+            MotionToken::parse("<WheelUp>").unwrap(),
+            MotionToken::Wheel(WheelDirection::Up)
+        );
+        assert_eq!(
+            MotionToken::parse("<WheelDown>").unwrap().describe(),
+            "<WheelDown>"
         );
     }
 

@@ -12,6 +12,7 @@ One normalized token in a motion sequence:
 - printable key
 - function key `F1` through `F24`
 - `<LClick>`, `<RClick>`, or `<MClick>`
+- `<WheelUp>` or `<WheelDown>`
 
 ## MotionTrigger
 

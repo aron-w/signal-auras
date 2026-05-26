@@ -22,6 +22,20 @@ return {
       },
     },
     {
+      trigger = { "<Leader>", "<WheelUp>" },
+      mode = "passthrough",
+      macro = macro {
+        key "Left",
+      },
+    },
+    {
+      trigger = { "<Leader>", "<WheelDown>" },
+      mode = "passthrough",
+      macro = macro {
+        key "Right",
+      },
+    },
+    {
       trigger = { "<Leader>", "<LClick>", "<LClick>" },
       mode = "passthrough",
       repeat = {

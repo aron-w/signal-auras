@@ -8,6 +8,7 @@ use std::{
     path::PathBuf,
     sync::mpsc::{self, Receiver},
     thread,
+    time::Instant,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -226,7 +227,9 @@ impl KwinShortcutBridge {
     }
 
     pub fn active_process_context(&self) -> ActiveProcessContext {
-        self.active_process.clone()
+        let mut context = self.active_process.clone();
+        context.captured_at = Instant::now();
+        context
     }
 
     pub fn unload(&mut self) -> Result<CleanupReport, DiagnosableError> {

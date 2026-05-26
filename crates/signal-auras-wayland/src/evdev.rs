@@ -1,6 +1,6 @@
 use signal_auras_core::{
     DiagnosableError, ErrorPhase, InputProviderMode, MotionInputEvent, MotionInputState,
-    MotionToken, MouseButton,
+    MotionToken, MouseButton, WheelDirection,
 };
 use std::{
     fs::{self, File},
@@ -10,6 +10,8 @@ use std::{
 };
 
 const EV_KEY: u16 = 0x01;
+const EV_REL: u16 = 0x02;
+const REL_WHEEL: u16 = 0x08;
 const KEY_F: u16 = 33;
 const KEY_F1: u16 = 59;
 const KEY_F10: u16 = 68;
@@ -26,6 +28,7 @@ pub struct EvdevObservationProvider {
     devices: Vec<EvdevDevice>,
     leader: Option<MotionToken>,
     grabbed: bool,
+    next_device_index: usize,
 }
 
 impl EvdevObservationProvider {
@@ -49,6 +52,7 @@ impl EvdevObservationProvider {
             devices,
             leader,
             grabbed: false,
+            next_device_index: 0,
         };
         if mode == InputProviderMode::Grab {
             provider.grab_all()?;
@@ -57,8 +61,14 @@ impl EvdevObservationProvider {
     }
 
     pub fn next_motion_event(&mut self) -> Result<Option<MotionInputEvent>, DiagnosableError> {
-        for device in &mut self.devices {
+        if self.devices.is_empty() {
+            return Ok(None);
+        }
+        for offset in 0..self.devices.len() {
+            let index = (self.next_device_index + offset) % self.devices.len();
+            let device = &mut self.devices[index];
             if let Some(mut event) = device.next_motion_event()? {
+                self.next_device_index = (index + 1) % self.devices.len();
                 if self
                     .leader
                     .as_ref()
@@ -69,6 +79,7 @@ impl EvdevObservationProvider {
                 return Ok(Some(event));
             }
         }
+        self.next_device_index = (self.next_device_index + 1) % self.devices.len();
         Ok(None)
     }
 
@@ -226,9 +237,6 @@ const INPUT_EVENT_SIZE: usize = 16;
 
 fn decode_input_event(bytes: &[u8; INPUT_EVENT_SIZE]) -> Option<MotionInputEvent> {
     let event_type = u16::from_ne_bytes([bytes[TIMEVAL_SIZE], bytes[TIMEVAL_SIZE + 1]]);
-    if event_type != EV_KEY {
-        return None;
-    }
     let code = u16::from_ne_bytes([bytes[TIMEVAL_SIZE + 2], bytes[TIMEVAL_SIZE + 3]]);
     let value = i32::from_ne_bytes([
         bytes[TIMEVAL_SIZE + 4],
@@ -236,9 +244,24 @@ fn decode_input_event(bytes: &[u8; INPUT_EVENT_SIZE]) -> Option<MotionInputEvent
         bytes[TIMEVAL_SIZE + 6],
         bytes[TIMEVAL_SIZE + 7],
     ]);
+    if event_type == EV_REL && code == REL_WHEEL {
+        return match value.cmp(&0) {
+            std::cmp::Ordering::Greater => Some(MotionInputEvent::pressed(MotionToken::Wheel(
+                WheelDirection::Up,
+            ))),
+            std::cmp::Ordering::Less => Some(MotionInputEvent::pressed(MotionToken::Wheel(
+                WheelDirection::Down,
+            ))),
+            std::cmp::Ordering::Equal => None,
+        };
+    }
+    if event_type != EV_KEY {
+        return None;
+    }
     let state = match value {
         0 => MotionInputState::Released,
-        1 | 2 => MotionInputState::Pressed,
+        1 => MotionInputState::Pressed,
+        2 => return None,
         _ => return None,
     };
     evdev_code_to_motion_token(code).map(|token| MotionInputEvent { token, state })
@@ -337,9 +360,26 @@ mod tests {
     }
 
     #[test]
+    fn decodes_mouse_wheel_evdev_events() {
+        assert_eq!(
+            decode_input_event(&input_event_bytes(EV_REL, REL_WHEEL, 1)).unwrap(),
+            MotionInputEvent::pressed(MotionToken::Wheel(WheelDirection::Up))
+        );
+        assert_eq!(
+            decode_input_event(&input_event_bytes(EV_REL, REL_WHEEL, -1)).unwrap(),
+            MotionInputEvent::pressed(MotionToken::Wheel(WheelDirection::Down))
+        );
+    }
+
+    #[test]
     fn ignores_unmapped_or_non_key_events() {
         assert!(decode_input_event(&input_event_bytes(0x02, KEY_F, 1)).is_none());
         assert!(decode_input_event(&input_event_bytes(EV_KEY, 999, 1)).is_none());
+    }
+
+    #[test]
+    fn ignores_evdev_key_auto_repeat_events() {
+        assert!(decode_input_event(&input_event_bytes(EV_KEY, KEY_F13, 2)).is_none());
     }
 
     #[test]

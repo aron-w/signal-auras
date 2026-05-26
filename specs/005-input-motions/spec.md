@@ -69,7 +69,7 @@ A user configures default and per-motion generated-action delays while retaining
 
 - **FR-001**: System MUST support `motions = { ... }` as a list of motion definitions.
 - **FR-002**: Each motion MUST have `trigger = { ... }` with one or more uniform tokens.
-- **FR-003**: Supported tokens MUST include `<Leader>`, printable keys, function keys, `<LClick>`, `<RClick>`, and `<MClick>`.
+- **FR-003**: Supported tokens MUST include `<Leader>`, printable keys, function keys, `<LClick>`, `<RClick>`, `<MClick>`, `<WheelUp>`, and `<WheelDown>`.
 - **FR-004**: Each motion MUST support `mode = "consume"` and `mode = "passthrough"`, defaulting to `consume`.
 - **FR-005**: Each motion MUST define either `macro` or `repeat`; a repeat MUST define `while_held`, `interval_ms`, and an emitted macro.
 - **FR-006**: Repeat intervals MUST reject zero, negative, and `min > max` values.

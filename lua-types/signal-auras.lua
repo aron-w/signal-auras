@@ -7,7 +7,7 @@
 ---@alias SignalAurasBindingMode '"consume"'|'"passthrough"'
 ---@alias SignalAurasMouseButton '"left"'|'"right"'|'"middle"'
 ---@alias SignalAurasWheelDirection '"up"'|'"down"'
----@alias SignalAurasMotionToken '"<Leader>"'|'"<LClick>"'|'"<RClick>"'|'"<MClick>"'|string
+---@alias SignalAurasMotionToken '"<Leader>"'|'"<LClick>"'|'"<RClick>"'|'"<MClick>"'|'"<WheelUp>"'|'"<WheelDown>"'|string
 ---@alias SignalAurasInputProviderBackend '"evdev"'
 ---@alias SignalAurasInputProviderMode '"observe"'|'"grab"'|'"consume"'
 ---@alias SignalAurasInputProviderOutput '"portal"'|'"uinput"'

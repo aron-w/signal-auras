@@ -31,9 +31,11 @@ const KEY_SLASH: u16 = 53;
 const KEY_SPACE: u16 = 57;
 const KEY_F1: u16 = 59;
 const KEY_F10: u16 = 68;
-const KEY_DELETE: u16 = 111;
 const KEY_F11: u16 = 87;
 const KEY_F12: u16 = 88;
+const KEY_LEFT: u16 = 105;
+const KEY_RIGHT: u16 = 106;
+const KEY_DELETE: u16 = 111;
 const KEY_F13: u16 = 183;
 const KEY_F24: u16 = 194;
 const BTN_LEFT: u16 = 0x110;
@@ -224,6 +226,8 @@ fn named_key_code(key: &str) -> Option<u16> {
         "escape" | "esc" => Some(KEY_ESC),
         "backspace" => Some(KEY_BACKSPACE),
         "delete" | "del" => Some(KEY_DELETE),
+        "left" => Some(KEY_LEFT),
+        "right" => Some(KEY_RIGHT),
         "space" => Some(KEY_SPACE),
         key if key.len() == 1 => key
             .chars()
@@ -280,6 +284,8 @@ fn supported_key_codes() -> impl Iterator<Item = u16> {
         KEY_LEFTSHIFT,
         KEY_SPACE,
         KEY_SLASH,
+        KEY_LEFT,
+        KEY_RIGHT,
         KEY_DELETE,
         BTN_LEFT,
         BTN_RIGHT,
@@ -437,6 +443,8 @@ mod tests {
     #[test]
     fn maps_named_and_function_keys() {
         assert_eq!(named_key_code("Enter"), Some(KEY_ENTER));
+        assert_eq!(named_key_code("Left"), Some(KEY_LEFT));
+        assert_eq!(named_key_code("Right"), Some(KEY_RIGHT));
         assert_eq!(named_key_code("F13"), Some(KEY_F13));
         assert_eq!(named_key_code("nope"), None);
     }

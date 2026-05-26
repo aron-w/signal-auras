@@ -74,7 +74,7 @@ kernel policy allow it.
 
 ## Token Set
 
-Supported tokens include `<Leader>`, printable keys, `F1` through `F24`, `<LClick>`, `<RClick>`, and `<MClick>`.
+Supported tokens include `<Leader>`, printable keys, `F1` through `F24`, `<LClick>`, `<RClick>`, `<MClick>`, `<WheelUp>`, and `<WheelDown>`.
 
 ## Delay Semantics
 
