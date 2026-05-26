@@ -11,7 +11,7 @@ return {
     ["F5"] = macro {
       key "Enter",
       text "/hideout",
-      delay 50,
+      delay(50),
       key "Enter",
     },
   },
@@ -23,7 +23,7 @@ return {
 - `macro { ... }`: creates one ordered macro definition.
 - `key "<key-name>"`: creates a key press action.
 - `text "<string>"`: creates a text input action.
-- `delay <milliseconds>`: creates a delay action.
+- `delay(<milliseconds>)`: creates a delay action.
 
 ## Scope Rules
 

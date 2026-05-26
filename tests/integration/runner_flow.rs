@@ -331,8 +331,8 @@ fn kde_partial_registration_failure_cleans_up_successful_handles() {
         return {
           scope = { processes = { "kate" } },
           hotkeys = {
-            ["F5"] = macro { delay 1 },
-            ["F6"] = macro { delay 1 },
+            ["F5"] = macro { delay(1) },
+            ["F6"] = macro { delay(1) },
           },
         }
         "#,

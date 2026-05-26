@@ -4,7 +4,7 @@ return {
     ["F5"] = macro {
       key "Enter",
       text "/hideout",
-      delay 50,
+      delay(50),
       key "Enter",
     },
   },

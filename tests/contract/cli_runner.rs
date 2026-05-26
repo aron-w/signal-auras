@@ -253,7 +253,17 @@ fn real_runner_fails_before_registration_when_global_shortcut_capability_is_unsu
         "#,
     );
     let mut prompt = FixedPrompt(ConsentDecision::Cancel);
-    let mut adapter = RealWaylandAdapter::new();
+    let mut adapter =
+        RealWaylandAdapter::from_environment(signal_auras_wayland::capability::KdeEnvironment {
+            wayland_display: Some("wayland-0".into()),
+            session_type: Some("wayland".into()),
+            current_desktop: Some("KDE".into()),
+            services: signal_auras_wayland::capability::KdeServiceAvailability {
+                kwin: true,
+                kglobalaccel: false,
+                portal: true,
+            },
+        });
     let mut lifecycle = ScriptedLifecycle::new(vec![RunnerEvent::Shutdown(ShutdownReason::CtrlC)]);
 
     let error =
@@ -339,7 +349,7 @@ fn real_runner_registers_kde_shortcut_when_required_services_are_available() {
           scope = { processes = { "kate" } },
           hotkeys = {
             ["F5"] = macro {
-              delay 1,
+              delay(1),
             },
           },
         }
@@ -371,7 +381,7 @@ fn real_runner_fails_before_registration_when_kde_metadata_is_unavailable_for_pr
           scope = { processes = { "kate" } },
           hotkeys = {
             ["F5"] = macro {
-              delay 1,
+              delay(1),
             },
           },
         }

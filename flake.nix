@@ -27,6 +27,7 @@
             direnv
             git
             just
+            lua-language-server
             pkg-config
             python313
             rustc

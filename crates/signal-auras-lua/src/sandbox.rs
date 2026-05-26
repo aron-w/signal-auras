@@ -109,16 +109,8 @@ fn parse_actions(source: &str) -> Result<Vec<MacroAction>, DiagnosableError> {
             actions.push(MacroAction::text(first_quoted(rest).ok_or_else(|| {
                 DiagnosableError::new(ErrorPhase::ScriptValidation, "text action needs a string")
             })?)?);
-        } else if let Some(rest) = line.strip_prefix("delay ") {
-            let number = rest
-                .trim_matches(|c: char| c == ',' || c.is_whitespace())
-                .parse::<u64>()
-                .map_err(|_| {
-                    DiagnosableError::new(
-                        ErrorPhase::ScriptValidation,
-                        "delay action needs milliseconds",
-                    )
-                })?;
+        } else if let Some(rest) = line.strip_prefix("delay") {
+            let number = parse_delay_milliseconds(rest)?;
             actions.push(MacroAction::delay(number)?);
         } else if line.starts_with('}') || line.starts_with('{') {
         } else {
@@ -129,6 +121,17 @@ fn parse_actions(source: &str) -> Result<Vec<MacroAction>, DiagnosableError> {
         }
     }
     Ok(actions)
+}
+
+fn parse_delay_milliseconds(source: &str) -> Result<u64, DiagnosableError> {
+    let value =
+        source.trim_matches(|c: char| c == '(' || c == ')' || c == ',' || c.is_whitespace());
+    value.parse::<u64>().map_err(|_| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "delay action needs milliseconds",
+        )
+    })
 }
 
 fn quoted_strings(source: &str) -> Vec<&str> {
@@ -161,7 +164,7 @@ mod tests {
                 ["F5"] = macro {
                   key "Enter",
                   text "/hideout",
-                  delay 50,
+                  delay(50),
                   key "Enter",
                 },
               },
@@ -171,6 +174,22 @@ mod tests {
         let config = load_lua_source(source).unwrap();
         assert_eq!(config.hotkeys().len(), 1);
         assert!(config.scope.is_some());
+    }
+
+    #[test]
+    fn parses_legacy_delay_without_parentheses() {
+        let source = r#"
+            return {
+              hotkeys = {
+                ["F5"] = macro {
+                  delay 50,
+                },
+              },
+            }
+        "#;
+
+        let config = load_lua_source(source).unwrap();
+        assert_eq!(config.hotkeys().len(), 1);
     }
 
     #[test]
