@@ -64,7 +64,7 @@ run file="examples/poe2-hideout.lua":
 # Run the scoped sample with verbose event logs for provider/input debugging.
 run-verbose file="examples/poe2-hideout.lua":
     @printf '%s\n' '# running scoped Lua example with verbose debug logs; press Ctrl-C to stop'
-    nix develop -c cargo run -p signal-auras-cli -- run --verbose {{file}}
+    nix develop -c cargo run -p signal-auras-cli -- run --verbose --color=always {{file}}
 
 # Temporarily grant the current user access to unsafe input devices for local testing.
 # These ACLs are reset by reboot, device replug, or udev permission changes.

@@ -1,3 +1,4 @@
+use crate::evdev::RawInputEvent;
 use signal_auras_core::{
     Capability, DiagnosableError, ErrorPhase, MacroAction, MouseButton, SynthesizedInputRequest,
 };
@@ -8,36 +9,37 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub(crate) const UINPUT_DEVICE_NAME: &str = "signal-auras-uinput";
 const UINPUT_PATH: &str = "/dev/uinput";
 const UINPUT_MAX_NAME_SIZE: usize = 80;
 const BUS_USB: u16 = 0x03;
 const EV_SYN: u16 = 0x00;
 const EV_KEY: u16 = 0x01;
+const EV_REL: u16 = 0x02;
 const SYN_REPORT: u16 = 0;
+const REL_X: u16 = 0x00;
+const REL_Y: u16 = 0x01;
+const REL_HWHEEL: u16 = 0x06;
+const REL_WHEEL: u16 = 0x08;
 const KEY_ESC: u16 = 1;
 const KEY_1: u16 = 2;
 const KEY_0: u16 = 11;
 const KEY_BACKSPACE: u16 = 14;
 const KEY_TAB: u16 = 15;
 const KEY_Q: u16 = 16;
-const KEY_P: u16 = 25;
 const KEY_ENTER: u16 = 28;
 const KEY_A: u16 = 30;
-const KEY_L: u16 = 38;
 const KEY_LEFTSHIFT: u16 = 42;
 const KEY_Z: u16 = 44;
-const KEY_M: u16 = 50;
 const KEY_SLASH: u16 = 53;
 const KEY_SPACE: u16 = 57;
 const KEY_F1: u16 = 59;
-const KEY_F10: u16 = 68;
 const KEY_F11: u16 = 87;
-const KEY_F12: u16 = 88;
 const KEY_LEFT: u16 = 105;
 const KEY_RIGHT: u16 = 106;
 const KEY_DELETE: u16 = 111;
 const KEY_F13: u16 = 183;
-const KEY_F24: u16 = 194;
+const KEY_MAX: u16 = 0x2ff;
 const BTN_LEFT: u16 = 0x110;
 const BTN_RIGHT: u16 = 0x111;
 const BTN_MIDDLE: u16 = 0x112;
@@ -95,16 +97,27 @@ impl UinputOutputSession {
         }
     }
 
+    pub fn passthrough_raw(&mut self, raw: &RawInputEvent) -> Result<(), DiagnosableError> {
+        if !raw.should_passthrough() {
+            return Ok(());
+        }
+        self.write_events(&[input_event(raw.event_type, raw.code, raw.value)])
+    }
+
     fn configure(&self) -> Result<(), DiagnosableError> {
         self.ioctl(ioctl_set_evbit(), EV_KEY as libc::c_int)?;
+        self.ioctl(ioctl_set_evbit(), EV_REL as libc::c_int)?;
         for code in supported_key_codes() {
             self.ioctl(ioctl_set_keybit(), code as libc::c_int)?;
+        }
+        for code in supported_relative_codes() {
+            self.ioctl(ioctl_set_relbit(), code as libc::c_int)?;
         }
         Ok(())
     }
 
     fn create(&mut self) -> Result<(), DiagnosableError> {
-        let mut setup = UinputSetup::named("signal-auras-uinput");
+        let mut setup = UinputSetup::named(UINPUT_DEVICE_NAME);
         setup.id = InputId {
             bustype: BUS_USB,
             vendor: 0x1209,
@@ -287,29 +300,11 @@ fn mouse_button_code(button: MouseButton) -> u16 {
 }
 
 fn supported_key_codes() -> impl Iterator<Item = u16> {
-    [
-        KEY_ESC,
-        KEY_BACKSPACE,
-        KEY_TAB,
-        KEY_ENTER,
-        KEY_LEFTSHIFT,
-        KEY_SPACE,
-        KEY_SLASH,
-        KEY_LEFT,
-        KEY_RIGHT,
-        KEY_DELETE,
-        BTN_LEFT,
-        BTN_RIGHT,
-        BTN_MIDDLE,
-    ]
-    .into_iter()
-    .chain(KEY_1..=KEY_0)
-    .chain(KEY_Q..=KEY_P)
-    .chain(KEY_A..=KEY_L)
-    .chain(KEY_Z..=KEY_M)
-    .chain(KEY_F1..=KEY_F10)
-    .chain(KEY_F11..=KEY_F12)
-    .chain(KEY_F13..=KEY_F24)
+    1..=KEY_MAX
+}
+
+fn supported_relative_codes() -> impl Iterator<Item = u16> {
+    [REL_X, REL_Y, REL_HWHEEL, REL_WHEEL].into_iter()
 }
 
 #[repr(C)]
@@ -396,6 +391,10 @@ fn ioctl_set_keybit() -> libc::c_ulong {
     ioctl_write_int(b'U', 101)
 }
 
+fn ioctl_set_relbit() -> libc::c_ulong {
+    ioctl_write_int(b'U', 102)
+}
+
 fn ioctl_none(kind: u8, number: u8) -> libc::c_ulong {
     ioctl(0, kind, number, 0)
 }
@@ -467,5 +466,13 @@ mod tests {
             event_as_bytes(&event).len(),
             std::mem::size_of::<InputEvent>()
         );
+    }
+
+    #[test]
+    fn advertises_pointer_axes_for_mouse_button_output() {
+        let relative_codes = supported_relative_codes().collect::<Vec<_>>();
+
+        assert_eq!(relative_codes, vec![REL_X, REL_Y, REL_HWHEEL, REL_WHEEL]);
+        assert_eq!(ioctl_set_relbit(), ioctl_write_int(b'U', 102));
     }
 }

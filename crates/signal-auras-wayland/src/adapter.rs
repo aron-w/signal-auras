@@ -189,12 +189,13 @@ impl RealWaylandAdapter {
             let report = if self
                 .evdev_provider
                 .as_ref()
-                .is_some_and(crate::evdev::EvdevObservationProvider::is_grabbed)
+                .is_some_and(crate::evdev::EvdevObservationProvider::is_grab_capable)
+                && self.uinput_session.is_some()
                 && required.contains(CapabilityKind::CompositePointerConsumption)
             {
                 report.with_status(CapabilityStatus::available(
                     CapabilityKind::CompositePointerConsumption,
-                    "evdev-grab",
+                    "evdev-armed-grab",
                 ))
             } else {
                 report
@@ -267,6 +268,58 @@ impl RealWaylandAdapter {
             });
         };
         provider.wait_next_observed_motion_event_or_runtime_fd(timeout, runtime_fds)
+    }
+
+    pub fn wait_next_input_or_runtime_fd(
+        &mut self,
+        timeout: std::time::Duration,
+        runtime_fds: &[std::os::fd::RawFd],
+    ) -> Result<crate::evdev::EvdevInputWaitOutcome, DiagnosableError> {
+        let Some(provider) = &mut self.evdev_provider else {
+            return wait_runtime_fd(timeout, runtime_fds).map(|fd| {
+                fd.map_or(
+                    crate::evdev::EvdevInputWaitOutcome::Timeout,
+                    crate::evdev::EvdevInputWaitOutcome::RuntimeFd,
+                )
+            });
+        };
+        provider.wait_next_observed_input_event_or_runtime_fd(timeout, runtime_fds)
+    }
+
+    pub fn next_input_event(
+        &mut self,
+    ) -> Result<Option<crate::evdev::ObservedInputEvent>, DiagnosableError> {
+        let Some(provider) = &mut self.evdev_provider else {
+            return Ok(None);
+        };
+        provider.next_observed_input_event()
+    }
+
+    pub fn arm_input_grab(&mut self) -> Result<(), DiagnosableError> {
+        if self.uinput_session.is_none() {
+            return Ok(());
+        }
+        if let Some(provider) = &mut self.evdev_provider {
+            provider.arm_grab()?;
+        }
+        Ok(())
+    }
+
+    pub fn release_input_grab(&mut self) -> Result<(), DiagnosableError> {
+        if let Some(provider) = &mut self.evdev_provider {
+            provider.release_grab();
+        }
+        Ok(())
+    }
+
+    pub fn passthrough_raw_input(
+        &mut self,
+        raw: &crate::evdev::RawInputEvent,
+    ) -> Result<(), DiagnosableError> {
+        if let Some(session) = &mut self.uinput_session {
+            session.passthrough_raw(raw)?;
+        }
+        Ok(())
     }
 
     pub fn input_provider_summary(&self) -> Option<String> {
@@ -432,6 +485,7 @@ impl MacroExecutor for RealWaylandAdapter {
     }
 
     fn cancel_pending(&mut self) -> Result<(), DiagnosableError> {
+        self.release_input_grab()?;
         if let Some(session) = &mut self.portal_session {
             let _ = session.close();
         }

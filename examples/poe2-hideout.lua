@@ -2,9 +2,10 @@ return {
   -- scope = { processes = { "steam_app_2694490" } },
   input_provider = {
     backend = "evdev",
-    mode = "observe",
+    mode = "grab",
     output = "uinput",
     devices = "all",
+    acknowledge_risk = "GRAB_ALL_INPUTS",
   },
   leader = "F3",
   defaults = {

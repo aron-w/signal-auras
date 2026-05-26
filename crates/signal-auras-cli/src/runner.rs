@@ -2,8 +2,9 @@ use crate::prompt::{stdin_is_interactive, ScopePrompt, TerminalPrompt};
 use signal_auras_core::{
     execute_plan_with_inter_action_delay, ActiveProcessProvider, BindingMode, BindingTrigger,
     CapabilityKind, CapabilitySet, DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyId,
-    HotkeyRegistrar, MacroDefinition, MacroExecutor, MacroRunId, MacroRunPoll, MacroRunState,
-    MacroScheduler, MotionInputEvent, MotionInputState, MotionRuntime, MotionRuntimeEvent,
+    HotkeyRegistrar, InputProviderConfig, InputProviderMode, InputProviderOutput, MacroDefinition,
+    MacroExecutor, MacroRunId, MacroRunPoll, MacroRunState, MacroScheduler, MotionDefinition,
+    MotionInputEvent, MotionInputState, MotionRuntime, MotionRuntimeEvent, MotionToken,
     MotionTrigger, RuntimeMotion, RuntimeStats, ScopeDecision, ScopeSelection, ShutdownReason,
     SynthesizedInputRequest,
 };
@@ -14,7 +15,7 @@ use signal_auras_wayland::{
 };
 use std::{
     collections::BTreeSet,
-    io,
+    io::{self, IsTerminal},
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
     sync::Once,
@@ -56,8 +57,16 @@ pub struct RunOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeLog {
     pub verbose: bool,
+    color_mode: ColorMode,
     color: bool,
     started_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorMode {
+    Auto,
+    Always,
+    Never,
 }
 
 impl Default for RuntimeLog {
@@ -68,28 +77,76 @@ impl Default for RuntimeLog {
 
 impl RuntimeLog {
     pub fn new(verbose: bool) -> Self {
+        Self::new_with_color_mode(verbose, ColorMode::Auto)
+    }
+
+    pub fn new_with_color_mode(verbose: bool, color_mode: ColorMode) -> Self {
+        Self::with_color_enabled(verbose, color_mode, color_enabled(color_mode))
+    }
+
+    fn with_color_enabled(verbose: bool, color_mode: ColorMode, color: bool) -> Self {
         Self {
             verbose,
-            color: std::env::var_os("NO_COLOR").is_none(),
+            color_mode,
+            color,
             started_at: Instant::now(),
         }
     }
 
     fn debug(self, message: impl AsRef<str>) {
         if self.verbose {
-            tracing::debug!("{}", self.render("DEBUG", message.as_ref()));
+            self.emit(tracing::Level::DEBUG, message.as_ref());
         }
     }
 
-    fn render(self, level: &'static str, message: &str) -> String {
+    fn warn(self, message: impl AsRef<str>) {
+        self.emit(tracing::Level::WARN, message.as_ref());
+    }
+
+    fn elapsed_ms(self) -> u128 {
+        self.started_at.elapsed().as_millis()
+    }
+
+    fn emit(self, level: tracing::Level, message: &str) {
+        let elapsed_ms = self.elapsed_ms();
+        let event = field_value(message, "event").unwrap_or("runtime");
+        let details = without_field(message, "event");
+        match level {
+            tracing::Level::DEBUG => {
+                tracing::debug!(runtime_elapsed_ms = elapsed_ms, event, details)
+            }
+            tracing::Level::WARN => {
+                tracing::warn!(runtime_elapsed_ms = elapsed_ms, event, details)
+            }
+            tracing::Level::ERROR => {
+                tracing::error!(runtime_elapsed_ms = elapsed_ms, event, details)
+            }
+            tracing::Level::INFO => {
+                tracing::info!(runtime_elapsed_ms = elapsed_ms, event, details)
+            }
+            tracing::Level::TRACE => {
+                tracing::trace!(runtime_elapsed_ms = elapsed_ms, event, details)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn render_plain(self, level: &'static str, message: &str) -> String {
         let elapsed = self.started_at.elapsed();
         let timestamp = format!("{:>5}.{:03}s", elapsed.as_secs(), elapsed.subsec_millis());
         let event = field_value(message, "event").unwrap_or("runtime");
         let rest = without_field(message, "event");
-        let level = paint(self.color, level_color(level), format!("{level:<5}"));
-        let event = paint(self.color, "\x1b[36m", format!("{event:<30}"));
-        let timestamp = paint(self.color, "\x1b[2m", timestamp);
-        format!("{timestamp}  {level}  {event}  {rest}")
+        format!("{timestamp}  {level:<5}  {event:<30}  {rest}")
+    }
+}
+
+fn color_enabled(mode: ColorMode) -> bool {
+    match mode {
+        ColorMode::Auto => {
+            std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+        }
+        ColorMode::Always => true,
+        ColorMode::Never => false,
     }
 }
 
@@ -117,14 +174,19 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions, DiagnosableError> {
     if args.first().map(String::as_str) != Some("run") {
         return Err(DiagnosableError::new(
             ErrorPhase::ArgumentValidation,
-            "usage: signal-auras run [--verbose|-v] <lua-file>",
+            "usage: signal-auras run [--verbose|-v] [--color=auto|always|never] <lua-file>",
         ));
     }
     let mut verbose = false;
+    let mut color_mode = ColorMode::Auto;
     let mut paths = Vec::new();
     for arg in &args[1..] {
         match arg.as_str() {
             "--verbose" | "-v" => verbose = true,
+            "--color=auto" => color_mode = ColorMode::Auto,
+            "--color=always" => color_mode = ColorMode::Always,
+            "--color=never" => color_mode = ColorMode::Never,
+            "--no-color" => color_mode = ColorMode::Never,
             value if value.starts_with('-') => {
                 return Err(DiagnosableError::new(
                     ErrorPhase::ArgumentValidation,
@@ -137,30 +199,13 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions, DiagnosableError> {
     if paths.len() != 1 {
         return Err(DiagnosableError::new(
             ErrorPhase::ArgumentValidation,
-            "usage: signal-auras run [--verbose|-v] <lua-file>",
+            "usage: signal-auras run [--verbose|-v] [--color=auto|always|never] <lua-file>",
         ));
     }
     Ok(RunOptions {
         lua_file: paths.remove(0),
-        log: RuntimeLog::new(verbose),
+        log: RuntimeLog::new_with_color_mode(verbose, color_mode),
     })
-}
-
-fn level_color(level: &str) -> &'static str {
-    match level {
-        "DEBUG" => "\x1b[34m",
-        "WARN" => "\x1b[33m",
-        "ERROR" => "\x1b[31m",
-        _ => "\x1b[37m",
-    }
-}
-
-fn paint(enabled: bool, color: &str, value: impl AsRef<str>) -> String {
-    if enabled {
-        format!("{color}{}\x1b[0m", value.as_ref())
-    } else {
-        value.as_ref().to_string()
-    }
 }
 
 fn field_value<'a>(message: &'a str, field: &str) -> Option<&'a str> {
@@ -390,6 +435,11 @@ pub fn start_live_real_runner_with_options(
             .map(signal_auras_core::MotionToken::describe)
             .unwrap_or_else(|| "none".to_string())
     ));
+    warn_for_observe_mode_mouse_button_repeats(
+        log,
+        config.input_provider.as_ref(),
+        config.motions().values(),
+    );
 
     let scope = match config.scope.clone() {
         Some(script_scope) => ScopeSelection::from_script(script_scope),
@@ -463,6 +513,7 @@ pub fn start_live_real_runner_with_options(
             Ok(reason) => reason,
             Err(error) => {
                 println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
+                adapter.cancel_pending()?;
                 cleanup_after_error(adapter, ErrorPhase::Shutdown)?;
                 return Err(error);
             }
@@ -472,6 +523,42 @@ pub fn start_live_real_runner_with_options(
     adapter.cancel_pending()?;
     adapter.unregister_all()?;
     Ok(stats)
+}
+
+fn warn_for_observe_mode_mouse_button_repeats<'a>(
+    log: RuntimeLog,
+    input_provider: Option<&InputProviderConfig>,
+    motions: impl IntoIterator<Item = &'a MotionDefinition>,
+) {
+    if observe_mode_mouse_button_repeat(input_provider, motions) {
+        log.warn(
+            "event=input_provider_warning reason=observe_mouse_repeat \
+             recommendation=use_grab_mode_for_held_mouse_button_repeats",
+        );
+    }
+}
+
+fn observe_mode_mouse_button_repeat<'a>(
+    input_provider: Option<&InputProviderConfig>,
+    motions: impl IntoIterator<Item = &'a MotionDefinition>,
+) -> bool {
+    let Some(input_provider) = input_provider else {
+        return false;
+    };
+    if input_provider.mode != InputProviderMode::Observe
+        || input_provider.output != InputProviderOutput::Uinput
+    {
+        return false;
+    }
+    motions.into_iter().any(|motion| {
+        motion.repeat.as_ref().is_some_and(|repeat| {
+            repeat
+                .while_held
+                .tokens()
+                .iter()
+                .any(|token| matches!(token, MotionToken::MouseButton(_)))
+        })
+    })
 }
 
 pub trait RunnerLifecycle {
@@ -685,12 +772,12 @@ fn run_live_real_lifecycle(
                 .min(macro_queue.next_wait_timeout());
         timer_fd.arm_after(wait_timeout)?;
         let runtime_fds = [signal_fd.as_raw_fd(), timer_fd.as_raw_fd()];
-        match adapter.wait_next_motion_input_or_runtime_fd(
+        match adapter.wait_next_input_or_runtime_fd(
             wait_timeout.min(Duration::from_millis(50)),
             &runtime_fds,
         )? {
-            signal_auras_wayland::evdev::EvdevWaitOutcome::Motion(event) => {
-                handle_observed_motion_input(
+            signal_auras_wayland::evdev::EvdevInputWaitOutcome::Input(event) => {
+                handle_observed_input(
                     event,
                     motions,
                     adapter,
@@ -700,23 +787,23 @@ fn run_live_real_lifecycle(
                     log,
                 )?;
             }
-            signal_auras_wayland::evdev::EvdevWaitOutcome::RuntimeFd(fd)
+            signal_auras_wayland::evdev::EvdevInputWaitOutcome::RuntimeFd(fd)
                 if fd == signal_fd.as_raw_fd() =>
             {
                 if signal_fd.drain()? {
                     return Ok(ShutdownReason::CtrlC);
                 }
             }
-            signal_auras_wayland::evdev::EvdevWaitOutcome::RuntimeFd(fd)
+            signal_auras_wayland::evdev::EvdevInputWaitOutcome::RuntimeFd(fd)
                 if fd == timer_fd.as_raw_fd() =>
             {
                 timer_fd.drain()?;
             }
-            signal_auras_wayland::evdev::EvdevWaitOutcome::RuntimeFd(_) => {}
-            signal_auras_wayland::evdev::EvdevWaitOutcome::Timeout => {}
+            signal_auras_wayland::evdev::EvdevInputWaitOutcome::RuntimeFd(_) => {}
+            signal_auras_wayland::evdev::EvdevInputWaitOutcome::Timeout => {}
         }
-        while let Some(event) = adapter.wait_next_motion_input_event(Duration::ZERO)? {
-            handle_observed_motion_input(
+        while let Some(event) = adapter.next_input_event()? {
+            handle_observed_input(
                 event,
                 motions,
                 adapter,
@@ -916,7 +1003,7 @@ fn handle_observed_motion_input(
     motion_runtime: &mut MotionRuntime,
     stats: &mut RuntimeStats,
     log: RuntimeLog,
-) -> Result<(), DiagnosableError> {
+) -> Result<bool, DiagnosableError> {
     let latency_ms = observed.observed_at.elapsed().as_millis() as u64;
     stats.record_motion_input_event(latency_ms);
     log.debug(format!(
@@ -925,7 +1012,9 @@ fn handle_observed_motion_input(
         motion_input_state_label(observed.event.state),
         observed.source.display()
     ));
+    let mut consumed = false;
     for event in motion_runtime.handle_input(observed.event) {
+        consumed = true;
         match &event {
             MotionRuntimeEvent::Triggered {
                 trigger,
@@ -952,6 +1041,46 @@ fn handle_observed_motion_input(
             active_context.window_class.as_deref().unwrap_or("none")
         ));
         schedule_live_motion_runtime_event(event, motions, active_context, macro_queue, stats)?;
+    }
+    Ok(consumed)
+}
+
+fn handle_observed_input(
+    observed: signal_auras_wayland::evdev::ObservedInputEvent,
+    motions: &[RuntimeMotion],
+    adapter: &mut RealWaylandAdapter,
+    macro_queue: &mut LiveMacroQueue,
+    motion_runtime: &mut MotionRuntime,
+    stats: &mut RuntimeStats,
+    log: RuntimeLog,
+) -> Result<(), DiagnosableError> {
+    let Some(event) = observed.event.clone() else {
+        if observed.grabbed {
+            adapter.passthrough_raw_input(&observed.raw)?;
+        }
+        return Ok(());
+    };
+    if event.token == MotionToken::Leader && event.state == MotionInputState::Pressed {
+        adapter.arm_input_grab()?;
+    }
+    let consumed = handle_observed_motion_input(
+        signal_auras_wayland::evdev::ObservedMotionInputEvent {
+            event: event.clone(),
+            source: observed.source.clone(),
+            observed_at: observed.observed_at,
+        },
+        motions,
+        adapter,
+        macro_queue,
+        motion_runtime,
+        stats,
+        log,
+    )?;
+    if observed.grabbed && !consumed {
+        adapter.passthrough_raw_input(&observed.raw)?;
+    }
+    if event.token == MotionToken::Leader && event.state == MotionInputState::Released {
+        adapter.release_input_grab()?;
     }
     Ok(())
 }
@@ -1386,4 +1515,90 @@ where
             )),
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_log_rendering_does_not_embed_ansi_escapes() {
+        let rendered = RuntimeLog::with_color_enabled(true, ColorMode::Never, false)
+            .render_plain("DEBUG", "event=motion_input token=<LClick>");
+
+        assert!(!rendered.contains('\x1b'));
+        assert!(rendered.contains("DEBUG"));
+        assert!(rendered.contains("motion_input"));
+        assert!(rendered.contains("token=<LClick>"));
+    }
+
+    #[test]
+    fn runtime_log_color_mode_controls_subscriber_ansi() {
+        let log = RuntimeLog::with_color_enabled(true, ColorMode::Always, true);
+
+        assert_eq!(log.color_mode, ColorMode::Always);
+        assert!(log.color);
+    }
+
+    #[test]
+    fn warns_for_observe_mode_uinput_mouse_button_repeat() {
+        let provider = InputProviderConfig::evdev(
+            vec![PathBuf::from("/dev/input/event0")],
+            InputProviderMode::Observe,
+            InputProviderOutput::Uinput,
+        )
+        .unwrap();
+        let motions = vec![mouse_button_repeat_motion()];
+
+        assert!(observe_mode_mouse_button_repeat(Some(&provider), &motions));
+    }
+
+    #[test]
+    fn parses_color_mode_options() {
+        let args = vec![
+            "run".to_string(),
+            "--verbose".to_string(),
+            "--color=always".to_string(),
+            "examples/poe2-hideout.lua".to_string(),
+        ];
+        let options = parse_run_args(&args).unwrap();
+
+        assert!(options.log.verbose);
+        assert_eq!(options.log.color_mode, ColorMode::Always);
+        assert!(options.log.color);
+    }
+
+    #[test]
+    fn does_not_warn_for_grab_mode_mouse_button_repeat() {
+        let provider = InputProviderConfig::evdev(
+            vec![PathBuf::from("/dev/input/event0")],
+            InputProviderMode::Grab,
+            InputProviderOutput::Uinput,
+        )
+        .unwrap();
+        let motions = vec![mouse_button_repeat_motion()];
+
+        assert!(!observe_mode_mouse_button_repeat(Some(&provider), &motions));
+    }
+
+    fn mouse_button_repeat_motion() -> MotionDefinition {
+        let macro_definition =
+            MacroDefinition::new(vec![signal_auras_core::MacroAction::mouse_click(
+                signal_auras_core::MouseButton::Left,
+            )])
+            .unwrap();
+        let repeat = signal_auras_core::RepeatDefinition::new(
+            MotionTrigger::parse(["<LClick>"]).unwrap(),
+            signal_auras_core::RepeatInterval::new(50, 80).unwrap(),
+            macro_definition,
+        );
+        MotionDefinition::new(
+            MotionTrigger::parse(["<Leader>", "<LClick>", "<LClick>"]).unwrap(),
+            BindingMode::Passthrough,
+            None,
+            Some(repeat),
+            0,
+        )
+        .unwrap()
+    }
 }

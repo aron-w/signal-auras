@@ -13,6 +13,9 @@ use std::{
 
 const EV_KEY: u16 = 0x01;
 const EV_REL: u16 = 0x02;
+const EV_SYN: u16 = 0x00;
+const REL_X: u16 = 0x00;
+const REL_Y: u16 = 0x01;
 const REL_WHEEL: u16 = 0x08;
 const KEY_F: u16 = 33;
 const KEY_F1: u16 = 59;
@@ -57,7 +60,7 @@ impl EvdevObservationProvider {
                 None,
             ));
         }
-        let mut provider = Self {
+        let provider = Self {
             devices,
             leader,
             grabbed: false,
@@ -79,9 +82,6 @@ impl EvdevObservationProvider {
                 None
             },
         };
-        if mode == InputProviderMode::Grab {
-            provider.grab_all()?;
-        }
         Ok(provider)
     }
 
@@ -98,7 +98,10 @@ impl EvdevObservationProvider {
         for offset in 0..self.devices.len() {
             let index = (self.next_device_index + offset) % self.devices.len();
             let device = &mut self.devices[index];
-            if let Some(mut event) = device.next_motion_event()? {
+            if let Some(raw) = device.next_raw_event()? {
+                let Some(mut event) = decode_raw_input_event(&raw) else {
+                    continue;
+                };
                 let source = device.path.clone();
                 self.next_device_index = (index + 1) % self.devices.len();
                 if self
@@ -158,8 +161,101 @@ impl EvdevObservationProvider {
         })
     }
 
+    pub fn next_observed_input_event(
+        &mut self,
+    ) -> Result<Option<ObservedInputEvent>, DiagnosableError> {
+        if self.devices.is_empty() {
+            return Ok(None);
+        }
+        for offset in 0..self.devices.len() {
+            let index = (self.next_device_index + offset) % self.devices.len();
+            let device = &mut self.devices[index];
+            if let Some(raw) = device.next_raw_event()? {
+                let source = device.path.clone();
+                let grabbed = device.grabbed;
+                let next_device_index = (index + 1) % self.devices.len();
+                let event = decode_raw_input_event(&raw).map(|mut event| {
+                    if self
+                        .leader
+                        .as_ref()
+                        .is_some_and(|leader| event.token == *leader)
+                    {
+                        event.token = MotionToken::Leader;
+                    }
+                    event
+                });
+                self.next_device_index = next_device_index;
+                return Ok(Some(ObservedInputEvent {
+                    raw,
+                    event,
+                    source,
+                    grabbed,
+                    observed_at: Instant::now(),
+                }));
+            }
+        }
+        self.next_device_index = (self.next_device_index + 1) % self.devices.len();
+        Ok(None)
+    }
+
+    pub fn wait_next_observed_input_event_or_runtime_fd(
+        &mut self,
+        timeout: Duration,
+        runtime_fds: &[RawFd],
+    ) -> Result<EvdevInputWaitOutcome, DiagnosableError> {
+        if let Some(event) = self.next_observed_input_event()? {
+            return Ok(EvdevInputWaitOutcome::Input(event));
+        }
+        if self.devices.iter().any(|device| device.active)
+            || !runtime_fds.is_empty()
+            || self.udev_monitor.is_some()
+        {
+            match self.wait_for_readable_device(timeout, runtime_fds)? {
+                EvdevReadiness::RuntimeFd(fd) => return Ok(EvdevInputWaitOutcome::RuntimeFd(fd)),
+                EvdevReadiness::DeviceOrHotplug => {}
+                EvdevReadiness::Timeout => return Ok(EvdevInputWaitOutcome::Timeout),
+            }
+        } else if !timeout.is_zero() {
+            std::thread::sleep(timeout.min(Duration::from_millis(50)));
+        }
+        if self.udev_monitor.is_none() {
+            self.rescan_all_devices_if_due()?;
+        }
+        Ok(match self.next_observed_input_event()? {
+            Some(event) => EvdevInputWaitOutcome::Input(event),
+            None => EvdevInputWaitOutcome::Timeout,
+        })
+    }
+
     pub fn is_grabbed(&self) -> bool {
         self.grabbed
+    }
+
+    pub fn is_grab_capable(&self) -> bool {
+        self.mode == InputProviderMode::Grab
+    }
+
+    pub fn arm_grab(&mut self) -> Result<(), DiagnosableError> {
+        if self.mode != InputProviderMode::Grab || self.grabbed {
+            return Ok(());
+        }
+        self.grab_pointer_devices()
+    }
+
+    pub fn release_grab(&mut self) {
+        if !self.grabbed {
+            return;
+        }
+        for device in &mut self.devices {
+            if let Err(error) = device.set_grabbed(false) {
+                tracing::warn!(
+                    "level=warn event=evdev_device_release_failed path={} error={}",
+                    device.path.display(),
+                    error
+                );
+            }
+        }
+        self.grabbed = false;
     }
 
     pub fn device_count(&self) -> usize {
@@ -197,9 +293,12 @@ impl EvdevObservationProvider {
                 continue;
             }
             match EvdevDevice::open(path.clone()) {
-                Ok(device) => {
+                Ok(mut device) => {
                     self.skipped_paths.remove(&path);
-                    if self.grabbed && self.mode == InputProviderMode::Grab {
+                    if self.grabbed
+                        && self.mode == InputProviderMode::Grab
+                        && device.pointer_capable
+                    {
                         if let Err(error) = device.set_grabbed(true) {
                             tracing::warn!(
                                 "level=warn event=evdev_device_grab_failed path={} error={}",
@@ -330,11 +429,16 @@ impl EvdevObservationProvider {
         })
     }
 
-    fn grab_all(&mut self) -> Result<(), DiagnosableError> {
-        for device in &self.devices {
+    fn grab_pointer_devices(&mut self) -> Result<(), DiagnosableError> {
+        let mut grabbed = false;
+        for device in &mut self.devices {
+            if !device.pointer_capable {
+                continue;
+            }
             device.set_grabbed(true)?;
+            grabbed = true;
         }
-        self.grabbed = true;
+        self.grabbed = grabbed;
         Ok(())
     }
 
@@ -360,6 +464,13 @@ pub enum EvdevWaitOutcome {
     Timeout,
 }
 
+#[derive(Debug, Clone)]
+pub enum EvdevInputWaitOutcome {
+    Input(ObservedInputEvent),
+    RuntimeFd(RawFd),
+    Timeout,
+}
+
 enum EvdevReadiness {
     DeviceOrHotplug,
     RuntimeFd(RawFd),
@@ -370,6 +481,28 @@ enum EvdevReadiness {
 pub struct ObservedMotionInputEvent {
     pub event: MotionInputEvent,
     pub source: PathBuf,
+    pub observed_at: Instant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawInputEvent {
+    pub event_type: u16,
+    pub code: u16,
+    pub value: i32,
+}
+
+impl RawInputEvent {
+    pub fn should_passthrough(&self) -> bool {
+        matches!(self.event_type, EV_SYN | EV_KEY | EV_REL)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ObservedInputEvent {
+    pub raw: RawInputEvent,
+    pub event: Option<MotionInputEvent>,
+    pub source: PathBuf,
+    pub grabbed: bool,
     pub observed_at: Instant,
 }
 
@@ -458,7 +591,7 @@ fn is_event_device_path(path: &Path) -> bool {
 impl Drop for EvdevObservationProvider {
     fn drop(&mut self) {
         if self.grabbed {
-            for device in &self.devices {
+            for device in &mut self.devices {
                 let _ = device.set_grabbed(false);
             }
         }
@@ -470,6 +603,8 @@ struct EvdevDevice {
     path: PathBuf,
     file: File,
     active: bool,
+    grabbed: bool,
+    pointer_capable: bool,
 }
 
 impl EvdevDevice {
@@ -484,6 +619,20 @@ impl EvdevDevice {
                 Some(path.as_path()),
             )
         })?;
+        if device_name(&file)
+            .as_deref()
+            .is_some_and(|name| name == crate::uinput::UINPUT_DEVICE_NAME)
+        {
+            return Err(evdev_error(
+                ErrorPhase::Registration,
+                format!(
+                    "ignoring Signal Auras virtual input device '{}'",
+                    path.display()
+                ),
+                Some(path.as_path()),
+            ));
+        }
+        let pointer_capable = device_is_pointer_capable(&file);
         file.set_nonblocking(true).map_err(|error| {
             evdev_error(
                 ErrorPhase::Registration,
@@ -498,16 +647,18 @@ impl EvdevDevice {
             path,
             file,
             active: true,
+            grabbed: false,
+            pointer_capable,
         })
     }
 
-    fn next_motion_event(&mut self) -> Result<Option<MotionInputEvent>, DiagnosableError> {
+    fn next_raw_event(&mut self) -> Result<Option<RawInputEvent>, DiagnosableError> {
         if !self.active {
             return Ok(None);
         }
         let mut bytes = [0u8; INPUT_EVENT_SIZE];
         match self.file.read_exact(&mut bytes) {
-            Ok(()) => Ok(decode_input_event(&bytes)),
+            Ok(()) => Ok(Some(raw_input_event(&bytes))),
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
             Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
             Err(error) if error.raw_os_error() == Some(libc::ENODEV) => {
@@ -529,12 +680,15 @@ impl EvdevDevice {
         }
     }
 
-    fn set_grabbed(&self, grabbed: bool) -> Result<(), DiagnosableError> {
+    fn set_grabbed(&mut self, grabbed: bool) -> Result<(), DiagnosableError> {
+        if self.grabbed == grabbed {
+            return Ok(());
+        }
         let value: libc::c_int = if grabbed { 1 } else { 0 };
         // Safety: EVIOCGRAB only toggles exclusive delivery for this owned
         // input device descriptor. The pointer is valid for the duration of
         // the ioctl call.
-        let result = unsafe { libc::ioctl(self.file.as_raw_fd(), eviocgrab(), &value) };
+        let result = unsafe { libc::ioctl(self.file.as_raw_fd(), eviocgrab(), value) };
         if result < 0 {
             return Err(evdev_error(
                 ErrorPhase::Registration,
@@ -547,6 +701,7 @@ impl EvdevDevice {
                 Some(self.path.as_path()),
             ));
         }
+        self.grabbed = grabbed;
         Ok(())
     }
 }
@@ -556,7 +711,12 @@ const INPUT_EVENT_SIZE: usize = 24;
 #[cfg(target_pointer_width = "32")]
 const INPUT_EVENT_SIZE: usize = 16;
 
+#[cfg(test)]
 fn decode_input_event(bytes: &[u8; INPUT_EVENT_SIZE]) -> Option<MotionInputEvent> {
+    decode_raw_input_event(&raw_input_event(bytes))
+}
+
+fn raw_input_event(bytes: &[u8; INPUT_EVENT_SIZE]) -> RawInputEvent {
     let event_type = u16::from_ne_bytes([bytes[TIMEVAL_SIZE], bytes[TIMEVAL_SIZE + 1]]);
     let code = u16::from_ne_bytes([bytes[TIMEVAL_SIZE + 2], bytes[TIMEVAL_SIZE + 3]]);
     let value = i32::from_ne_bytes([
@@ -565,6 +725,17 @@ fn decode_input_event(bytes: &[u8; INPUT_EVENT_SIZE]) -> Option<MotionInputEvent
         bytes[TIMEVAL_SIZE + 6],
         bytes[TIMEVAL_SIZE + 7],
     ]);
+    RawInputEvent {
+        event_type,
+        code,
+        value,
+    }
+}
+
+fn decode_raw_input_event(raw: &RawInputEvent) -> Option<MotionInputEvent> {
+    let event_type = raw.event_type;
+    let code = raw.code;
+    let value = raw.value;
     if event_type == EV_REL && code == REL_WHEEL {
         return match value.cmp(&0) {
             std::cmp::Ordering::Greater => Some(MotionInputEvent::pressed(MotionToken::Wheel(
@@ -657,6 +828,69 @@ fn eviocgrab() -> libc::c_ulong {
     ioctl_write_int(b'E', 0x90)
 }
 
+fn device_name(file: &File) -> Option<String> {
+    let mut bytes = [0u8; 256];
+    // Safety: EVIOCGNAME writes at most bytes.len() bytes into this valid
+    // stack buffer for the owned input device descriptor.
+    let result = unsafe {
+        libc::ioctl(
+            file.as_raw_fd(),
+            eviocgname(bytes.len()),
+            bytes.as_mut_ptr(),
+        )
+    };
+    if result < 0 {
+        return None;
+    }
+    let length = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    Some(String::from_utf8_lossy(&bytes[..length]).into_owned())
+}
+
+fn device_is_pointer_capable(file: &File) -> bool {
+    device_has_code(file, EV_REL, REL_X)
+        || device_has_code(file, EV_REL, REL_Y)
+        || device_has_code(file, EV_REL, REL_WHEEL)
+        || device_has_code(file, EV_KEY, BTN_LEFT)
+        || device_has_code(file, EV_KEY, BTN_RIGHT)
+        || device_has_code(file, EV_KEY, BTN_MIDDLE)
+}
+
+fn device_has_code(file: &File, event_type: u16, code: u16) -> bool {
+    let mut bytes = [0u8; 96];
+    // Safety: EVIOCGBIT writes at most bytes.len() bytes into this valid
+    // stack buffer for the owned input device descriptor.
+    let result = unsafe {
+        libc::ioctl(
+            file.as_raw_fd(),
+            eviocgbit(event_type, bytes.len()),
+            bytes.as_mut_ptr(),
+        )
+    };
+    if result <= 0 {
+        return false;
+    }
+    let index = usize::from(code / 8);
+    let bit = (code % 8) as u8;
+    bytes
+        .get(index)
+        .is_some_and(|byte| byte & (1u8 << bit) != 0)
+}
+
+fn eviocgname(length: usize) -> libc::c_ulong {
+    ioctl_read(b'E', 0x06, length)
+}
+
+fn eviocgbit(event_type: u16, length: usize) -> libc::c_ulong {
+    ioctl_read(
+        b'E',
+        0x20 + u8::try_from(event_type).unwrap_or(u8::MAX),
+        length,
+    )
+}
+
 fn ioctl_write_int(kind: u8, number: u8) -> libc::c_ulong {
     const IOC_WRITE: libc::c_ulong = 1;
     const IOC_NRBITS: libc::c_ulong = 8;
@@ -670,6 +904,21 @@ fn ioctl_write_int(kind: u8, number: u8) -> libc::c_ulong {
         | ((kind as libc::c_ulong) << IOC_TYPESHIFT)
         | ((number as libc::c_ulong) << IOC_NRSHIFT)
         | ((std::mem::size_of::<libc::c_int>() as libc::c_ulong) << IOC_SIZESHIFT)
+}
+
+fn ioctl_read(kind: u8, number: u8, size: usize) -> libc::c_ulong {
+    const IOC_READ: libc::c_ulong = 2;
+    const IOC_NRBITS: libc::c_ulong = 8;
+    const IOC_TYPEBITS: libc::c_ulong = 8;
+    const IOC_SIZEBITS: libc::c_ulong = 14;
+    const IOC_NRSHIFT: libc::c_ulong = 0;
+    const IOC_TYPESHIFT: libc::c_ulong = IOC_NRSHIFT + IOC_NRBITS;
+    const IOC_SIZESHIFT: libc::c_ulong = IOC_TYPESHIFT + IOC_TYPEBITS;
+    const IOC_DIRSHIFT: libc::c_ulong = IOC_SIZESHIFT + IOC_SIZEBITS;
+    (IOC_READ << IOC_DIRSHIFT)
+        | ((kind as libc::c_ulong) << IOC_TYPESHIFT)
+        | ((number as libc::c_ulong) << IOC_NRSHIFT)
+        | ((size as libc::c_ulong) << IOC_SIZESHIFT)
 }
 
 #[cfg(test)]
