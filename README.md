@@ -55,6 +55,10 @@ Process-scope denials include a privacy-bounded reason such as
 `process_mismatch`; stale denials report the configured rule, metadata age, and
 2 second default freshness threshold without logging command-line arguments or
 window text.
+Evdev motion scopes use a longer 30 second stable-focus threshold so a focused
+game does not deny held input solely because no focus-change callback arrived;
+the runtime still fails closed if KWin metadata stops refreshing beyond that
+threshold.
 
 ## Consent Model
 

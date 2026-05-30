@@ -1,12 +1,12 @@
 use crate::prompt::{stdin_is_interactive, ScopePrompt, TerminalPrompt};
 use signal_auras_core::{
     execute_plan_with_inter_action_delay, ActiveProcessProvider, BindingMode, BindingTrigger,
-    CapabilityKind, CapabilitySet, DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyId,
-    HotkeyRegistrar, InputProviderConfig, InputProviderMode, InputProviderOutput, MacroDefinition,
-    MacroExecutor, MacroRunId, MacroRunPoll, MacroRunState, MacroScheduler, MotionDefinition,
-    MotionInputEvent, MotionInputState, MotionRuntime, MotionRuntimeEvent, MotionToken,
-    MotionTrigger, RuntimeMotion, RuntimeStats, ScopeDecision, ScopeSelection, ShutdownReason,
-    SynthesizedInputRequest,
+    CapabilityKind, CapabilitySet, DiagnosableError, ErrorPhase, FocusFreshnessPolicy,
+    HotkeyBinding, HotkeyId, HotkeyRegistrar, InputProviderConfig, InputProviderMode,
+    InputProviderOutput, MacroDefinition, MacroExecutor, MacroRunId, MacroRunPoll, MacroRunState,
+    MacroScheduler, MotionDefinition, MotionInputEvent, MotionInputState, MotionRuntime,
+    MotionRuntimeEvent, MotionToken, MotionTrigger, RuntimeMotion, RuntimeStats, ScopeDecision,
+    ScopeSelection, ShutdownReason, SynthesizedInputRequest,
 };
 use signal_auras_lua::load_lua_file;
 use signal_auras_wayland::{
@@ -24,6 +24,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+const MOTION_FOCUS_STALE_THRESHOLD: Duration = Duration::from_secs(30);
 
 pub struct StdioPrompt;
 
@@ -1579,7 +1581,7 @@ fn schedule_live_motion_trigger(
         BindingMode::Consume => stats.record_consumed_trigger_event(),
         BindingMode::Passthrough => stats.record_passthrough_trigger_event(),
     }
-    match motion.scope.decide_context(&active_context) {
+    match decide_motion_scope(&motion.scope, &active_context) {
         ScopeDecision::Allowed => {
             stats.record_active_process_match();
             if let Some(macro_definition) = &motion.definition.macro_definition {
@@ -1624,7 +1626,7 @@ fn schedule_live_motion_repeat_tick(
         }
         return Ok(());
     }
-    match motion.scope.decide_context(&active_context) {
+    match decide_motion_scope(&motion.scope, &active_context) {
         ScopeDecision::Allowed => {
             stats.record_active_process_match();
             stats.record_motion_repeat_tick();
@@ -1659,6 +1661,16 @@ fn repeat_overload_log_message(trigger_label: &str, skipped_for_binding: u64) ->
     format!(
         "event=motion_repeat_overload trigger={} disposition=skipped_or_coalesced reason=output_pending skipped_for_binding={skipped_for_binding}",
         trigger_label.replace(' ', "/")
+    )
+}
+
+fn decide_motion_scope(
+    scope: &ScopeSelection,
+    active_context: &signal_auras_core::ActiveProcessContext,
+) -> ScopeDecision {
+    scope.decide_context_with_policy(
+        active_context,
+        FocusFreshnessPolicy::new(MOTION_FOCUS_STALE_THRESHOLD),
     )
 }
 
@@ -1786,7 +1798,7 @@ where
         BindingMode::Consume => stats.record_consumed_trigger_event(),
         BindingMode::Passthrough => stats.record_passthrough_trigger_event(),
     }
-    match motion.scope.decide_context(&active_context) {
+    match decide_motion_scope(&motion.scope, &active_context) {
         ScopeDecision::Allowed => {
             stats.record_active_process_match();
             if let Some(macro_definition) = &motion.definition.macro_definition {
@@ -1844,7 +1856,7 @@ where
         return Ok(());
     };
     let trigger_label = format!("{} repeat", motion.definition.trigger.describe());
-    match motion.scope.decide_context(&active_context) {
+    match decide_motion_scope(&motion.scope, &active_context) {
         ScopeDecision::Allowed => {
             stats.record_active_process_match();
             stats.record_motion_repeat_tick();
@@ -1985,6 +1997,47 @@ mod tests {
         assert!(rendered.contains("dispatch_after_read_latency_ms=3"));
         assert!(rendered.contains("event_age_ms=99"));
         assert!(!rendered.contains("dispatch_latency_ms=3"));
+    }
+
+    #[test]
+    fn motion_process_scope_uses_longer_stable_focus_window() {
+        let scope = ScopeSelection::process_list(vec![signal_auras_core::ProcessName::parse(
+            "steam_app_2694490",
+        )
+        .unwrap()])
+        .unwrap();
+        let mut context = signal_auras_core::ActiveProcessContext::name_only(
+            signal_auras_core::ProcessName::parse("steam_app_2694490").unwrap(),
+        );
+        context.captured_at = Instant::now()
+            - signal_auras_core::DEFAULT_FOCUS_STALE_THRESHOLD
+            - Duration::from_millis(500);
+
+        assert!(matches!(
+            scope.decide_context(&context),
+            ScopeDecision::Denied { .. }
+        ));
+        assert_eq!(
+            decide_motion_scope(&scope, &context),
+            ScopeDecision::Allowed
+        );
+
+        context.captured_at =
+            Instant::now() - MOTION_FOCUS_STALE_THRESHOLD - Duration::from_millis(1);
+
+        match decide_motion_scope(&scope, &context) {
+            ScopeDecision::Denied { diagnostic, .. } => {
+                assert_eq!(
+                    diagnostic.kind,
+                    signal_auras_core::ScopeDenialKind::StaleFocus
+                );
+                assert_eq!(
+                    diagnostic.stale_threshold,
+                    Some(MOTION_FOCUS_STALE_THRESHOLD)
+                );
+            }
+            ScopeDecision::Allowed => panic!("stale motion focus should fail closed"),
+        }
     }
 
     #[test]
