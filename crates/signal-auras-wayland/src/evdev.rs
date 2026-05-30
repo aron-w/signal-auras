@@ -158,6 +158,7 @@ impl EvdevObservationProvider {
                 return Ok(Some(ObservedMotionInputEvent {
                     event,
                     source,
+                    kernel_timestamp: raw.kernel_timestamp,
                     observed_at: Instant::now(),
                 }));
             }
@@ -561,6 +562,7 @@ enum EvdevReadiness {
 pub struct ObservedMotionInputEvent {
     pub event: MotionInputEvent,
     pub source: PathBuf,
+    pub kernel_timestamp: KernelEventTimestamp,
     pub observed_at: Instant,
 }
 
@@ -569,11 +571,45 @@ pub struct RawInputEvent {
     pub event_type: u16,
     pub code: u16,
     pub value: i32,
+    pub kernel_timestamp: KernelEventTimestamp,
 }
 
 impl RawInputEvent {
     pub fn should_passthrough(&self) -> bool {
         matches!(self.event_type, EV_SYN | EV_KEY | EV_REL)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KernelEventTimestamp {
+    Unavailable,
+    Monotonic(Duration),
+}
+
+impl KernelEventTimestamp {
+    pub fn monotonic(timestamp: Duration) -> Self {
+        Self::Monotonic(timestamp)
+    }
+
+    pub fn event_age_at(self, now: Duration) -> Option<Duration> {
+        match self {
+            Self::Unavailable => None,
+            Self::Monotonic(timestamp) => now.checked_sub(timestamp),
+        }
+    }
+
+    pub fn event_age_now(self) -> Option<Duration> {
+        self.event_age_at(monotonic_clock_time()?)
+    }
+
+    fn from_timeval(seconds: i64, microseconds: i64) -> Self {
+        if seconds < 0
+            || !(0..1_000_000).contains(&microseconds)
+            || (seconds == 0 && microseconds == 0)
+        {
+            return Self::Unavailable;
+        }
+        Self::Monotonic(Duration::new(seconds as u64, (microseconds as u32) * 1_000))
     }
 }
 
@@ -723,6 +759,12 @@ impl EvdevDevice {
                 Some(path.as_path()),
             )
         })?;
+        if let Err(error) = set_monotonic_event_clock(&file) {
+            tracing::debug!(
+                "level=debug event=evdev_timestamp_clock_default path={} error={error}",
+                path.display()
+            );
+        }
         Ok(Self {
             path,
             file,
@@ -811,6 +853,7 @@ fn decode_input_event(bytes: &[u8; INPUT_EVENT_SIZE]) -> Option<MotionInputEvent
 }
 
 fn raw_input_event(bytes: &[u8; INPUT_EVENT_SIZE]) -> RawInputEvent {
+    let (seconds, microseconds) = raw_input_timeval(bytes);
     let event_type = u16::from_ne_bytes([bytes[TIMEVAL_SIZE], bytes[TIMEVAL_SIZE + 1]]);
     let code = u16::from_ne_bytes([bytes[TIMEVAL_SIZE + 2], bytes[TIMEVAL_SIZE + 3]]);
     let value = i32::from_ne_bytes([
@@ -823,7 +866,36 @@ fn raw_input_event(bytes: &[u8; INPUT_EVENT_SIZE]) -> RawInputEvent {
         event_type,
         code,
         value,
+        kernel_timestamp: KernelEventTimestamp::from_timeval(seconds, microseconds),
     }
+}
+
+#[cfg(target_pointer_width = "64")]
+fn raw_input_timeval(bytes: &[u8; INPUT_EVENT_SIZE]) -> (i64, i64) {
+    let seconds = i64::from_ne_bytes(bytes[0..8].try_into().unwrap());
+    let microseconds = i64::from_ne_bytes(bytes[8..16].try_into().unwrap());
+    (seconds, microseconds)
+}
+
+#[cfg(target_pointer_width = "32")]
+fn raw_input_timeval(bytes: &[u8; INPUT_EVENT_SIZE]) -> (i64, i64) {
+    let seconds = i32::from_ne_bytes(bytes[0..4].try_into().unwrap()) as i64;
+    let microseconds = i32::from_ne_bytes(bytes[4..8].try_into().unwrap()) as i64;
+    (seconds, microseconds)
+}
+
+fn monotonic_clock_time() -> Option<Duration> {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // Safety: clock_gettime writes to a valid timespec pointer and does not
+    // retain it after returning.
+    let result = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) };
+    if result < 0 || time.tv_sec < 0 || time.tv_nsec < 0 || time.tv_nsec >= 1_000_000_000 {
+        return None;
+    }
+    Some(Duration::new(time.tv_sec as u64, time.tv_nsec as u32))
 }
 
 fn decode_raw_input_event(raw: &RawInputEvent) -> Option<MotionInputEvent> {
@@ -928,6 +1000,21 @@ impl NonblockingFile for File {
 
 fn eviocgrab() -> libc::c_ulong {
     ioctl_write_int(b'E', 0x90)
+}
+
+fn eviocsclockid() -> libc::c_ulong {
+    ioctl_write_int(b'E', 0xa0)
+}
+
+fn set_monotonic_event_clock(file: &File) -> io::Result<()> {
+    let clock_id: libc::c_int = libc::CLOCK_MONOTONIC;
+    // Safety: EVIOCSCLOCKID reads the clock id from a valid pointer for the
+    // duration of this ioctl call and only affects this input descriptor.
+    let result = unsafe { libc::ioctl(file.as_raw_fd(), eviocsclockid(), &clock_id) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn device_name(file: &File) -> Option<String> {
@@ -1049,6 +1136,112 @@ mod tests {
         assert_eq!(
             decode_input_event(&input_event_bytes(EV_REL, REL_WHEEL, -1)).unwrap(),
             MotionInputEvent::pressed(MotionToken::Wheel(WheelDirection::Down))
+        );
+    }
+
+    #[test]
+    fn parses_keyboard_kernel_timestamps() {
+        let raw = raw_input_event(&input_event_bytes_at(EV_KEY, KEY_F13, 1, 42, 125_000));
+
+        assert_eq!(
+            raw.kernel_timestamp,
+            KernelEventTimestamp::monotonic(Duration::new(42, 125_000_000))
+        );
+        assert_eq!(
+            decode_raw_input_event(&raw),
+            Some(MotionInputEvent::pressed(MotionToken::Key(
+                "F13".to_string()
+            )))
+        );
+    }
+
+    #[test]
+    fn parses_pointer_button_and_wheel_kernel_timestamps() {
+        let button = raw_input_event(&input_event_bytes_at(EV_KEY, BTN_LEFT, 1, 43, 250_000));
+        let wheel = raw_input_event(&input_event_bytes_at(EV_REL, REL_WHEEL, -1, 44, 375_000));
+
+        assert_eq!(
+            button.kernel_timestamp,
+            KernelEventTimestamp::monotonic(Duration::new(43, 250_000_000))
+        );
+        assert_eq!(
+            wheel.kernel_timestamp,
+            KernelEventTimestamp::monotonic(Duration::new(44, 375_000_000))
+        );
+        assert_eq!(
+            decode_raw_input_event(&button),
+            Some(MotionInputEvent::pressed(MotionToken::MouseButton(
+                MouseButton::Left
+            )))
+        );
+        assert_eq!(
+            decode_raw_input_event(&wheel),
+            Some(MotionInputEvent::pressed(MotionToken::Wheel(
+                WheelDirection::Down
+            )))
+        );
+    }
+
+    #[test]
+    fn invalid_or_zero_kernel_timestamps_are_unavailable() {
+        let zero = raw_input_event(&input_event_bytes_at(EV_KEY, KEY_F13, 1, 0, 0));
+        let invalid_microseconds =
+            raw_input_event(&input_event_bytes_at(EV_KEY, KEY_F13, 1, 10, 1_000_000));
+        let negative_seconds = raw_input_event(&input_event_bytes_at(EV_KEY, KEY_F13, 1, -1, 0));
+
+        assert_eq!(zero.kernel_timestamp, KernelEventTimestamp::Unavailable);
+        assert_eq!(
+            invalid_microseconds.kernel_timestamp,
+            KernelEventTimestamp::Unavailable
+        );
+        assert_eq!(
+            negative_seconds.kernel_timestamp,
+            KernelEventTimestamp::Unavailable
+        );
+    }
+
+    #[test]
+    fn observed_input_events_preserve_kernel_and_userspace_timestamps() {
+        let path = temp_event_device("observed-input-timestamp");
+        let timestamp = KernelEventTimestamp::monotonic(Duration::new(45, 500_000_000));
+        std::fs::write(&path, input_event_bytes_at(EV_KEY, KEY_F13, 1, 45, 500_000)).unwrap();
+        let mut provider =
+            EvdevObservationProvider::open([path.clone()], InputProviderMode::Observe, None, false)
+                .unwrap();
+
+        let before_read = Instant::now();
+        let observed = provider.next_observed_input_event().unwrap().unwrap();
+
+        assert_eq!(observed.source, path);
+        assert!(observed.observed_at >= before_read);
+        assert_eq!(observed.raw.kernel_timestamp, timestamp);
+        assert_eq!(
+            observed.event,
+            Some(MotionInputEvent::pressed(MotionToken::Key(
+                "F13".to_string()
+            )))
+        );
+    }
+
+    #[test]
+    fn observed_motion_events_preserve_kernel_timestamps() {
+        let path = temp_event_device("observed-motion-timestamp");
+        let timestamp = KernelEventTimestamp::monotonic(Duration::new(46, 625_000_000));
+        std::fs::write(
+            &path,
+            input_event_bytes_at(EV_KEY, BTN_LEFT, 1, 46, 625_000),
+        )
+        .unwrap();
+        let mut provider =
+            EvdevObservationProvider::open([path], InputProviderMode::Observe, None, false)
+                .unwrap();
+
+        let observed = provider.next_observed_motion_event().unwrap().unwrap();
+
+        assert_eq!(observed.kernel_timestamp, timestamp);
+        assert_eq!(
+            observed.event,
+            MotionInputEvent::pressed(MotionToken::MouseButton(MouseButton::Left))
         );
     }
 
@@ -1306,6 +1499,30 @@ mod tests {
         bytes[TIMEVAL_SIZE + 2..TIMEVAL_SIZE + 4].copy_from_slice(&code.to_ne_bytes());
         bytes[TIMEVAL_SIZE + 4..TIMEVAL_SIZE + 8].copy_from_slice(&value.to_ne_bytes());
         bytes
+    }
+
+    fn input_event_bytes_at(
+        event_type: u16,
+        code: u16,
+        value: i32,
+        seconds: i64,
+        microseconds: i64,
+    ) -> [u8; INPUT_EVENT_SIZE] {
+        let mut bytes = input_event_bytes(event_type, code, value);
+        write_input_timeval(&mut bytes, seconds, microseconds);
+        bytes
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    fn write_input_timeval(bytes: &mut [u8; INPUT_EVENT_SIZE], seconds: i64, microseconds: i64) {
+        bytes[0..8].copy_from_slice(&seconds.to_ne_bytes());
+        bytes[8..16].copy_from_slice(&microseconds.to_ne_bytes());
+    }
+
+    #[cfg(target_pointer_width = "32")]
+    fn write_input_timeval(bytes: &mut [u8; INPUT_EVENT_SIZE], seconds: i64, microseconds: i64) {
+        bytes[0..4].copy_from_slice(&i32::try_from(seconds).unwrap().to_ne_bytes());
+        bytes[4..8].copy_from_slice(&i32::try_from(microseconds).unwrap().to_ne_bytes());
     }
 
     fn temp_event_device(label: &str) -> PathBuf {

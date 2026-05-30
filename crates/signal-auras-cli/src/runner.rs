@@ -10,6 +10,7 @@ use signal_auras_core::{
 };
 use signal_auras_lua::load_lua_file;
 use signal_auras_wayland::{
+    evdev::KernelEventTimestamp,
     event_loop::{RuntimeSignalFd, RuntimeTimerFd},
     RealWaylandAdapter,
 };
@@ -841,6 +842,11 @@ pub enum RunnerEvent {
     },
     Trigger(BindingTrigger),
     MotionInput(MotionInputEvent),
+    ObservedMotionInput {
+        event: MotionInputEvent,
+        kernel_timestamp: KernelEventTimestamp,
+        observed_at: Instant,
+    },
     MotionRepeatTick(MotionTrigger),
     Shutdown(ShutdownReason),
     RuntimeError(DiagnosableError),
@@ -976,6 +982,24 @@ where
             }
             RunnerEvent::MotionInput(event) => {
                 stats.record_motion_input_event(0);
+                stats.record_motion_event_age_unavailable();
+                for event in motion_runtime.handle_input(event) {
+                    handle_motion_runtime_event(
+                        event,
+                        motions,
+                        active_process_provider,
+                        executor,
+                        &mut scheduler,
+                        stats,
+                    )?;
+                }
+            }
+            RunnerEvent::ObservedMotionInput {
+                event,
+                kernel_timestamp,
+                observed_at,
+            } => {
+                record_motion_latency_metrics(stats, observed_at, kernel_timestamp);
                 for event in motion_runtime.handle_input(event) {
                     handle_motion_runtime_event(
                         event,
@@ -1351,13 +1375,12 @@ fn handle_observed_motion_input(
     stats: &mut RuntimeStats,
     log: RuntimeLog,
 ) -> Result<bool, DiagnosableError> {
-    let latency_ms = observed.observed_at.elapsed().as_millis() as u64;
-    stats.record_motion_input_event(latency_ms);
-    log.debug(format!(
-        "event=motion_input token={} state={} source={} dispatch_latency_ms={latency_ms}",
-        observed.event.token.describe(),
-        motion_input_state_label(observed.event.state),
-        observed.source.display()
+    let (dispatch_after_read_latency_ms, event_age_ms) =
+        record_motion_latency_metrics(stats, observed.observed_at, observed.kernel_timestamp);
+    log.debug(motion_input_debug_message(
+        &observed,
+        dispatch_after_read_latency_ms,
+        event_age_ms,
     ));
     let mut consumed = false;
     for event in motion_runtime.handle_input(observed.event) {
@@ -1414,6 +1437,7 @@ fn handle_observed_input(
         signal_auras_wayland::evdev::ObservedMotionInputEvent {
             event: event.clone(),
             source: observed.source.clone(),
+            kernel_timestamp: observed.raw.kernel_timestamp,
             observed_at: observed.observed_at,
         },
         motions,
@@ -1437,6 +1461,41 @@ fn motion_input_state_label(state: MotionInputState) -> &'static str {
         MotionInputState::Pressed => "pressed",
         MotionInputState::Released => "released",
     }
+}
+
+fn record_motion_latency_metrics(
+    stats: &mut RuntimeStats,
+    observed_at: Instant,
+    kernel_timestamp: KernelEventTimestamp,
+) -> (u64, Option<u64>) {
+    let dispatch_after_read_latency_ms = duration_millis_u64(observed_at.elapsed());
+    stats.record_motion_input_event(dispatch_after_read_latency_ms);
+    let event_age_ms = kernel_timestamp.event_age_now().map(duration_millis_u64);
+    match event_age_ms {
+        Some(age_ms) => stats.record_motion_event_age(age_ms),
+        None => stats.record_motion_event_age_unavailable(),
+    }
+    (dispatch_after_read_latency_ms, event_age_ms)
+}
+
+fn duration_millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn motion_input_debug_message(
+    observed: &signal_auras_wayland::evdev::ObservedMotionInputEvent,
+    dispatch_after_read_latency_ms: u64,
+    event_age_ms: Option<u64>,
+) -> String {
+    let event_age = event_age_ms
+        .map(|age_ms| age_ms.to_string())
+        .unwrap_or_else(|| "unavailable".to_string());
+    format!(
+        "event=motion_input token={} state={} source={} dispatch_after_read_latency_ms={dispatch_after_read_latency_ms} event_age_ms={event_age}",
+        observed.event.token.describe(),
+        motion_input_state_label(observed.event.state),
+        observed.source.display()
+    )
 }
 
 fn cleanup_after_error(
@@ -1906,6 +1965,26 @@ mod tests {
         assert!(rendered.contains("DEBUG"));
         assert!(rendered.contains("motion_input"));
         assert!(rendered.contains("token=<LClick>"));
+    }
+
+    #[test]
+    fn motion_input_debug_message_distinguishes_latency_labels() {
+        let observed = signal_auras_wayland::evdev::ObservedMotionInputEvent {
+            event: MotionInputEvent::pressed(MotionToken::MouseButton(
+                signal_auras_core::MouseButton::Left,
+            )),
+            source: PathBuf::from("/dev/input/event7"),
+            kernel_timestamp: KernelEventTimestamp::monotonic(Duration::from_secs(1)),
+            observed_at: Instant::now(),
+        };
+
+        let rendered = RuntimeLog::new(true)
+            .render_plain("DEBUG", &motion_input_debug_message(&observed, 3, Some(99)));
+
+        assert!(rendered.contains("motion_input"));
+        assert!(rendered.contains("dispatch_after_read_latency_ms=3"));
+        assert!(rendered.contains("event_age_ms=99"));
+        assert!(!rendered.contains("dispatch_latency_ms=3"));
     }
 
     #[test]

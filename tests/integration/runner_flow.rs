@@ -9,6 +9,7 @@ use signal_auras_core::{
     MotionTrigger, MouseButton, MouseTrigger, ProcessName, RegistrationId, RegistrationState,
     RuntimeStats, ScopeSelection, WheelDirection,
 };
+use signal_auras_wayland::evdev::KernelEventTimestamp;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -596,6 +597,63 @@ fn lifecycle_executes_motion_sequence_and_repeat_ticks_until_release() {
     assert_eq!(stats.motion_repeat_tick_count, 1);
     assert_eq!(stats.motion_repeat_cancel_count, 1);
     assert_eq!(stats.max_motion_dispatch_latency_ms, 0);
+}
+
+#[test]
+fn lifecycle_reports_event_age_backlog_separately_from_dispatch_after_read() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          leader = "F13",
+          motions = {
+            {
+              trigger = { "<Leader>", "f", "f" },
+              macro = macro { text "/search" },
+            },
+          },
+        }
+        "#,
+    );
+    let mut prompt = Prompt::new(ConsentDecision::ExplicitGlobalConfirmed);
+    let mut registrar = Registrar::default();
+    let active = Active(Some(ProcessName::parse("poe2.exe").unwrap()));
+    let mut executor = Executor::default();
+    let observed_at = Instant::now();
+    let old_kernel_timestamp = KernelEventTimestamp::monotonic(Duration::from_millis(1));
+    let mut lifecycle = ScriptedLifecycle::new(vec![
+        RunnerEvent::ObservedMotionInput {
+            event: MotionInputEvent::pressed(MotionToken::Leader),
+            kernel_timestamp: old_kernel_timestamp,
+            observed_at,
+        },
+        RunnerEvent::ObservedMotionInput {
+            event: MotionInputEvent::pressed(MotionToken::Key("f".into())),
+            kernel_timestamp: old_kernel_timestamp,
+            observed_at,
+        },
+        RunnerEvent::ObservedMotionInput {
+            event: MotionInputEvent::pressed(MotionToken::Key("f".into())),
+            kernel_timestamp: old_kernel_timestamp,
+            observed_at,
+        },
+        RunnerEvent::Shutdown(signal_auras_core::ShutdownReason::CtrlC),
+    ]);
+
+    let stats = start_runner_with_lifecycle(
+        &lua_file,
+        &mut prompt,
+        &mut registrar,
+        &active,
+        &mut executor,
+        &mut lifecycle,
+    )
+    .unwrap();
+
+    assert_eq!(executor.actions, 1);
+    assert_eq!(stats.motion_input_event_count, 3);
+    assert_eq!(stats.motion_event_age_sample_count, 3);
+    assert_eq!(stats.motion_event_age_unavailable_count, 0);
+    assert!(stats.max_motion_event_age_ms > stats.max_motion_dispatch_latency_ms);
 }
 
 #[test]

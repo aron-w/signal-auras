@@ -313,6 +313,21 @@ checks with configured shortcuts and unsafe input when available:
   physical device is usable immediately afterward and no Signal Auras virtual
   input device remains stuck.
 
+### Follow-up: true input latency metrics
+
+After implementing true input latency metrics, repeat unsafe evdev motion
+checks with `--verbose` enabled and confirm:
+
+- Motion input diagnostics include `dispatch_after_read_latency_ms` and
+  `event_age_ms` as separate fields.
+- Final stats include `motion_event_age_samples`,
+  `motion_event_age_unavailable`, `avg_motion_event_age_ms`,
+  `p95_motion_event_age_ms`, `p99_motion_event_age_ms`, and
+  `max_motion_event_age_ms`.
+- If the selected evdev source does not provide comparable kernel timestamps,
+  the runner continues and increments unavailable event-age samples while
+  dispatch-after-read latency remains available.
+
 ## Composite Pointer Bindings
 
 Composite pointer bindings remain blocked on a real KDE provider for pointer

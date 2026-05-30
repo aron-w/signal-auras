@@ -10,15 +10,15 @@
 
 ## Phase 1: Setup
 
-- [ ] T001 Verify existing evdev raw event parsing, observed input event structs, runtime stats, and runner latency recording in `crates/signal-auras-wayland/src/evdev.rs`, `crates/signal-auras-core/src/stats.rs`, and `crates/signal-auras-cli/src/runner.rs`
-- [ ] T002 [P] Confirm no new dependencies are needed in `Cargo.toml` and `flake.nix`
+- [X] T001 Verify existing evdev raw event parsing, observed input event structs, runtime stats, and runner latency recording in `crates/signal-auras-wayland/src/evdev.rs`, `crates/signal-auras-core/src/stats.rs`, and `crates/signal-auras-cli/src/runner.rs`
+- [X] T002 [P] Confirm no new dependencies are needed in `Cargo.toml` and `flake.nix`
 
 ## Phase 2: Foundational
 
-- [ ] T003 Add timestamp availability model tests in `crates/signal-auras-wayland/src/evdev.rs`
-- [ ] T004 Implement timestamp availability model for decoded observed events in `crates/signal-auras-wayland/src/evdev.rs`
-- [ ] T005 Add true event-age counter and histogram tests in `crates/signal-auras-core/src/stats.rs`
-- [ ] T006 Implement true event-age stats fields and summary rendering in `crates/signal-auras-core/src/stats.rs`
+- [X] T003 Add timestamp availability model tests in `crates/signal-auras-wayland/src/evdev.rs`
+- [X] T004 Implement timestamp availability model for decoded observed events in `crates/signal-auras-wayland/src/evdev.rs`
+- [X] T005 Add true event-age counter and histogram tests in `crates/signal-auras-core/src/stats.rs`
+- [X] T006 Implement true event-age stats fields and summary rendering in `crates/signal-auras-core/src/stats.rs`
 
 ## Phase 3: User Story 1 - Preserve Kernel Event Time (P1)
 
@@ -26,10 +26,10 @@
 
 **Independent Test**: Simulated raw evdev events retain kernel timestamps on observed input events.
 
-- [ ] T007 [P] [US1] Add keyboard timestamp parsing tests in `crates/signal-auras-wayland/src/evdev.rs`
-- [ ] T008 [P] [US1] Add pointer button and wheel timestamp parsing tests in `crates/signal-auras-wayland/src/evdev.rs`
-- [ ] T009 [US1] Preserve kernel timestamps on `ObservedInputEvent` and `ObservedMotionInputEvent` in `crates/signal-auras-wayland/src/evdev.rs`
-- [ ] T010 [US1] Preserve userspace observation/read timestamps for existing dispatch metrics in `crates/signal-auras-wayland/src/evdev.rs`
+- [X] T007 [P] [US1] Add keyboard timestamp parsing tests in `crates/signal-auras-wayland/src/evdev.rs`
+- [X] T008 [P] [US1] Add pointer button and wheel timestamp parsing tests in `crates/signal-auras-wayland/src/evdev.rs`
+- [X] T009 [US1] Preserve kernel timestamps on `ObservedInputEvent` and `ObservedMotionInputEvent` in `crates/signal-auras-wayland/src/evdev.rs`
+- [X] T010 [US1] Preserve userspace observation/read timestamps for existing dispatch metrics in `crates/signal-auras-wayland/src/evdev.rs`
 
 ## Phase 4: User Story 2 - Report True Event Age and Backlog (P2)
 
@@ -37,10 +37,10 @@
 
 **Independent Test**: Controlled timestamp tests produce expected average, p95, p99, max, and unavailable-sample values.
 
-- [ ] T011 [P] [US2] Add true event-age metric calculation tests in `crates/signal-auras-core/src/stats.rs`
-- [ ] T012 [P] [US2] Add backlog scenario tests in `tests/integration/runner_flow.rs`
-- [ ] T013 [US2] Record kernel-event-to-action age when dispatching observed input in `crates/signal-auras-cli/src/runner.rs`
-- [ ] T014 [US2] Count unavailable or incomparable kernel timestamps without corrupting summaries in `crates/signal-auras-core/src/stats.rs`
+- [X] T011 [P] [US2] Add true event-age metric calculation tests in `crates/signal-auras-core/src/stats.rs`
+- [X] T012 [P] [US2] Add backlog scenario tests in `tests/integration/runner_flow.rs`
+- [X] T013 [US2] Record kernel-event-to-action age when dispatching observed input in `crates/signal-auras-cli/src/runner.rs`
+- [X] T014 [US2] Count unavailable or incomparable kernel timestamps without corrupting summaries in `crates/signal-auras-core/src/stats.rs`
 
 ## Phase 5: User Story 3 - Keep Existing Dispatch Metrics Understandable (P3)
 
@@ -48,18 +48,18 @@
 
 **Independent Test**: Final summaries and verbose diagnostics include distinct labels for both metric families.
 
-- [ ] T015 [P] [US3] Add dispatch metric compatibility and label tests in `crates/signal-auras-core/src/stats.rs`
-- [ ] T016 [P] [US3] Add verbose diagnostic label tests in `crates/signal-auras-cli/src/runner.rs`
-- [ ] T017 [US3] Rename or preserve current dispatch latency fields with explicit dispatch-after-read labels in `crates/signal-auras-core/src/stats.rs`
-- [ ] T018 [US3] Update runner verbose diagnostics to distinguish true event age from dispatch-after-read latency in `crates/signal-auras-cli/src/runner.rs`
+- [X] T015 [P] [US3] Add dispatch metric compatibility and label tests in `crates/signal-auras-core/src/stats.rs`
+- [X] T016 [P] [US3] Add verbose diagnostic label tests in `crates/signal-auras-cli/src/runner.rs`
+- [X] T017 [US3] Rename or preserve current dispatch latency fields with explicit dispatch-after-read labels in `crates/signal-auras-core/src/stats.rs`
+- [X] T018 [US3] Update runner verbose diagnostics to distinguish true event age from dispatch-after-read latency in `crates/signal-auras-cli/src/runner.rs`
 
 ## Phase 6: Polish and Verification
 
-- [ ] T019 Update README and manual verification notes for true input latency metrics in `README.md` and `tests/compositor/manual-wayland-verification.md`
-- [ ] T020 Run `cargo fmt --check`
-- [ ] T021 Run `cargo clippy --all-targets -- -D warnings`
-- [ ] T022 Run `cargo test`
-- [ ] T023 Run `nix flake check` when feasible
+- [X] T019 Update README and manual verification notes for true input latency metrics in `README.md` and `tests/compositor/manual-wayland-verification.md`
+- [X] T020 Run `cargo fmt --check`
+- [X] T021 Run `cargo clippy --all-targets -- -D warnings`
+- [X] T022 Run `cargo test`
+- [X] T023 Run `nix flake check` when feasible
 
 ## Dependencies and Order
 

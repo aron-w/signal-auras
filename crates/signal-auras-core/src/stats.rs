@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 const MOTION_LATENCY_BUCKETS_MS: [u64; 9] = [1, 2, 5, 10, 20, 50, 100, 250, u64::MAX];
+const MOTION_EVENT_AGE_BUCKETS_MS: [u64; 9] = [1, 2, 5, 10, 20, 50, 100, 250, u64::MAX];
 const CALLBACK_LATENCY_BUCKETS_MS: [u64; 9] = [1, 2, 5, 10, 20, 50, 100, 250, u64::MAX];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +49,11 @@ pub struct RuntimeStats {
     pub max_motion_dispatch_latency_ms: u64,
     motion_dispatch_latency_total_ms: u64,
     motion_dispatch_latency_buckets: [u64; MOTION_LATENCY_BUCKETS_MS.len()],
+    pub motion_event_age_sample_count: u64,
+    pub motion_event_age_unavailable_count: u64,
+    pub max_motion_event_age_ms: u64,
+    motion_event_age_total_ms: u64,
+    motion_event_age_buckets: [u64; MOTION_EVENT_AGE_BUCKETS_MS.len()],
     pub event_loop_wakeup_count: u64,
     pub hotplug_add_count: u64,
     pub hotplug_remove_count: u64,
@@ -103,6 +109,11 @@ impl RuntimeStats {
             max_motion_dispatch_latency_ms: 0,
             motion_dispatch_latency_total_ms: 0,
             motion_dispatch_latency_buckets: [0; MOTION_LATENCY_BUCKETS_MS.len()],
+            motion_event_age_sample_count: 0,
+            motion_event_age_unavailable_count: 0,
+            max_motion_event_age_ms: 0,
+            motion_event_age_total_ms: 0,
+            motion_event_age_buckets: [0; MOTION_EVENT_AGE_BUCKETS_MS.len()],
             event_loop_wakeup_count: 0,
             hotplug_add_count: 0,
             hotplug_remove_count: 0,
@@ -288,6 +299,55 @@ impl RuntimeStats {
         self.max_motion_dispatch_latency_ms
     }
 
+    pub fn record_motion_event_age(&mut self, event_age_ms: u64) {
+        self.motion_event_age_sample_count += 1;
+        self.max_motion_event_age_ms = self.max_motion_event_age_ms.max(event_age_ms);
+        self.motion_event_age_total_ms += event_age_ms;
+        let bucket = MOTION_EVENT_AGE_BUCKETS_MS
+            .iter()
+            .position(|upper_bound| event_age_ms <= *upper_bound)
+            .unwrap_or(MOTION_EVENT_AGE_BUCKETS_MS.len() - 1);
+        self.motion_event_age_buckets[bucket] += 1;
+    }
+
+    pub fn record_motion_event_age_unavailable(&mut self) {
+        self.motion_event_age_unavailable_count += 1;
+    }
+
+    pub fn average_motion_event_age_ms(&self) -> u64 {
+        if self.motion_event_age_sample_count == 0 {
+            return 0;
+        }
+        self.motion_event_age_total_ms / self.motion_event_age_sample_count
+    }
+
+    pub fn motion_event_age_p95_ms(&self) -> u64 {
+        self.motion_event_age_percentile_ms(95)
+    }
+
+    pub fn motion_event_age_p99_ms(&self) -> u64 {
+        self.motion_event_age_percentile_ms(99)
+    }
+
+    fn motion_event_age_percentile_ms(&self, percentile: u64) -> u64 {
+        if self.motion_event_age_sample_count == 0 {
+            return 0;
+        }
+        let rank = (self.motion_event_age_sample_count * percentile).div_ceil(100);
+        let mut seen = 0;
+        for (bucket, upper_bound) in self
+            .motion_event_age_buckets
+            .iter()
+            .zip(MOTION_EVENT_AGE_BUCKETS_MS)
+        {
+            seen += *bucket;
+            if seen >= rank {
+                return upper_bound;
+            }
+        }
+        self.max_motion_event_age_ms
+    }
+
     pub fn record_motion_repeat_tick(&mut self) {
         self.motion_repeat_tick_count += 1;
     }
@@ -346,7 +406,7 @@ impl RuntimeStats {
 
     pub fn render_summary(&self, reason: ShutdownReason) -> String {
         format!(
-            "final_summary reason={reason:?} elapsed_ms={} triggers={} successes={} failures={} denials={} permission_failures={} scope_mismatches={} capability_probe_successes={} capability_probe_failures={} ignored_events={} callbacks_received={} callbacks_dispatched={} callbacks_dropped={} avg_callback_dispatch_latency_ms={} p95_callback_dispatch_latency_ms={} p99_callback_dispatch_latency_ms={} max_callback_dispatch_latency_ms={} active_process_matches={} active_process_non_matches={} metadata_unavailable={} input_emitted={} input_denied={} consumed_events={} passthrough_events={} motion_inputs={} repeat_ticks={} repeat_skipped_or_coalesced={} repeat_cancels={} non_repeat_skipped_or_denied={} avg_motion_dispatch_latency_ms={} p95_motion_dispatch_latency_ms={} p99_motion_dispatch_latency_ms={} max_motion_dispatch_latency_ms={} event_loop_wakeups={} hotplug_adds={} hotplug_removes={} output_queue_failures={} cancelled_macro_runs={} max_output_queue_depth={} kde_bridge_setups={} kde_bridge_cleanups={} cleanup_successes={} cleanup_failures={}",
+            "final_summary reason={reason:?} elapsed_ms={} triggers={} successes={} failures={} denials={} permission_failures={} scope_mismatches={} capability_probe_successes={} capability_probe_failures={} ignored_events={} callbacks_received={} callbacks_dispatched={} callbacks_dropped={} avg_callback_dispatch_latency_ms={} p95_callback_dispatch_latency_ms={} p99_callback_dispatch_latency_ms={} max_callback_dispatch_latency_ms={} active_process_matches={} active_process_non_matches={} metadata_unavailable={} input_emitted={} input_denied={} consumed_events={} passthrough_events={} motion_inputs={} repeat_ticks={} repeat_skipped_or_coalesced={} repeat_cancels={} non_repeat_skipped_or_denied={} avg_motion_dispatch_latency_ms={} p95_motion_dispatch_latency_ms={} p99_motion_dispatch_latency_ms={} max_motion_dispatch_latency_ms={} motion_event_age_samples={} motion_event_age_unavailable={} avg_motion_event_age_ms={} p95_motion_event_age_ms={} p99_motion_event_age_ms={} max_motion_event_age_ms={} event_loop_wakeups={} hotplug_adds={} hotplug_removes={} output_queue_failures={} cancelled_macro_runs={} max_output_queue_depth={} kde_bridge_setups={} kde_bridge_cleanups={} cleanup_successes={} cleanup_failures={}",
             self.elapsed_runtime().as_millis(),
             self.total_triggers(),
             self.macro_success_count,
@@ -380,6 +440,12 @@ impl RuntimeStats {
             self.motion_dispatch_latency_p95_ms(),
             self.motion_dispatch_latency_p99_ms(),
             self.max_motion_dispatch_latency_ms,
+            self.motion_event_age_sample_count,
+            self.motion_event_age_unavailable_count,
+            self.average_motion_event_age_ms(),
+            self.motion_event_age_p95_ms(),
+            self.motion_event_age_p99_ms(),
+            self.max_motion_event_age_ms,
             self.event_loop_wakeup_count,
             self.hotplug_add_count,
             self.hotplug_remove_count,
@@ -472,6 +538,47 @@ mod tests {
         assert!(summary.contains("avg_motion_dispatch_latency_ms=22"));
         assert!(summary.contains("p95_motion_dispatch_latency_ms=20"));
         assert!(summary.contains("p99_motion_dispatch_latency_ms=50"));
+    }
+
+    #[test]
+    fn motion_event_age_metrics_report_average_p95_p99_and_unavailable() {
+        let mut stats = RuntimeStats::new();
+        for _ in 0..95 {
+            stats.record_motion_event_age(20);
+        }
+        for _ in 0..4 {
+            stats.record_motion_event_age(50);
+        }
+        stats.record_motion_event_age(100);
+        stats.record_motion_event_age_unavailable();
+        stats.record_motion_event_age_unavailable();
+
+        assert_eq!(stats.motion_event_age_sample_count, 100);
+        assert_eq!(stats.motion_event_age_unavailable_count, 2);
+        assert_eq!(stats.average_motion_event_age_ms(), 22);
+        assert_eq!(stats.motion_event_age_p95_ms(), 20);
+        assert_eq!(stats.motion_event_age_p99_ms(), 50);
+        assert_eq!(stats.max_motion_event_age_ms, 100);
+
+        let summary = stats.render_summary(ShutdownReason::CtrlC);
+        assert!(summary.contains("motion_event_age_samples=100"));
+        assert!(summary.contains("motion_event_age_unavailable=2"));
+        assert!(summary.contains("avg_motion_event_age_ms=22"));
+        assert!(summary.contains("p95_motion_event_age_ms=20"));
+        assert!(summary.contains("p99_motion_event_age_ms=50"));
+        assert!(summary.contains("max_motion_event_age_ms=100"));
+    }
+
+    #[test]
+    fn dispatch_and_true_event_age_labels_are_distinct() {
+        let mut stats = RuntimeStats::new();
+        stats.record_motion_input_event(1);
+        stats.record_motion_event_age(50);
+
+        let summary = stats.render_summary(ShutdownReason::CtrlC);
+
+        assert!(summary.contains("avg_motion_dispatch_latency_ms=1"));
+        assert!(summary.contains("avg_motion_event_age_ms=50"));
     }
 
     #[test]

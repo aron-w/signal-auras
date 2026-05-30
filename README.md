@@ -43,9 +43,10 @@ path, validation result, effective scope, capability probe result, and hotkey
 registration result. Press Ctrl-C to stop a successful run and print final
 runtime stats. Use `--verbose` while debugging provider setup and motion input;
 verbose logs use `level=... event=... key=value` fields. Motion diagnostics
-include the source evdev path, dispatch latency, repeat trigger/cancel/tick
-events, and provider device counts so delayed or missed input can be traced
-without logging macro text payloads.
+include the source evdev path, dispatch-after-read latency, true event age when
+evdev kernel timestamps are comparable, repeat trigger/cancel/tick events, and
+provider device counts so delayed or missed input can be traced without logging
+macro text payloads.
 If an already-active non-repeat trigger is pressed again, the later attempt is
 skipped/denied deterministically and counted in final stats without stopping the
 runner.
@@ -298,8 +299,12 @@ tick becomes due, the later tick is skipped/coalesced instead of queued; skipped
 ticks are not replayed after overload clears or after release. Final runtime
 stats include motion input count, executed repeat tick count, skipped/coalesced
 repeat count, non-repeat skipped/denied collision count, repeat cancel count,
-cancelled queued macro runs, and maximum observed motion dispatch latency for
-the run.
+cancelled queued macro runs, maximum observed motion dispatch latency for the
+run, true motion event-age samples, unavailable event-age samples, and average,
+p95, p99, and max true event age where evdev kernel timestamps are comparable.
+Verbose motion logs use `dispatch_after_read_latency_ms` for the existing
+userspace-read-to-action metric and `event_age_ms` for kernel-event-to-action
+age, or `event_age_ms=unavailable` when a usable kernel timestamp is absent.
 
 ## Verification
 
