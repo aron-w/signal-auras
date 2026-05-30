@@ -19,6 +19,43 @@
           (system: function nixpkgs.legacyPackages.${system});
     in
     {
+      nixosModules = {
+        default = ./nixos/signal-auras.nix;
+        signal-auras = ./nixos/signal-auras.nix;
+      };
+
+      checks = forAllSystems (pkgs:
+        pkgs.lib.optionalAttrs pkgs.stdenv.isLinux
+          (let
+            moduleEval = nixpkgs.lib.nixosSystem {
+              system = pkgs.stdenv.hostPlatform.system;
+              modules = [
+                ./nixos/signal-auras.nix
+                {
+                  programs.signal-auras.unsafeInput = {
+                    enable = true;
+                    users = [ "alice" ];
+                    selectedDevices = [
+                      {
+                        id = "keyboard";
+                        match = ''ATTRS{name}=="Example Keyboard"'';
+                      }
+                    ];
+                  };
+                }
+              ];
+            };
+          in
+          {
+            nixos-module = pkgs.runCommand "signal-auras-nixos-module" {
+              rules = moduleEval.config.services.udev.extraRules;
+            } ''
+              grep -q 'by-signal-auras/keyboard' <<< "$rules"
+              grep -q 'KERNEL=="uinput"' <<< "$rules"
+              touch "$out"
+            '';
+          }));
+
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
           packages = with pkgs; [

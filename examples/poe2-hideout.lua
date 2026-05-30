@@ -7,7 +7,7 @@ return {
     devices = "all",
     acknowledge_risk = "GRAB_ALL_INPUTS",
   },
-  leader = "F3",
+  leader = "F9",
   defaults = {
     inter_action_delay_ms = 200,
   },
