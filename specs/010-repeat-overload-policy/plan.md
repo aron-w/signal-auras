@@ -6,7 +6,7 @@
 
 ## Summary
 
-Define and implement the default held-repeat overload policy: when repeat output for a held binding is still pending or active, later due ticks for the same binding are skipped/coalesced rather than queued. The runner must remain live for input, cancellation, diagnostics, and shutdown; a processed cancellation release prevents any later repeat output for that hold; verbose diagnostics and final summaries report executed, skipped/coalesced, and cancelled repeat work without exposing private macro payloads.
+Define and implement bounded overload policy for trigger work. The existing slice covers held-repeat overload: when repeat output for a held binding is still pending or active, later due ticks for the same binding are skipped/coalesced rather than queued. The architecture-review follow-up extends the same runtime reliability model to non-repeat trigger collisions so repeated or mashed input for an already-active trigger is skipped, coalesced, or denied deterministically while the always-on runner continues. Verbose diagnostics and final summaries report executed, skipped/coalesced, denied, and cancelled work without exposing private macro payloads.
 
 ## Technical Context
 
@@ -16,17 +16,17 @@ Define and implement the default held-repeat overload policy: when repeat output
 
 **Storage**: Repository files only. No daemon state, persistent queue, cache, or user data store.
 
-**Testing**: `nix develop -c cargo fmt --check`, `nix develop -c cargo clippy --all-targets -- -D warnings`, `nix develop -c cargo test`, and `nix flake check` when feasible. Automated tests cover slow output overload, long-held repeat stability, cancellation races, independent bindings, shutdown/cancel drain behavior, diagnostics, and unchanged Lua loading.
+**Testing**: `nix develop -c cargo fmt --check`, `nix develop -c cargo clippy --all-targets -- -D warnings`, `nix develop -c cargo test`, and `nix flake check` when feasible. Automated tests cover slow output overload, long-held repeat stability, non-repeat trigger collisions, active trigger cleanup, cancellation races, independent bindings, shutdown/cancel drain behavior, diagnostics, and unchanged Lua loading.
 
 **Target Platform**: NixOS/Linux/KDE Plasma Wayland with current-run explicit unsafe evdev/uinput opt-in for motion repeats.
 
 **Project Type**: Rust workspace with core automation library, Lua validation crate, Wayland adapter crate, and CLI runner.
 
-**Performance Goals**: Slow-output stress tests keep the runner alive for at least 10,000 due repeat opportunities; per-repeat pending output remains bounded to at most one active/pending macro run; cancellation input and shutdown remain serviceable while overload occurs.
+**Performance Goals**: Slow-output stress tests keep the runner alive for at least 10,000 due repeat opportunities; per-repeat and per-non-repeat-trigger pending output remains bounded to at most one active/pending macro run for the same trigger; cancellation input and shutdown remain serviceable while overload occurs.
 
 **Constraints**: Preserve existing Lua repeat syntax and macro consent requirements. Do not add hidden global behavior, daemon state, IPC, new unsafe scope, or ambient Lua capabilities. Permission denial/revocation continues to fail closed with diagnostics.
 
-**Scale/Scope**: One terminal-started runner process, a small set of local input devices, and multiple simultaneously held repeat bindings in a single runtime.
+**Scale/Scope**: One terminal-started runner process, a small set of local input devices, multiple simultaneously held repeat bindings, and repeated or mashed attempts for already-active non-repeat triggers in a single runtime.
 
 ## Constitution Check
 
@@ -77,7 +77,7 @@ tests/integration/
 └── runner_flow.rs
 ```
 
-**Structure Decision**: Keep overload policy and counters in existing core/runtime data structures where they can be tested without compositor hardware. Keep CLI changes limited to the live runner queue, repeat tick scheduling, and verbose/final diagnostics. Keep Lua and Wayland adapter code unchanged unless tests expose an existing integration requirement.
+**Structure Decision**: Keep overload policy and counters in existing core/runtime data structures where they can be tested without compositor hardware. Keep CLI changes limited to the live runner queue, repeat tick scheduling, non-repeat active-trigger state, cleanup, and verbose/final diagnostics. Keep Lua and Wayland adapter code unchanged unless tests expose an existing integration requirement.
 
 ## Complexity Tracking
 

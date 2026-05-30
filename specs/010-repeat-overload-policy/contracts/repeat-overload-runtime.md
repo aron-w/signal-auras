@@ -10,6 +10,9 @@ This contract covers the live runner and testable Rust runtime behavior for held
 - If a tick is due while output for the same held repeat is pending or active, the tick is skipped/coalesced and counted.
 - Skipped/coalesced ticks are never replayed after overload clears, after cancellation, or during shutdown.
 - Distinct held repeat bindings keep independent pending/active state and counters.
+- A non-repeat trigger attempt may start macro output only if the same trigger does not already have pending or active macro output.
+- If a non-repeat trigger attempt collides with pending or active output for the same trigger, it is skipped, coalesced, or denied according to one documented policy and counted without stopping the runner.
+- Active trigger state is cleared after macro completion, cancellation, denial cleanup, or shutdown cleanup.
 
 ## Cancellation Rules
 
@@ -21,6 +24,7 @@ This contract covers the live runner and testable Rust runtime behavior for held
 
 - Verbose diagnostics identify repeat lifecycle events using trigger labels and bounded counters.
 - Final summaries include counts for executed repeat ticks, skipped/coalesced repeat ticks, repeat cancellations, and cancelled queued macro runs.
+- Final summaries include counts for denied, skipped, or coalesced non-repeat trigger collisions.
 - Diagnostics must not include macro text payloads or unrelated desktop metadata.
 
 ## Failure Rules

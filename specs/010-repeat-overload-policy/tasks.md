@@ -98,6 +98,19 @@
 - [x] T020 Run cargo test and fix failures
 - [x] T021 Run nix flake check when feasible and document limitations
 
+## Phase 7: Architecture Review Follow-Up - Non-Repeat Trigger Collisions
+
+**Goal**: Repeated or mashed input for an already-active non-repeat trigger follows a deterministic bounded policy, keeps the always-on runner live, records skipped/denied diagnostics, and cleans up active trigger state after completion or cancellation.
+
+**Independent Test**: Start a non-repeat macro, trigger the same binding again before completion, verify the collision is skipped/coalesced/denied without returning a fatal runner error, then complete or cancel the macro and verify a later legitimate trigger can run.
+
+- [ ] T022 [P] [US4] Add non-repeat already-active trigger collision tests in `crates/signal-auras-cli/src/runner.rs`
+- [ ] T023 [P] [US4] Add stats rendering tests for denied/skipped non-repeat collisions in `crates/signal-auras-core/src/stats.rs`
+- [ ] T024 [US4] Implement deterministic non-repeat collision policy in `crates/signal-auras-cli/src/runner.rs`
+- [ ] T025 [US4] Record denied/skipped non-repeat collision stats and bounded diagnostics in `crates/signal-auras-cli/src/runner.rs`
+- [ ] T026 [US4] Ensure active trigger state cleanup after macro completion, cancellation, denial, and shutdown in `crates/signal-auras-cli/src/runner.rs`
+- [ ] T027 [US4] Update README runtime diagnostics for non-repeat trigger overload in `README.md`
+
 ---
 
 ## Dependencies & Execution Order
