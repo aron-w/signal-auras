@@ -10,14 +10,14 @@
 
 ## Phase 1: Setup
 
-- [ ] T001 Verify existing signal, wake-fd, runtime lifecycle, KDE bridge, evdev, and uinput cleanup paths in `crates/signal-auras-wayland/src/event_loop.rs`, `kde_bridge.rs`, `evdev.rs`, `uinput.rs`, and `crates/signal-auras-cli/src/runner.rs`
-- [ ] T002 [P] Confirm existing Nix verification commands and no new dependencies in `flake.nix`
+- [x] T001 Verify existing signal, wake-fd, runtime lifecycle, KDE bridge, evdev, and uinput cleanup paths in `crates/signal-auras-wayland/src/event_loop.rs`, `kde_bridge.rs`, `evdev.rs`, `uinput.rs`, and `crates/signal-auras-cli/src/runner.rs`
+- [x] T002 [P] Confirm existing Nix verification commands and no new dependencies in `flake.nix`
 
 ## Phase 2: Foundational
 
-- [ ] T003 Add runtime signal guard tests for SIGINT/SIGTERM mask setup in `crates/signal-auras-wayland/src/event_loop.rs`
-- [ ] T004 Implement a reusable runtime signal guard that blocks SIGINT/SIGTERM before signal fd creation in `crates/signal-auras-wayland/src/event_loop.rs`
-- [ ] T005 Add helper-thread signal-mask inheritance test hooks in `crates/signal-auras-wayland/src/kde_bridge.rs`
+- [x] T003 Add runtime signal guard tests for SIGINT/SIGTERM mask setup in `crates/signal-auras-wayland/src/event_loop.rs`
+- [x] T004 Implement a reusable runtime signal guard that blocks SIGINT/SIGTERM before signal fd creation in `crates/signal-auras-wayland/src/event_loop.rs`
+- [x] T005 Add helper-thread signal-mask inheritance test hooks in `crates/signal-auras-wayland/src/event_loop.rs`
 
 ## Phase 3: User Story 1 - Route Terminal Signals Through Cleanup (P1)
 
@@ -25,9 +25,9 @@
 
 **Independent Test**: Simulated SIGINT/SIGTERM each produce a shutdown reason and cleanup report without abrupt termination.
 
-- [ ] T006 [P] [US1] Add SIGINT/SIGTERM routing tests in `crates/signal-auras-wayland/src/event_loop.rs`
-- [ ] T007 [US1] Wire SIGINT/SIGTERM runtime signal fd handling into `crates/signal-auras-cli/src/runner.rs`
-- [ ] T008 [US1] Ensure duplicate shutdown signals keep cleanup idempotent in `crates/signal-auras-cli/src/runner.rs`
+- [x] T006 [P] [US1] Add SIGINT/SIGTERM routing tests in `crates/signal-auras-wayland/src/event_loop.rs`
+- [x] T007 [US1] Wire SIGINT/SIGTERM runtime signal fd handling into `crates/signal-auras-cli/src/runner.rs`
+- [x] T008 [US1] Ensure duplicate shutdown signals keep cleanup idempotent in `crates/signal-auras-wayland/src/event_loop.rs`
 
 ## Phase 4: User Story 2 - Keep Helper Threads From Receiving Default Terminating Signals (P2)
 
@@ -35,9 +35,9 @@
 
 **Independent Test**: Thread startup tests verify helper threads cannot observe unblocked default SIGINT/SIGTERM before the runtime signal fd is ready.
 
-- [ ] T009 [P] [US2] Add helper-thread mask ordering tests in `crates/signal-auras-wayland/src/kde_bridge.rs`
-- [ ] T010 [US2] Move listener/helper thread startup after runtime signal guard setup in `crates/signal-auras-cli/src/runner.rs`
-- [ ] T011 [US2] Document startup failure unwind behavior for signal masks in `crates/signal-auras-wayland/src/event_loop.rs`
+- [x] T009 [P] [US2] Add helper-thread mask ordering tests in `crates/signal-auras-wayland/src/event_loop.rs`
+- [x] T010 [US2] Move listener/helper thread startup after runtime signal guard setup in `crates/signal-auras-cli/src/runner.rs`
+- [x] T011 [US2] Document startup failure unwind behavior for signal masks in `crates/signal-auras-wayland/src/event_loop.rs`
 
 ## Phase 5: User Story 3 - Wake and Release Promptly on Shutdown (P3)
 
@@ -45,19 +45,19 @@
 
 **Independent Test**: Idle wait tests wake on shutdown, no-new-work tests pass, and cleanup reports release resources.
 
-- [ ] T012 [P] [US3] Add idle shutdown wake tests in `crates/signal-auras-cli/src/runner.rs`
-- [ ] T013 [P] [US3] Add virtual input and grab cleanup tests in `crates/signal-auras-wayland/src/evdev.rs` and `crates/signal-auras-wayland/src/uinput.rs`
-- [ ] T014 [US3] Ensure shutdown wake fd is triggered for runtime shutdown in `crates/signal-auras-cli/src/runner.rs`
-- [ ] T015 [US3] Ensure evdev grabs, uinput devices, KDE bridge scripts, callbacks, and registrations are released or reported during cleanup in `crates/signal-auras-wayland/src/` and `crates/signal-auras-cli/src/runner.rs`
-- [ ] T016 [US3] Prevent new macro scheduling after shutdown starts in `crates/signal-auras-cli/src/runner.rs`
+- [x] T012 [P] [US3] Add idle shutdown wake tests in `crates/signal-auras-wayland/src/event_loop.rs`
+- [x] T013 [P] [US3] Add current-run input session cleanup tests in `crates/signal-auras-wayland/src/adapter.rs`
+- [x] T014 [US3] Ensure shutdown signal fd wakes the runtime loop in `crates/signal-auras-wayland/src/event_loop.rs` and `crates/signal-auras-cli/src/runner.rs`
+- [x] T015 [US3] Ensure evdev grabs, uinput/portal devices, KDE bridge scripts, callbacks, and registrations are released or reported during cleanup in `crates/signal-auras-wayland/src/` and `crates/signal-auras-cli/src/runner.rs`
+- [x] T016 [US3] Prevent new macro scheduling after shutdown starts in `crates/signal-auras-cli/src/runner.rs`
 
 ## Phase 6: Polish and Verification
 
-- [ ] T017 Update shutdown manual verification notes in `tests/compositor/manual-wayland-verification.md`
-- [ ] T018 Run `cargo fmt --check`
-- [ ] T019 Run `cargo clippy --all-targets -- -D warnings`
-- [ ] T020 Run `cargo test`
-- [ ] T021 Run `nix flake check` when feasible
+- [x] T017 Update shutdown manual verification notes in `tests/compositor/manual-wayland-verification.md`
+- [x] T018 Run `cargo fmt --check`
+- [x] T019 Run `cargo clippy --all-targets -- -D warnings`
+- [x] T020 Run `cargo test`
+- [x] T021 Run `nix flake check` when feasible
 
 ## Dependencies and Order
 

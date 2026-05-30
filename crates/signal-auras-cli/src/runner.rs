@@ -723,6 +723,7 @@ pub fn start_live_real_runner_with_options(
     let bindings = config.bindings_for_scope(scope.clone());
     let motions = config.motions_for_scope(scope.clone());
     let required = CapabilitySet::for_configuration_scope(&config, &scope);
+    let signal_fd = RuntimeSignalFd::shutdown()?;
     println!("provider selected=kde-plasma-wayland");
     adapter.configure_input_provider(config.input_provider.as_ref(), config.leader.as_ref())?;
     if let Some(summary) = adapter.input_provider_summary() {
@@ -775,7 +776,7 @@ pub fn start_live_real_runner_with_options(
     }
 
     let shutdown_reason =
-        match run_live_real_lifecycle(&bindings, &motions, adapter, &mut stats, log) {
+        match run_live_real_lifecycle(&bindings, &motions, adapter, &mut stats, log, signal_fd) {
             Ok(reason) => reason,
             Err(error) => {
                 println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
@@ -1014,8 +1015,8 @@ fn run_live_real_lifecycle(
     adapter: &mut RealWaylandAdapter,
     stats: &mut RuntimeStats,
     log: RuntimeLog,
+    mut signal_fd: RuntimeSignalFd,
 ) -> Result<ShutdownReason, DiagnosableError> {
-    let mut signal_fd = RuntimeSignalFd::sigint()?;
     let timer_fd = RuntimeTimerFd::new()?;
     let mut macro_queue = LiveMacroQueue::default();
     let mut motion_runtime =
@@ -1058,8 +1059,8 @@ fn run_live_real_lifecycle(
             signal_auras_wayland::evdev::EvdevInputWaitOutcome::RuntimeFd(fd)
                 if fd == signal_fd.as_raw_fd() =>
             {
-                if signal_fd.drain()? {
-                    return Ok(ShutdownReason::CtrlC);
+                if let Some(reason) = signal_fd.drain_shutdown_reason()? {
+                    return Ok(reason);
                 }
             }
             signal_auras_wayland::evdev::EvdevInputWaitOutcome::RuntimeFd(fd)

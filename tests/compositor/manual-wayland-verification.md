@@ -298,6 +298,21 @@ After implementing callback wake fds, repeat the physical F5 checks with
 - Pressing Ctrl-C while callbacks are pending exits without starting new
   callback-triggered macro work after shutdown begins.
 
+### Follow-up: runtime shutdown reliability
+
+After implementing runtime shutdown reliability, repeat live runner shutdown
+checks with configured shortcuts and unsafe input when available:
+
+- Start `signal-auras run --verbose <lua-file>` with KDE callbacks enabled,
+  press Ctrl-C, and confirm final stats print before current-run shortcut,
+  KWin bridge, virtual input, and grab cleanup completes.
+- Send SIGTERM to the runner process and confirm it exits through the same
+  runtime shutdown path with `reason=SignalTerm` rather than abrupt
+  termination.
+- While a motion grab/uinput config is active, stop the runner and confirm the
+  physical device is usable immediately afterward and no Signal Auras virtual
+  input device remains stuck.
+
 ## Composite Pointer Bindings
 
 Composite pointer bindings remain blocked on a real KDE provider for pointer

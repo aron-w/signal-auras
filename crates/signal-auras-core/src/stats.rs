@@ -7,6 +7,7 @@ const CALLBACK_LATENCY_BUCKETS_MS: [u64; 9] = [1, 2, 5, 10, 20, 50, 100, 250, u6
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShutdownReason {
     CtrlC,
+    SignalTerm,
     StartupError,
     RuntimeError,
 }
@@ -419,6 +420,9 @@ mod tests {
         assert!(stats
             .render_summary(ShutdownReason::CtrlC)
             .contains("CtrlC"));
+        assert!(stats
+            .render_summary(ShutdownReason::SignalTerm)
+            .contains("SignalTerm"));
         assert!(stats
             .render_summary(ShutdownReason::StartupError)
             .contains("StartupError"));

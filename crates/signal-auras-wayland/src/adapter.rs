@@ -513,3 +513,25 @@ impl MacroExecutor for RealWaylandAdapter {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capability::{KdeEnvironment, KdeServiceAvailability};
+
+    #[test]
+    fn cancel_pending_releases_current_run_input_sessions() {
+        let mut adapter = RealWaylandAdapter::from_environment(KdeEnvironment {
+            wayland_display: Some("wayland-0".into()),
+            session_type: Some("wayland".into()),
+            current_desktop: Some("KDE".into()),
+            services: KdeServiceAvailability::available(),
+        });
+        adapter.portal_session = Some(crate::portal::PortalInputSession::open());
+
+        adapter.cancel_pending().unwrap();
+
+        assert!(adapter.portal_session.is_none());
+        assert!(adapter.uinput_session.is_none());
+    }
+}

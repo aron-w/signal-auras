@@ -1,4 +1,4 @@
-use signal_auras_core::{DiagnosableError, ErrorPhase};
+use signal_auras_core::{DiagnosableError, ErrorPhase, ShutdownReason};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::time::Duration;
 
@@ -105,6 +105,10 @@ impl RuntimeTimerFd {
 
 pub struct RuntimeSignalFd {
     signal_fd: nix::sys::signalfd::SignalFd,
+    // The blocked mask is kept for the guard lifetime so listener/helper
+    // threads spawned afterward inherit shutdown signals as blocked. Dropping
+    // the guard restores the current thread's normal delivery path if startup
+    // fails before the live runtime loop takes ownership.
     mask: nix::sys::signal::SigSet,
 }
 
@@ -200,9 +204,24 @@ impl RuntimeSignalFd {
         Self::for_signal(nix::sys::signal::Signal::SIGINT)
     }
 
+    pub fn shutdown() -> Result<Self, DiagnosableError> {
+        Self::for_signals([
+            nix::sys::signal::Signal::SIGINT,
+            nix::sys::signal::Signal::SIGTERM,
+        ])
+    }
+
     pub fn for_signal(signal: nix::sys::signal::Signal) -> Result<Self, DiagnosableError> {
+        Self::for_signals([signal])
+    }
+
+    pub fn for_signals(
+        signals: impl IntoIterator<Item = nix::sys::signal::Signal>,
+    ) -> Result<Self, DiagnosableError> {
         let mut mask = nix::sys::signal::SigSet::empty();
-        mask.add(signal);
+        for signal in signals {
+            mask.add(signal);
+        }
         nix::sys::signal::sigprocmask(nix::sys::signal::SigmaskHow::SIG_BLOCK, Some(&mask), None)
             .map_err(runtime_fd_error)?;
         let signal_fd = nix::sys::signalfd::SignalFd::with_flags(
@@ -218,16 +237,33 @@ impl RuntimeSignalFd {
     }
 
     pub fn drain(&mut self) -> Result<bool, DiagnosableError> {
-        let mut received = false;
-        while self
-            .signal_fd
-            .read_signal()
-            .map_err(runtime_fd_error)?
-            .is_some()
-        {
-            received = true;
+        Ok(!self.drain_signal_numbers()?.is_empty())
+    }
+
+    pub fn drain_shutdown_reason(&mut self) -> Result<Option<ShutdownReason>, DiagnosableError> {
+        let mut reason = None;
+        for signal in self.drain_signal_numbers()? {
+            reason = Some(if signal as i32 == libc::SIGTERM {
+                ShutdownReason::SignalTerm
+            } else {
+                ShutdownReason::CtrlC
+            });
         }
-        Ok(received)
+        Ok(reason)
+    }
+
+    fn drain_signal_numbers(&mut self) -> Result<Vec<u32>, DiagnosableError> {
+        let mut signals = Vec::new();
+        let mut received = false;
+        while let Some(signal) = self.signal_fd.read_signal().map_err(runtime_fd_error)? {
+            received = true;
+            signals.push(signal.ssi_signo);
+        }
+        if received {
+            Ok(signals)
+        } else {
+            Ok(Vec::new())
+        }
     }
 }
 
@@ -319,6 +355,57 @@ mod tests {
             .iter()
             .any(|event| event.token == RuntimeEventToken(4)));
         assert!(signal_fd.drain().unwrap());
+    }
+
+    #[test]
+    fn shutdown_signal_fd_reports_sigint_and_sigterm_reasons() {
+        let mut signal_fd = RuntimeSignalFd::shutdown().unwrap();
+
+        nix::sys::signal::raise(nix::sys::signal::Signal::SIGINT).unwrap();
+        assert_eq!(
+            signal_fd.drain_shutdown_reason().unwrap(),
+            Some(ShutdownReason::CtrlC)
+        );
+
+        nix::sys::signal::raise(nix::sys::signal::Signal::SIGTERM).unwrap();
+        assert_eq!(
+            signal_fd.drain_shutdown_reason().unwrap(),
+            Some(ShutdownReason::SignalTerm)
+        );
+    }
+
+    #[test]
+    fn shutdown_signal_fd_wakes_runtime_event_loop() {
+        let mut signal_fd = RuntimeSignalFd::shutdown().unwrap();
+        let mut runtime = RuntimeEventLoop::new().unwrap();
+        runtime
+            .register_readable_fd(signal_fd.as_raw_fd(), RuntimeEventToken(9))
+            .unwrap();
+
+        nix::sys::signal::raise(nix::sys::signal::Signal::SIGTERM).unwrap();
+
+        let events = runtime.wait(Some(Duration::from_millis(100))).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.token == RuntimeEventToken(9)));
+        assert_eq!(
+            signal_fd.drain_shutdown_reason().unwrap(),
+            Some(ShutdownReason::SignalTerm)
+        );
+        assert_eq!(signal_fd.drain_shutdown_reason().unwrap(), None);
+    }
+
+    #[test]
+    fn helper_threads_inherit_blocked_shutdown_signal_mask() {
+        let _signal_fd = RuntimeSignalFd::shutdown().unwrap();
+
+        let mask = std::thread::spawn(nix::sys::signal::SigSet::thread_get_mask)
+            .join()
+            .unwrap()
+            .unwrap();
+
+        assert!(mask.contains(nix::sys::signal::Signal::SIGINT));
+        assert!(mask.contains(nix::sys::signal::Signal::SIGTERM));
     }
 
     #[test]
