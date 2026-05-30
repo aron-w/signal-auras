@@ -258,6 +258,8 @@ enum InputPathStatus {
     Accessible,
     Missing(String),
     Denied(String),
+    Duplicate,
+    SelfGenerated(String),
 }
 
 trait InputPermissionProbe {
@@ -266,6 +268,8 @@ trait InputPermissionProbe {
     fn read_access(&self, path: &Path) -> InputPathStatus;
     fn read_write_access(&self, path: &Path) -> InputPathStatus;
     fn symlink_target(&self, path: &Path) -> Option<PathBuf>;
+    fn stable_path_for(&self, path: &Path) -> Option<PathBuf>;
+    fn device_name(&self, path: &Path) -> Option<String>;
 }
 
 struct RealInputPermissionProbe;
@@ -315,6 +319,14 @@ impl InputPermissionProbe for RealInputPermissionProbe {
     fn symlink_target(&self, path: &Path) -> Option<PathBuf> {
         fs::read_link(path).ok()
     }
+
+    fn stable_path_for(&self, path: &Path) -> Option<PathBuf> {
+        stable_signal_auras_path_for(path)
+    }
+
+    fn device_name(&self, path: &Path) -> Option<String> {
+        signal_auras_wayland::evdev::evdev_device_name(path)
+    }
 }
 
 pub fn input_doctor_report(lua_file: &Path) -> Result<InputDoctorReport, DiagnosableError> {
@@ -352,8 +364,16 @@ fn input_doctor_report_with_probe(
         );
         lines.push("evdev=all status=not_checked".to_string());
     } else {
+        let mut seen = BTreeSet::new();
         for path in &provider.devices {
-            let status = probe.read_access(path);
+            let mut status = probe.read_access(path);
+            if !seen.insert(path.clone()) {
+                status = InputPathStatus::Duplicate;
+            } else if let Some(name) = probe.device_name(path) {
+                if signal_auras_wayland::evdev::is_signal_auras_virtual_device_name(&name) {
+                    status = InputPathStatus::SelfGenerated(name);
+                }
+            }
             if status != InputPathStatus::Accessible {
                 ok = false;
             }
@@ -361,11 +381,13 @@ fn input_doctor_report_with_probe(
                 .symlink_target(path)
                 .map(|target| format!(" target={}", target.display()))
                 .unwrap_or_default();
+            let recommendation = stable_path_recommendation(path, probe);
             lines.push(format!(
-                "evdev path={}{} {}",
+                "evdev path={}{} {}{}",
                 path.display(),
                 target,
-                render_input_path_status(&status)
+                render_input_path_status(&status),
+                recommendation
             ));
         }
     }
@@ -402,7 +424,50 @@ fn render_input_path_status(status: &InputPathStatus) -> String {
         InputPathStatus::Accessible => "status=ok".to_string(),
         InputPathStatus::Missing(error) => format!("status=missing error={}", shell_token(error)),
         InputPathStatus::Denied(error) => format!("status=denied error={}", shell_token(error)),
+        InputPathStatus::Duplicate => "status=duplicate".to_string(),
+        InputPathStatus::SelfGenerated(name) => {
+            format!(
+                "status=self_generated excluded=true name={}",
+                shell_token(name)
+            )
+        }
     }
+}
+
+fn stable_path_recommendation(path: &Path, probe: &impl InputPermissionProbe) -> String {
+    if path.starts_with("/dev/input/by-signal-auras") {
+        return " preferred=selected_stable_path".to_string();
+    }
+    probe
+        .stable_path_for(path)
+        .map_or_else(String::new, |stable| {
+            format!(" recommendation=use_selected_path_{}", stable.display())
+        })
+}
+
+fn stable_signal_auras_path_for(path: &Path) -> Option<PathBuf> {
+    let directory = Path::new("/dev/input/by-signal-auras");
+    let entries = fs::read_dir(directory).ok()?;
+    let canonical_path = fs::canonicalize(path).ok();
+    for entry in entries.filter_map(Result::ok) {
+        let stable_path = entry.path();
+        let Some(target) = fs::read_link(&stable_path).ok() else {
+            continue;
+        };
+        let resolved = if target.is_absolute() {
+            target
+        } else {
+            directory.join(target)
+        };
+        if resolved == path
+            || canonical_path
+                .as_ref()
+                .is_some_and(|path| fs::canonicalize(&resolved).ok().as_ref() == Some(path))
+        {
+            return Some(stable_path);
+        }
+    }
+    None
 }
 
 fn shell_token(value: &str) -> String {
@@ -1829,6 +1894,89 @@ mod tests {
     }
 
     #[test]
+    fn input_doctor_recommends_stable_selected_paths() {
+        let lua_file = write_doctor_lua(
+            r#"
+            return {
+              input_provider = {
+                backend = "evdev",
+                mode = "observe",
+                devices = { "/dev/input/event9" },
+              },
+              motions = {
+                {
+                  trigger = { "f" },
+                  macro = macro { text "x" },
+                },
+              },
+            }
+            "#,
+        );
+        let mut probe = FakeInputProbe::default();
+        probe.read.insert(
+            PathBuf::from("/dev/input/event9"),
+            InputPathStatus::Accessible,
+        );
+        probe.stable_paths.insert(
+            PathBuf::from("/dev/input/event9"),
+            PathBuf::from("/dev/input/by-signal-auras/main-keyboard"),
+        );
+
+        let report = input_doctor_report_with_probe(&lua_file, &probe).unwrap();
+        let rendered = report.render();
+
+        assert!(report.ok);
+        assert!(rendered
+            .contains("recommendation=use_selected_path_/dev/input/by-signal-auras/main-keyboard"));
+    }
+
+    #[test]
+    fn input_doctor_reports_duplicate_and_own_virtual_selected_devices() {
+        let lua_file = write_doctor_lua(
+            r#"
+            return {
+              input_provider = {
+                backend = "evdev",
+                mode = "observe",
+                devices = {
+                  "/dev/input/by-signal-auras/mouse",
+                  "/dev/input/by-signal-auras/mouse",
+                  "/dev/input/event42",
+                },
+              },
+              motions = {
+                {
+                  trigger = { "f" },
+                  macro = macro { text "x" },
+                },
+              },
+            }
+            "#,
+        );
+        let mut probe = FakeInputProbe::default();
+        probe.read.insert(
+            PathBuf::from("/dev/input/by-signal-auras/mouse"),
+            InputPathStatus::Accessible,
+        );
+        probe.read.insert(
+            PathBuf::from("/dev/input/event42"),
+            InputPathStatus::Accessible,
+        );
+        probe.device_names.insert(
+            PathBuf::from("/dev/input/event42"),
+            signal_auras_wayland::evdev::SIGNAL_AURAS_UINPUT_DEVICE_NAME.to_string(),
+        );
+
+        let report = input_doctor_report_with_probe(&lua_file, &probe).unwrap();
+        let rendered = report.render();
+
+        assert!(!report.ok);
+        assert!(rendered.contains("status=duplicate"));
+        assert!(rendered.contains("status=self_generated"));
+        assert!(rendered.contains("excluded=true"));
+    }
+
+    #[test]
     fn input_doctor_warns_when_all_devices_conflicts_with_selected_permissions() {
         let lua_file = write_doctor_lua(
             r#"
@@ -1895,6 +2043,8 @@ mod tests {
         read: std::collections::BTreeMap<PathBuf, InputPathStatus>,
         read_write: std::collections::BTreeMap<PathBuf, InputPathStatus>,
         targets: std::collections::BTreeMap<PathBuf, PathBuf>,
+        stable_paths: std::collections::BTreeMap<PathBuf, PathBuf>,
+        device_names: std::collections::BTreeMap<PathBuf, String>,
     }
 
     impl InputPermissionProbe for FakeInputProbe {
@@ -1920,6 +2070,14 @@ mod tests {
 
         fn symlink_target(&self, path: &Path) -> Option<PathBuf> {
             self.targets.get(path).cloned()
+        }
+
+        fn stable_path_for(&self, path: &Path) -> Option<PathBuf> {
+            self.stable_paths.get(path).cloned()
+        }
+
+        fn device_name(&self, path: &Path) -> Option<String> {
+            self.device_names.get(path).cloned()
         }
     }
 

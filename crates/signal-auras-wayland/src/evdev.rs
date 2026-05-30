@@ -28,6 +28,8 @@ const BTN_LEFT: u16 = 0x110;
 const BTN_RIGHT: u16 = 0x111;
 const BTN_MIDDLE: u16 = 0x112;
 
+pub const SIGNAL_AURAS_UINPUT_DEVICE_NAME: &str = crate::uinput::UINPUT_DEVICE_NAME;
+
 #[derive(Debug)]
 pub struct EvdevObservationProvider {
     devices: Vec<EvdevDevice>,
@@ -51,25 +53,58 @@ impl EvdevObservationProvider {
         all_devices: bool,
     ) -> Result<Self, DiagnosableError> {
         let configured_paths = devices.into_iter().collect::<Vec<_>>();
-        let devices = configured_paths
-            .iter()
-            .cloned()
-            .map(EvdevDevice::open)
-            .collect::<Result<Vec<_>, _>>()?;
-        if devices.is_empty() {
+        let mut seen = BTreeSet::new();
+        let mut selected_paths = Vec::new();
+        let mut opened_devices = Vec::new();
+        let mut skipped_paths = BTreeSet::new();
+        for path in &configured_paths {
+            if !seen.insert(path.clone()) {
+                if all_devices {
+                    skipped_paths.insert(path.clone());
+                    tracing::warn!(
+                        "level=warn event=evdev_device_skipped path={} reason=duplicate",
+                        path.display()
+                    );
+                    continue;
+                }
+                return Err(evdev_error(
+                    ErrorPhase::Registration,
+                    format!("duplicate selected evdev input device '{}'", path.display()),
+                    Some(path),
+                ));
+            }
+            selected_paths.push(path.clone());
+            match EvdevDevice::open(path.clone()) {
+                Ok(device) => opened_devices.push(device),
+                Err(error) if all_devices => {
+                    skipped_paths.insert(path.clone());
+                    tracing::warn!(
+                        "level=warn event=evdev_device_skipped path={} error={}",
+                        path.display(),
+                        error
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if opened_devices.is_empty() {
             return Err(evdev_error(
                 ErrorPhase::Registration,
-                "evdev observation requires at least one input device",
+                if all_devices {
+                    "no usable evdev input devices were found for devices = \"all\""
+                } else {
+                    "no usable evdev input devices were found in the selected device paths"
+                },
                 None,
             ));
         }
-        let monitor_enabled = all_devices || !devices.is_empty();
+        let monitor_enabled = all_devices || !opened_devices.is_empty();
         let provider = Self {
-            devices,
+            devices: opened_devices,
             configured_paths: if all_devices {
                 Vec::new()
             } else {
-                configured_paths
+                selected_paths
             },
             leader,
             grabbed: false,
@@ -78,7 +113,7 @@ impl EvdevObservationProvider {
             mode,
             last_rescan: Instant::now(),
             rescan_interval: Duration::from_secs(1),
-            skipped_paths: BTreeSet::new(),
+            skipped_paths,
             udev_monitor: if monitor_enabled {
                 match UdevInputMonitor::open() {
                     Ok(monitor) => Some(monitor),
@@ -714,6 +749,20 @@ impl EvdevDevice {
                 );
                 Ok(None)
             }
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(libc::EACCES | libc::EPERM | libc::EIO)
+                ) =>
+            {
+                self.active = false;
+                tracing::warn!(
+                    "level=warn event=evdev_device_inactive path={} error={}",
+                    self.path.display(),
+                    error
+                );
+                Ok(None)
+            }
             Err(error) => Err(evdev_error(
                 ErrorPhase::Trigger,
                 format!(
@@ -820,6 +869,14 @@ fn evdev_code_to_motion_token(code: u16) -> Option<MotionToken> {
         BTN_MIDDLE => Some(MotionToken::MouseButton(MouseButton::Middle)),
         _ => None,
     }
+}
+
+pub fn is_signal_auras_virtual_device_name(name: &str) -> bool {
+    name == SIGNAL_AURAS_UINPUT_DEVICE_NAME
+}
+
+pub fn evdev_device_name(path: &Path) -> Option<String> {
+    File::open(path).ok().and_then(|file| device_name(&file))
 }
 
 fn evdev_error(
@@ -1064,6 +1121,89 @@ mod tests {
     }
 
     #[test]
+    fn selected_duplicate_paths_fail_closed() {
+        let path = temp_event_device("duplicate-selected");
+        std::fs::write(&path, []).unwrap();
+
+        let error = EvdevObservationProvider::open(
+            [path.clone(), path],
+            InputProviderMode::Observe,
+            None,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error
+            .message
+            .contains("duplicate selected evdev input device"));
+    }
+
+    #[test]
+    fn all_devices_startup_skips_unusable_candidates() {
+        let readable = temp_event_device("readable-all");
+        let missing = temp_event_device("missing-all");
+        std::fs::write(&readable, input_event_bytes(EV_KEY, KEY_F13, 1)).unwrap();
+
+        let mut provider = EvdevObservationProvider::open(
+            [missing.clone(), readable.clone()],
+            InputProviderMode::Observe,
+            None,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(provider.device_count(), 1);
+        assert_eq!(provider.active_device_count(), 1);
+        assert!(provider.skipped_paths.contains(&missing));
+        assert_eq!(
+            provider
+                .next_observed_motion_event()
+                .unwrap()
+                .unwrap()
+                .source,
+            readable
+        );
+    }
+
+    #[test]
+    fn all_devices_startup_fails_when_no_candidate_is_usable() {
+        let missing = temp_event_device("missing-only-all");
+
+        let error =
+            EvdevObservationProvider::open([missing], InputProviderMode::Observe, None, true)
+                .unwrap_err();
+
+        assert!(error.message.contains("no usable evdev input devices"));
+    }
+
+    #[test]
+    fn noisy_unsupported_events_do_not_starve_supported_input() {
+        let path = temp_event_device("noisy");
+        let mut bytes = Vec::new();
+        for _ in 0..128 {
+            bytes.extend_from_slice(&input_event_bytes(EV_REL, REL_X, 1));
+        }
+        bytes.extend_from_slice(&input_event_bytes(EV_KEY, BTN_LEFT, 1));
+        std::fs::write(&path, bytes).unwrap();
+        let mut provider =
+            EvdevObservationProvider::open([path], InputProviderMode::Observe, None, false)
+                .unwrap();
+
+        let mut observed = None;
+        for _ in 0..129 {
+            observed = provider.next_observed_motion_event().unwrap();
+            if observed.is_some() {
+                break;
+            }
+        }
+
+        assert_eq!(
+            observed.unwrap().event,
+            MotionInputEvent::pressed(MotionToken::MouseButton(MouseButton::Left))
+        );
+    }
+
+    #[test]
     fn all_devices_rescan_remembers_skipped_paths_until_they_open() {
         let first = temp_event_device("first");
         let denied = PathBuf::from("/tmp/signal-auras-missing-denied-device.event");
@@ -1150,6 +1290,14 @@ mod tests {
             start.elapsed() < Duration::from_secs(1),
             "queued simulated input should drain quickly"
         );
+    }
+
+    #[test]
+    fn identifies_own_virtual_device_name() {
+        assert!(is_signal_auras_virtual_device_name(
+            crate::uinput::UINPUT_DEVICE_NAME
+        ));
+        assert!(!is_signal_auras_virtual_device_name("ordinary keyboard"));
     }
 
     fn input_event_bytes(event_type: u16, code: u16, value: i32) -> [u8; INPUT_EVENT_SIZE] {

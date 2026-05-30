@@ -88,6 +88,14 @@ Record before the run:
 5. Repeat with text that the key-translation path cannot represent and confirm no partial text is emitted.
 6. Press Ctrl-C during or immediately after a macro and confirm portal input is cancelled before exit.
 
+## Robust Evdev Device Selection Verification
+
+1. Configure `input_provider.devices` with selected stable `/dev/input/by-signal-auras/...` paths and confirm only those selected devices are observed.
+2. Add a missing selected path and confirm startup fails closed with an evdev diagnostic and remediation rather than broadening to other devices.
+3. Run `cargo run -p signal-auras-cli -- doctor input ./path/to/script.lua` and confirm selected paths, duplicate paths, `/dev/uinput`, stable-path recommendations, and permission remediation are reported without starting input observation.
+4. Switch the script to `devices = "all"` and confirm unreadable or self-generated devices are skipped, at least one eligible readable device allows startup, and no discovered paths persist after exit.
+5. Unplug and replug a selected stable device during the current run and confirm the runner reports removal/reopen and resumes observing only that selected path.
+
 ## Results
 
 ### Run 2026-05-26: KDE Plasma Wayland live smoke test
