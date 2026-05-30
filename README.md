@@ -183,6 +183,55 @@ all current evdev devices and keep rescanning during the current run, set
 added, removed, and skipped unreadable paths are reported in diagnostics, but no
 device list is persisted and no background service is installed.
 
+For daily use on NixOS, prefer selected device permissions over repeatedly
+running the temporary ACL helper. The flake exports a NixOS module that grants a
+dedicated group access only to the devices you match and creates stable symlinks
+under `/dev/input/by-signal-auras/`:
+
+```nix
+{
+  imports = [
+    inputs.signal-auras.nixosModules.signal-auras
+  ];
+
+  programs.signal-auras.unsafeInput = {
+    enable = true;
+    users = [ "aron" ];
+    selectedDevices = [
+      {
+        id = "keyboard";
+        match = ''ATTRS{name}=="Example Keyboard"'';
+      }
+      {
+        id = "mouse";
+        match = ''ATTRS{name}=="Example Mouse"'';
+      }
+    ];
+    uinput.enable = true;
+  };
+}
+```
+
+After rebuilding NixOS, start a new login session so group membership applies,
+then point Lua at the selected symlinks instead of `devices = "all"`:
+
+```lua
+input_provider = {
+  backend = "evdev",
+  mode = "grab",
+  output = "uinput",
+  devices = {
+    "/dev/input/by-signal-auras/keyboard",
+    "/dev/input/by-signal-auras/mouse",
+  },
+}
+```
+
+Use `signal-auras doctor input <script.lua>` or `just input-doctor file=<script.lua>`
+to check the configured evdev paths and `/dev/uinput` access without grabbing
+devices or emitting input. `just unsafe-input-acl` remains available for short
+local tests; those ACLs can still be reset by reboot, replug, or udev changes.
+
 ```lua
 return {
   input_provider = {
@@ -251,6 +300,7 @@ just
 just check
 just run
 just run-verbose
+just input-doctor
 just failures
 ```
 

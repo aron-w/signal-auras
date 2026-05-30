@@ -15,6 +15,7 @@ use signal_auras_wayland::{
 };
 use std::{
     collections::BTreeSet,
+    fs::{self, OpenOptions},
     io::{self, IsTerminal},
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
@@ -41,6 +42,18 @@ pub fn run_cli(
     prompt: &mut impl ScopePrompt,
 ) -> Result<(), DiagnosableError> {
     let args = args.into_iter().collect::<Vec<_>>();
+    if args.first().map(String::as_str) == Some("doctor") {
+        let options = parse_doctor_args(&args)?;
+        let report = input_doctor_report(&options.lua_file)?;
+        println!("{}", report.render());
+        if report.ok {
+            return Ok(());
+        }
+        return Err(DiagnosableError::new(
+            ErrorPhase::CapabilityProbe,
+            "input doctor found missing unsafe input permissions",
+        ));
+    }
     let options = parse_run_args(&args)?;
     init_runtime_logging(options.log);
     let mut adapter = RealWaylandAdapter::new();
@@ -52,6 +65,11 @@ pub fn run_cli(
 pub struct RunOptions {
     pub lua_file: PathBuf,
     pub log: RuntimeLog,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorOptions {
+    pub lua_file: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,6 +224,189 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions, DiagnosableError> {
         lua_file: paths.remove(0),
         log: RuntimeLog::new_with_color_mode(verbose, color_mode),
     })
+}
+
+pub fn parse_doctor_args(args: &[String]) -> Result<DoctorOptions, DiagnosableError> {
+    if args.first().map(String::as_str) != Some("doctor")
+        || args.get(1).map(String::as_str) != Some("input")
+        || args.len() != 3
+    {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ArgumentValidation,
+            "usage: signal-auras doctor input <lua-file>",
+        ));
+    }
+    Ok(DoctorOptions {
+        lua_file: PathBuf::from(&args[2]),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputDoctorReport {
+    pub ok: bool,
+    lines: Vec<String>,
+}
+
+impl InputDoctorReport {
+    pub fn render(&self) -> String {
+        self.lines.join("\n")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InputPathStatus {
+    Accessible,
+    Missing(String),
+    Denied(String),
+}
+
+trait InputPermissionProbe {
+    fn current_user(&self) -> String;
+    fn current_groups(&self) -> Vec<String>;
+    fn read_access(&self, path: &Path) -> InputPathStatus;
+    fn read_write_access(&self, path: &Path) -> InputPathStatus;
+    fn symlink_target(&self, path: &Path) -> Option<PathBuf>;
+}
+
+struct RealInputPermissionProbe;
+
+impl InputPermissionProbe for RealInputPermissionProbe {
+    fn current_user(&self) -> String {
+        std::env::var("USER").unwrap_or_else(|_| "unknown".to_string())
+    }
+
+    fn current_groups(&self) -> Vec<String> {
+        fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Groups:"))
+                    .map(|groups| {
+                        groups
+                            .split_whitespace()
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
+                    })
+            })
+            .unwrap_or_default()
+    }
+
+    fn read_access(&self, path: &Path) -> InputPathStatus {
+        match OpenOptions::new().read(true).open(path) {
+            Ok(_) => InputPathStatus::Accessible,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                InputPathStatus::Missing(error.to_string())
+            }
+            Err(error) => InputPathStatus::Denied(error.to_string()),
+        }
+    }
+
+    fn read_write_access(&self, path: &Path) -> InputPathStatus {
+        match OpenOptions::new().read(true).write(true).open(path) {
+            Ok(_) => InputPathStatus::Accessible,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                InputPathStatus::Missing(error.to_string())
+            }
+            Err(error) => InputPathStatus::Denied(error.to_string()),
+        }
+    }
+
+    fn symlink_target(&self, path: &Path) -> Option<PathBuf> {
+        fs::read_link(path).ok()
+    }
+}
+
+pub fn input_doctor_report(lua_file: &Path) -> Result<InputDoctorReport, DiagnosableError> {
+    input_doctor_report_with_probe(lua_file, &RealInputPermissionProbe)
+}
+
+fn input_doctor_report_with_probe(
+    lua_file: &Path,
+    probe: &impl InputPermissionProbe,
+) -> Result<InputDoctorReport, DiagnosableError> {
+    let config = load_lua_file(lua_file)?;
+    let mut ok = true;
+    let mut lines = vec![
+        "# Signal Auras input doctor".to_string(),
+        format!("user={}", probe.current_user()),
+        format!("groups={}", probe.current_groups().join(",")),
+    ];
+
+    let Some(provider) = config.input_provider.as_ref() else {
+        lines.push("input_provider=none".to_string());
+        lines.push("result=ok no unsafe evdev/uinput permissions required by script".to_string());
+        return Ok(InputDoctorReport { ok, lines });
+    };
+
+    lines.push(format!(
+        "input_provider backend=evdev mode={:?} output={:?}",
+        provider.mode, provider.output
+    ));
+
+    if provider.all_devices {
+        ok = false;
+        lines.push(
+            "warning=devices_all selected-device permissions require explicit stable device paths"
+                .to_string(),
+        );
+        lines.push("evdev=all status=not_checked".to_string());
+    } else {
+        for path in &provider.devices {
+            let status = probe.read_access(path);
+            if status != InputPathStatus::Accessible {
+                ok = false;
+            }
+            let target = probe
+                .symlink_target(path)
+                .map(|target| format!(" target={}", target.display()))
+                .unwrap_or_default();
+            lines.push(format!(
+                "evdev path={}{} {}",
+                path.display(),
+                target,
+                render_input_path_status(&status)
+            ));
+        }
+    }
+
+    if provider.output == InputProviderOutput::Uinput {
+        let path = Path::new("/dev/uinput");
+        let status = probe.read_write_access(path);
+        if status != InputPathStatus::Accessible {
+            ok = false;
+        }
+        lines.push(format!(
+            "uinput path=/dev/uinput {}",
+            render_input_path_status(&status)
+        ));
+    } else {
+        lines.push("uinput=not_required output=portal".to_string());
+    }
+
+    if ok {
+        lines.push("result=ok unsafe input permissions are available".to_string());
+    } else {
+        lines.push(
+            "remediation=enable programs.signal-auras.unsafeInput with selected device matches, rebuild NixOS, then start a new login session"
+                .to_string(),
+        );
+        lines.push("result=failed unsafe input permissions are incomplete".to_string());
+    }
+
+    Ok(InputDoctorReport { ok, lines })
+}
+
+fn render_input_path_status(status: &InputPathStatus) -> String {
+    match status {
+        InputPathStatus::Accessible => "status=ok".to_string(),
+        InputPathStatus::Missing(error) => format!("status=missing error={}", shell_token(error)),
+        InputPathStatus::Denied(error) => format!("status=denied error={}", shell_token(error)),
+    }
+}
+
+fn shell_token(value: &str) -> String {
+    value.replace(' ', "_")
 }
 
 fn field_value<'a>(message: &'a str, field: &str) -> Option<&'a str> {
@@ -1569,6 +1770,93 @@ mod tests {
     }
 
     #[test]
+    fn parses_input_doctor_command() {
+        let args = vec![
+            "doctor".to_string(),
+            "input".to_string(),
+            "examples/poe2-hideout.lua".to_string(),
+        ];
+        let options = parse_doctor_args(&args).unwrap();
+
+        assert_eq!(options.lua_file, PathBuf::from("examples/poe2-hideout.lua"));
+    }
+
+    #[test]
+    fn input_doctor_reports_selected_devices_and_uinput_access() {
+        let lua_file = write_doctor_lua(
+            r#"
+            return {
+              input_provider = {
+                backend = "evdev",
+                mode = "grab",
+                output = "uinput",
+                devices = { "/dev/input/by-signal-auras/mouse" },
+              },
+              leader = "F13",
+              motions = {
+                {
+                  trigger = { "<Leader>", "<LClick>" },
+                  mode = "passthrough",
+                  macro = macro { mouse_click "left" },
+                },
+              },
+            }
+            "#,
+        );
+        let mut probe = FakeInputProbe::default();
+        probe.read.insert(
+            PathBuf::from("/dev/input/by-signal-auras/mouse"),
+            InputPathStatus::Accessible,
+        );
+        probe.read_write.insert(
+            PathBuf::from("/dev/uinput"),
+            InputPathStatus::Denied("permission denied".to_string()),
+        );
+        probe.targets.insert(
+            PathBuf::from("/dev/input/by-signal-auras/mouse"),
+            PathBuf::from("../event12"),
+        );
+
+        let report = input_doctor_report_with_probe(&lua_file, &probe).unwrap();
+        let rendered = report.render();
+
+        assert!(!report.ok);
+        assert!(
+            rendered.contains("path=/dev/input/by-signal-auras/mouse target=../event12 status=ok")
+        );
+        assert!(rendered.contains("uinput path=/dev/uinput status=denied"));
+        assert!(rendered.contains("programs.signal-auras.unsafeInput"));
+    }
+
+    #[test]
+    fn input_doctor_warns_when_all_devices_conflicts_with_selected_permissions() {
+        let lua_file = write_doctor_lua(
+            r#"
+            return {
+              input_provider = {
+                backend = "evdev",
+                mode = "observe",
+                devices = "all",
+              },
+              motions = {
+                {
+                  trigger = { "f" },
+                  macro = macro { text "x" },
+                },
+              },
+            }
+            "#,
+        );
+
+        let report = input_doctor_report_with_probe(&lua_file, &FakeInputProbe::default()).unwrap();
+        let rendered = report.render();
+
+        assert!(!report.ok);
+        assert!(rendered.contains("warning=devices_all"));
+        assert!(rendered.contains("evdev=all status=not_checked"));
+    }
+
+    #[test]
     fn does_not_warn_for_grab_mode_mouse_button_repeat() {
         let provider = InputProviderConfig::evdev(
             vec![PathBuf::from("/dev/input/event0")],
@@ -1600,5 +1888,48 @@ mod tests {
             0,
         )
         .unwrap()
+    }
+
+    #[derive(Default)]
+    struct FakeInputProbe {
+        read: std::collections::BTreeMap<PathBuf, InputPathStatus>,
+        read_write: std::collections::BTreeMap<PathBuf, InputPathStatus>,
+        targets: std::collections::BTreeMap<PathBuf, PathBuf>,
+    }
+
+    impl InputPermissionProbe for FakeInputProbe {
+        fn current_user(&self) -> String {
+            "alice".to_string()
+        }
+
+        fn current_groups(&self) -> Vec<String> {
+            vec!["100".to_string(), "200".to_string()]
+        }
+
+        fn read_access(&self, path: &Path) -> InputPathStatus {
+            self.read.get(path).cloned().unwrap_or_else(|| {
+                InputPathStatus::Missing("No such file or directory".to_string())
+            })
+        }
+
+        fn read_write_access(&self, path: &Path) -> InputPathStatus {
+            self.read_write.get(path).cloned().unwrap_or_else(|| {
+                InputPathStatus::Missing("No such file or directory".to_string())
+            })
+        }
+
+        fn symlink_target(&self, path: &Path) -> Option<PathBuf> {
+            self.targets.get(path).cloned()
+        }
+    }
+
+    fn write_doctor_lua(source: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("signal-auras-doctor-{}.lua", unique));
+        std::fs::write(&path, source).unwrap();
+        path
     }
 }

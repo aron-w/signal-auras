@@ -12,7 +12,10 @@ nix flake check
 Run live diagnostics:
 
 ```sh
-just unsafe-input-acl
+just input-doctor
+# For short local tests only when persistent NixOS selected-device permissions
+# are not configured:
+# just unsafe-input-acl
 just run-verbose
 ```
 
