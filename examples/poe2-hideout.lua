@@ -4,8 +4,10 @@ return {
     backend = "evdev",
     mode = "grab",
     output = "uinput",
-    devices = "all",
-    acknowledge_risk = "GRAB_ALL_INPUTS",
+    devices = {
+      "/dev/input/by-signal-auras/keychron-k5-pro",
+      "/dev/input/by-signal-auras/logitech-mouse",
+    },
   },
   leader = "F9",
   defaults = {
@@ -37,7 +39,7 @@ return {
       },
     },
     {
-      trigger = { "<Leader>", "<LClick>", "<LClick>" },
+      trigger = { "<Leader>", "<LClick>" },
       mode = "passthrough",
       repeat = {
         while_held = { "<LClick>" },
