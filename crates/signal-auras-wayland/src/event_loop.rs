@@ -1,5 +1,5 @@
 use signal_auras_core::{DiagnosableError, ErrorPhase};
-use std::os::fd::{AsFd, AsRawFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +108,93 @@ pub struct RuntimeSignalFd {
     mask: nix::sys::signal::SigSet,
 }
 
+#[derive(Debug)]
+pub struct RuntimeWakeFd {
+    fd: OwnedFd,
+}
+
+#[derive(Debug)]
+pub struct RuntimeWakeSender {
+    fd: OwnedFd,
+}
+
+impl RuntimeWakeFd {
+    pub fn new() -> Result<Self, DiagnosableError> {
+        // Safety: eventfd returns a new owned fd on success. The fd is wrapped
+        // in OwnedFd immediately so it is closed exactly once.
+        let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+        if fd < 0 {
+            return Err(runtime_io_error("create eventfd"));
+        }
+        Ok(Self {
+            fd: unsafe { OwnedFd::from_raw_fd(fd) },
+        })
+    }
+
+    pub fn sender(&self) -> Result<RuntimeWakeSender, DiagnosableError> {
+        Ok(RuntimeWakeSender {
+            fd: self
+                .fd
+                .as_fd()
+                .try_clone_to_owned()
+                .map_err(event_loop_error)?,
+        })
+    }
+
+    pub fn wake(&self) -> Result<(), DiagnosableError> {
+        write_eventfd(self.fd.as_raw_fd())
+    }
+
+    pub fn drain(&self) -> Result<bool, DiagnosableError> {
+        drain_eventfd(self.fd.as_raw_fd())
+    }
+
+    pub fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
+impl RuntimeWakeSender {
+    pub fn wake(&self) -> Result<(), DiagnosableError> {
+        write_eventfd(self.fd.as_raw_fd())
+    }
+}
+
+fn write_eventfd(fd: RawFd) -> Result<(), DiagnosableError> {
+    let value = 1u64.to_ne_bytes();
+    // Safety: writes a fixed-size u64 to a valid eventfd. The buffer outlives
+    // the call and no aliasing requirements are violated.
+    let result = unsafe { libc::write(fd, value.as_ptr().cast(), value.len()) };
+    if result < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN) {
+        return Ok(());
+    }
+    if result < 0 {
+        return Err(runtime_io_error("write eventfd"));
+    }
+    Ok(())
+}
+
+fn drain_eventfd(fd: RawFd) -> Result<bool, DiagnosableError> {
+    let mut drained = false;
+    loop {
+        let mut value = [0u8; std::mem::size_of::<u64>()];
+        // Safety: reads a fixed-size u64 from a valid eventfd into a stack
+        // buffer. The buffer is valid for the duration of the call.
+        let result = unsafe { libc::read(fd, value.as_mut_ptr().cast(), value.len()) };
+        if result > 0 {
+            drained = true;
+            continue;
+        }
+        if result < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN) {
+            return Ok(drained);
+        }
+        if result < 0 {
+            return Err(runtime_io_error("read eventfd"));
+        }
+        return Ok(drained);
+    }
+}
+
 impl RuntimeSignalFd {
     pub fn sigint() -> Result<Self, DiagnosableError> {
         Self::for_signal(nix::sys::signal::Signal::SIGINT)
@@ -158,6 +245,17 @@ fn runtime_fd_error(error: nix::errno::Errno) -> DiagnosableError {
     DiagnosableError::new(
         ErrorPhase::Trigger,
         format!("runtime fd operation failed: {error}"),
+    )
+    .with_source("runtime-event-loop")
+}
+
+fn runtime_io_error(operation: &str) -> DiagnosableError {
+    DiagnosableError::new(
+        ErrorPhase::Trigger,
+        format!(
+            "runtime fd operation failed to {operation}: {}",
+            std::io::Error::last_os_error()
+        ),
     )
     .with_source("runtime-event-loop")
 }
@@ -221,5 +319,26 @@ mod tests {
             .iter()
             .any(|event| event.token == RuntimeEventToken(4)));
         assert!(signal_fd.drain().unwrap());
+    }
+
+    #[test]
+    fn wake_fd_reports_cross_thread_readiness_and_drains() {
+        let wake_fd = RuntimeWakeFd::new().unwrap();
+        let sender = wake_fd.sender().unwrap();
+        let mut runtime = RuntimeEventLoop::new().unwrap();
+        runtime
+            .register_readable_fd(wake_fd.as_raw_fd(), RuntimeEventToken(8))
+            .unwrap();
+
+        std::thread::spawn(move || sender.wake().unwrap())
+            .join()
+            .unwrap();
+
+        let events = runtime.wait(Some(Duration::from_millis(100))).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.token == RuntimeEventToken(8)));
+        assert!(wake_fd.drain().unwrap());
+        assert!(!wake_fd.drain().unwrap());
     }
 }

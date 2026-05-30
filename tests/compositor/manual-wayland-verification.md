@@ -282,6 +282,22 @@ final_summary reason=CtrlC elapsed_ms=46238 triggers=1 successes=1 failures=0 de
 - Ctrl-C cleanup: PASS. Shutdown completed after SIGINT and left no reported cleanup failures.
 - T062 status: PASS. All required KDE Plasma Wayland manual compositor scenarios have successful recorded evidence.
 
+### Follow-up: callback wakeup latency and idle efficiency
+
+After implementing callback wake fds, repeat the physical F5 checks with
+`--verbose` enabled and confirm:
+
+- A physical shortcut press while the runner is otherwise idle logs
+  `callback_received` with `dispatch_latency_ms` and dispatches the macro
+  without waiting for keyboard, pointer, repeat, or shutdown activity.
+- A short burst of physical or KGlobalAccel-invoked F5 callbacks produces one
+  callback disposition per accepted event and logs `callback_burst_limited`
+  rather than silently losing events if the queue limit is reached.
+- Leaving the runner idle produces no repetitive idle diagnostics, and the next
+  callback still dispatches promptly.
+- Pressing Ctrl-C while callbacks are pending exits without starting new
+  callback-triggered macro work after shutdown begins.
+
 ## Composite Pointer Bindings
 
 Composite pointer bindings remain blocked on a real KDE provider for pointer

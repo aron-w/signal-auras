@@ -370,6 +370,90 @@ fn lifecycle_executes_hotkey_events_until_ctrl_c_shutdown() {
 }
 
 #[test]
+fn lifecycle_executes_callback_events_in_arrival_order() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          hotkeys = {
+            ["F5"] = macro { text "one" },
+            ["F6"] = macro { text "two" },
+          },
+        }
+        "#,
+    );
+    let mut prompt = Prompt::new(ConsentDecision::ExplicitGlobalConfirmed);
+    let mut registrar = Registrar::default();
+    let active = Active(Some(ProcessName::parse("poe2.exe").unwrap()));
+    let mut executor = Executor::default();
+    let mut lifecycle = ScriptedLifecycle::new(vec![
+        RunnerEvent::Callback {
+            hotkey: HotkeyId::parse("F5").unwrap(),
+            received_at: Instant::now(),
+        },
+        RunnerEvent::Callback {
+            hotkey: HotkeyId::parse("F6").unwrap(),
+            received_at: Instant::now(),
+        },
+        RunnerEvent::Shutdown(signal_auras_core::ShutdownReason::CtrlC),
+    ]);
+
+    let stats = start_runner_with_lifecycle(
+        &lua_file,
+        &mut prompt,
+        &mut registrar,
+        &active,
+        &mut executor,
+        &mut lifecycle,
+    )
+    .unwrap();
+
+    assert_eq!(executor.actions, 2);
+    assert_eq!(stats.callback_event_received_count, 2);
+    assert_eq!(stats.callback_event_dispatched_count, 2);
+    assert_eq!(stats.trigger_count_by_hotkey["F5"], 1);
+    assert_eq!(stats.trigger_count_by_hotkey["F6"], 1);
+    assert!(stats.callback_dispatch_latency_p95_ms() <= 20);
+}
+
+#[test]
+fn lifecycle_ignores_callbacks_after_shutdown_begins() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          hotkeys = {
+            ["F5"] = macro { text "one" },
+          },
+        }
+        "#,
+    );
+    let mut prompt = Prompt::new(ConsentDecision::ExplicitGlobalConfirmed);
+    let mut registrar = Registrar::default();
+    let active = Active(Some(ProcessName::parse("poe2.exe").unwrap()));
+    let mut executor = Executor::default();
+    let mut lifecycle = ScriptedLifecycle::new(vec![
+        RunnerEvent::Shutdown(signal_auras_core::ShutdownReason::CtrlC),
+        RunnerEvent::Callback {
+            hotkey: HotkeyId::parse("F5").unwrap(),
+            received_at: Instant::now(),
+        },
+    ]);
+
+    let stats = start_runner_with_lifecycle(
+        &lua_file,
+        &mut prompt,
+        &mut registrar,
+        &active,
+        &mut executor,
+        &mut lifecycle,
+    )
+    .unwrap();
+
+    assert_eq!(executor.actions, 0);
+    assert_eq!(stats.callback_event_received_count, 0);
+    assert_eq!(stats.total_triggers(), 0);
+}
+
+#[test]
 fn lifecycle_executes_composite_trigger_events_and_records_consumption_mode() {
     let lua_file = write_lua(
         r#"
@@ -554,6 +638,72 @@ fn lifecycle_does_not_emit_repeat_after_cancellation_release() {
     .unwrap();
 
     assert_eq!(executor.actions, 0);
+    assert_eq!(stats.motion_repeat_cancel_count, 1);
+    assert_eq!(stats.motion_repeat_tick_count, 0);
+}
+
+#[test]
+fn lifecycle_callback_coexists_with_repeat_cancellation() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          leader = "F13",
+          hotkeys = {
+            ["F5"] = macro { text "callback" },
+          },
+          motions = {
+            {
+              trigger = { "<Leader>", "<LClick>", "<LClick>" },
+              mode = "passthrough",
+              repeat = {
+                while_held = { "<Leader>", "<LClick>" },
+                interval_ms = { min = 50, max = 80 },
+                macro = macro { mouse_click "left" },
+              },
+            },
+          },
+        }
+        "#,
+    );
+    let mut prompt = Prompt::new(ConsentDecision::ExplicitGlobalConfirmed);
+    let mut registrar = Registrar::default();
+    let active = Active(Some(ProcessName::parse("poe2.exe").unwrap()));
+    let mut executor = Executor::default();
+    let repeat_trigger = MotionTrigger::parse(["<Leader>", "<LClick>", "<LClick>"]).unwrap();
+    let mut lifecycle = ScriptedLifecycle::new(vec![
+        RunnerEvent::MotionInput(MotionInputEvent::pressed(MotionToken::Leader)),
+        RunnerEvent::MotionInput(MotionInputEvent::pressed(MotionToken::MouseButton(
+            MouseButton::Left,
+        ))),
+        RunnerEvent::MotionInput(MotionInputEvent::released(MotionToken::MouseButton(
+            MouseButton::Left,
+        ))),
+        RunnerEvent::MotionInput(MotionInputEvent::pressed(MotionToken::MouseButton(
+            MouseButton::Left,
+        ))),
+        RunnerEvent::MotionInput(MotionInputEvent::released(MotionToken::MouseButton(
+            MouseButton::Left,
+        ))),
+        RunnerEvent::Callback {
+            hotkey: HotkeyId::parse("F5").unwrap(),
+            received_at: Instant::now(),
+        },
+        RunnerEvent::MotionRepeatTick(repeat_trigger),
+        RunnerEvent::Shutdown(signal_auras_core::ShutdownReason::CtrlC),
+    ]);
+
+    let stats = start_runner_with_lifecycle(
+        &lua_file,
+        &mut prompt,
+        &mut registrar,
+        &active,
+        &mut executor,
+        &mut lifecycle,
+    )
+    .unwrap();
+
+    assert_eq!(executor.actions, 1);
+    assert_eq!(stats.callback_event_dispatched_count, 1);
     assert_eq!(stats.motion_repeat_cancel_count, 1);
     assert_eq!(stats.motion_repeat_tick_count, 0);
 }

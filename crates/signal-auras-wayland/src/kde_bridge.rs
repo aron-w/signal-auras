@@ -5,11 +5,20 @@ use signal_auras_core::{
 use std::{
     collections::{BTreeMap, VecDeque},
     fs,
+    os::fd::RawFd,
     path::PathBuf,
-    sync::mpsc::{self, Receiver},
+    sync::{Arc, Mutex},
     thread,
     time::Instant,
 };
+
+const CALLBACK_QUEUE_LIMIT: usize = 1024;
+
+#[derive(Debug, Clone)]
+pub struct ObservedShortcutEvent {
+    pub hotkey: HotkeyId,
+    pub received_at: Instant,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum KdeBridgeLifecycle {
@@ -85,7 +94,8 @@ impl KdeBridgeState {
 #[derive(Debug)]
 pub struct KwinShortcutBridge {
     connection: zbus::blocking::Connection,
-    receiver: Receiver<KwinBridgeEvent>,
+    queue: Arc<Mutex<KwinCallbackQueue>>,
+    callback_wake_fd: crate::event_loop::RuntimeWakeFd,
     actions: BTreeMap<String, HotkeyId>,
     active_process: ActiveProcessContext,
     scripts: Vec<KwinScriptHandle>,
@@ -107,10 +117,19 @@ impl KwinShortcutBridge {
         let connection = zbus::blocking::Connection::session().map_err(bridge_error)?;
         let callback_bus_name = format!("org.signalAuras.Runner{}", std::process::id());
         let callback_object_path = "/org/signalAuras/Runner".to_string();
-        let receiver = spawn_kwin_callback_listener(&callback_bus_name, &callback_object_path)?;
+        let callback_wake_fd = crate::event_loop::RuntimeWakeFd::new()?;
+        let wake_sender = callback_wake_fd.sender()?;
+        let queue = Arc::new(Mutex::new(KwinCallbackQueue::new(CALLBACK_QUEUE_LIMIT)));
+        spawn_kwin_callback_listener(
+            &callback_bus_name,
+            &callback_object_path,
+            Arc::clone(&queue),
+            wake_sender,
+        )?;
         Ok(Self {
             connection,
-            receiver,
+            queue,
+            callback_wake_fd,
             actions: BTreeMap::new(),
             active_process: ActiveProcessContext::unavailable(
                 "KDE active-process metadata has not been received yet",
@@ -216,11 +235,34 @@ impl KwinShortcutBridge {
         Ok(())
     }
 
-    pub fn next_shortcut_event(&mut self) -> Option<HotkeyId> {
-        while let Ok(event) = self.receiver.try_recv() {
+    pub fn callback_wake_fd(&self) -> RawFd {
+        self.callback_wake_fd.as_raw_fd()
+    }
+
+    pub fn drain_callback_wake_fd(&self) -> Result<bool, DiagnosableError> {
+        self.callback_wake_fd.drain()
+    }
+
+    pub fn take_callback_dropped_count(&mut self) -> u64 {
+        self.queue
+            .lock()
+            .map(|mut queue| queue.take_dropped_count())
+            .unwrap_or_default()
+    }
+
+    pub fn next_shortcut_event(&mut self) -> Option<ObservedShortcutEvent> {
+        while let Some(event) = self
+            .queue
+            .lock()
+            .ok()
+            .and_then(|mut queue| queue.pop_front())
+        {
             self.active_process = event.active_process;
             if let Some(hotkey) = self.actions.get(&event.action_name) {
-                return Some(hotkey.clone());
+                return Some(ObservedShortcutEvent {
+                    hotkey: hotkey.clone(),
+                    received_at: event.received_at,
+                });
             }
         }
         None
@@ -280,16 +322,54 @@ impl Drop for KwinShortcutBridge {
 struct KwinBridgeEvent {
     action_name: String,
     active_process: ActiveProcessContext,
+    received_at: Instant,
+}
+
+#[derive(Debug)]
+struct KwinCallbackQueue {
+    capacity: usize,
+    events: VecDeque<KwinBridgeEvent>,
+    dropped_count: u64,
+}
+
+impl KwinCallbackQueue {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            events: VecDeque::new(),
+            dropped_count: 0,
+        }
+    }
+
+    fn push(&mut self, event: KwinBridgeEvent) -> bool {
+        if self.events.len() >= self.capacity {
+            self.dropped_count += 1;
+            return false;
+        }
+        self.events.push_back(event);
+        true
+    }
+
+    fn pop_front(&mut self) -> Option<KwinBridgeEvent> {
+        self.events.pop_front()
+    }
+
+    fn take_dropped_count(&mut self) -> u64 {
+        let count = self.dropped_count;
+        self.dropped_count = 0;
+        count
+    }
 }
 
 fn spawn_kwin_callback_listener(
     bus_name: &str,
     object_path: &str,
-) -> Result<Receiver<KwinBridgeEvent>, DiagnosableError> {
+    queue: Arc<Mutex<KwinCallbackQueue>>,
+    wake_sender: crate::event_loop::RuntimeWakeSender,
+) -> Result<(), DiagnosableError> {
     let connection = zbus::blocking::Connection::session().map_err(bridge_error)?;
     connection.request_name(bus_name).map_err(bridge_error)?;
     let object_path = object_path.to_string();
-    let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         let mut messages = zbus::blocking::MessageIterator::from(&connection);
         for message in &mut messages {
@@ -311,7 +391,7 @@ fn spawn_kwin_callback_listener(
                 let _ = connection.reply(&header, &());
                 continue;
             };
-            let _ = sender.send(KwinBridgeEvent {
+            let event = KwinBridgeEvent {
                 action_name,
                 active_process: kwin_callback_context(
                     visible_name,
@@ -319,11 +399,16 @@ fn spawn_kwin_callback_listener(
                     window_class,
                     pid.parse::<u32>().unwrap_or_default(),
                 ),
-            });
+                received_at: Instant::now(),
+            };
+            if let Ok(mut queue) = queue.lock() {
+                queue.push(event);
+            }
+            let _ = wake_sender.wake();
             let _ = connection.reply(&header, &());
         }
     });
-    Ok(receiver)
+    Ok(())
 }
 
 fn kwin_callback_context(
@@ -460,4 +545,47 @@ fn bridge_diagnostic(message: impl Into<String>) -> DiagnosableError {
         .with_remediation(
             "verify KWin scripting and KGlobalAccel are available in this KDE session",
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn callback_queue_preserves_accepted_arrival_order() {
+        let mut queue = KwinCallbackQueue::new(3);
+        for action in ["one", "two", "three"] {
+            assert!(queue.push(event(action)));
+        }
+
+        assert_eq!(queue.pop_front().unwrap().action_name, "one");
+        assert_eq!(queue.pop_front().unwrap().action_name, "two");
+        assert_eq!(queue.pop_front().unwrap().action_name, "three");
+        assert!(queue.pop_front().is_none());
+        assert_eq!(queue.take_dropped_count(), 0);
+    }
+
+    #[test]
+    fn callback_queue_drops_newest_when_full_and_reports_count() {
+        let mut queue = KwinCallbackQueue::new(2);
+
+        assert!(queue.push(event("one")));
+        assert!(queue.push(event("two")));
+        assert!(!queue.push(event("three")));
+        assert!(!queue.push(event("four")));
+
+        assert_eq!(queue.pop_front().unwrap().action_name, "one");
+        assert_eq!(queue.pop_front().unwrap().action_name, "two");
+        assert!(queue.pop_front().is_none());
+        assert_eq!(queue.take_dropped_count(), 2);
+        assert_eq!(queue.take_dropped_count(), 0);
+    }
+
+    fn event(action_name: &str) -> KwinBridgeEvent {
+        KwinBridgeEvent {
+            action_name: action_name.to_string(),
+            active_process: ActiveProcessContext::unavailable("test"),
+            received_at: Instant::now(),
+        }
+    }
 }

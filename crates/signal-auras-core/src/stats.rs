@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 const MOTION_LATENCY_BUCKETS_MS: [u64; 9] = [1, 2, 5, 10, 20, 50, 100, 250, u64::MAX];
+const CALLBACK_LATENCY_BUCKETS_MS: [u64; 9] = [1, 2, 5, 10, 20, 50, 100, 250, u64::MAX];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShutdownReason {
@@ -25,6 +26,12 @@ pub struct RuntimeStats {
     pub capability_probe_success_count: u64,
     pub capability_probe_failure_count: u64,
     pub shortcut_event_ignored_count: u64,
+    pub callback_event_received_count: u64,
+    pub callback_event_dispatched_count: u64,
+    pub callback_event_dropped_count: u64,
+    pub max_callback_dispatch_latency_ms: u64,
+    callback_dispatch_latency_total_ms: u64,
+    callback_dispatch_latency_buckets: [u64; CALLBACK_LATENCY_BUCKETS_MS.len()],
     pub active_process_match_count: u64,
     pub active_process_non_match_count: u64,
     pub metadata_unavailable_count: u64,
@@ -72,6 +79,12 @@ impl RuntimeStats {
             capability_probe_success_count: 0,
             capability_probe_failure_count: 0,
             shortcut_event_ignored_count: 0,
+            callback_event_received_count: 0,
+            callback_event_dispatched_count: 0,
+            callback_event_dropped_count: 0,
+            max_callback_dispatch_latency_ms: 0,
+            callback_dispatch_latency_total_ms: 0,
+            callback_dispatch_latency_buckets: [0; CALLBACK_LATENCY_BUCKETS_MS.len()],
             active_process_match_count: 0,
             active_process_non_match_count: 0,
             metadata_unavailable_count: 0,
@@ -135,6 +148,65 @@ impl RuntimeStats {
 
     pub fn record_capability_probe_failure(&mut self) {
         self.capability_probe_failure_count += 1;
+    }
+
+    pub fn record_callback_received(&mut self) {
+        self.callback_event_received_count += 1;
+    }
+
+    pub fn record_callback_dispatched(&mut self, dispatch_latency_ms: u64) {
+        self.callback_event_dispatched_count += 1;
+        self.max_callback_dispatch_latency_ms = self
+            .max_callback_dispatch_latency_ms
+            .max(dispatch_latency_ms);
+        self.callback_dispatch_latency_total_ms += dispatch_latency_ms;
+        let bucket = CALLBACK_LATENCY_BUCKETS_MS
+            .iter()
+            .position(|upper_bound| dispatch_latency_ms <= *upper_bound)
+            .unwrap_or(CALLBACK_LATENCY_BUCKETS_MS.len() - 1);
+        self.callback_dispatch_latency_buckets[bucket] += 1;
+    }
+
+    pub fn record_callback_dropped(&mut self, count: u64) {
+        self.callback_event_dropped_count += count;
+    }
+
+    pub fn record_shortcut_ignored(&mut self) {
+        self.shortcut_event_ignored_count += 1;
+    }
+
+    pub fn average_callback_dispatch_latency_ms(&self) -> u64 {
+        if self.callback_event_dispatched_count == 0 {
+            return 0;
+        }
+        self.callback_dispatch_latency_total_ms / self.callback_event_dispatched_count
+    }
+
+    pub fn callback_dispatch_latency_p95_ms(&self) -> u64 {
+        self.callback_dispatch_latency_percentile_ms(95)
+    }
+
+    pub fn callback_dispatch_latency_p99_ms(&self) -> u64 {
+        self.callback_dispatch_latency_percentile_ms(99)
+    }
+
+    fn callback_dispatch_latency_percentile_ms(&self, percentile: u64) -> u64 {
+        if self.callback_event_dispatched_count == 0 {
+            return 0;
+        }
+        let rank = (self.callback_event_dispatched_count * percentile).div_ceil(100);
+        let mut seen = 0;
+        for (bucket, upper_bound) in self
+            .callback_dispatch_latency_buckets
+            .iter()
+            .zip(CALLBACK_LATENCY_BUCKETS_MS)
+        {
+            seen += *bucket;
+            if seen >= rank {
+                return upper_bound;
+            }
+        }
+        self.max_callback_dispatch_latency_ms
     }
 
     pub fn record_active_process_match(&mut self) {
@@ -261,7 +333,7 @@ impl RuntimeStats {
 
     pub fn render_summary(&self, reason: ShutdownReason) -> String {
         format!(
-            "final_summary reason={reason:?} elapsed_ms={} triggers={} successes={} failures={} denials={} permission_failures={} scope_mismatches={} capability_probe_successes={} capability_probe_failures={} ignored_events={} active_process_matches={} active_process_non_matches={} metadata_unavailable={} input_emitted={} input_denied={} consumed_events={} passthrough_events={} motion_inputs={} repeat_ticks={} repeat_cancels={} avg_motion_dispatch_latency_ms={} p95_motion_dispatch_latency_ms={} p99_motion_dispatch_latency_ms={} max_motion_dispatch_latency_ms={} event_loop_wakeups={} hotplug_adds={} hotplug_removes={} output_queue_failures={} cancelled_macro_runs={} max_output_queue_depth={} kde_bridge_setups={} kde_bridge_cleanups={} cleanup_successes={} cleanup_failures={}",
+            "final_summary reason={reason:?} elapsed_ms={} triggers={} successes={} failures={} denials={} permission_failures={} scope_mismatches={} capability_probe_successes={} capability_probe_failures={} ignored_events={} callbacks_received={} callbacks_dispatched={} callbacks_dropped={} avg_callback_dispatch_latency_ms={} p95_callback_dispatch_latency_ms={} p99_callback_dispatch_latency_ms={} max_callback_dispatch_latency_ms={} active_process_matches={} active_process_non_matches={} metadata_unavailable={} input_emitted={} input_denied={} consumed_events={} passthrough_events={} motion_inputs={} repeat_ticks={} repeat_cancels={} avg_motion_dispatch_latency_ms={} p95_motion_dispatch_latency_ms={} p99_motion_dispatch_latency_ms={} max_motion_dispatch_latency_ms={} event_loop_wakeups={} hotplug_adds={} hotplug_removes={} output_queue_failures={} cancelled_macro_runs={} max_output_queue_depth={} kde_bridge_setups={} kde_bridge_cleanups={} cleanup_successes={} cleanup_failures={}",
             self.elapsed_runtime().as_millis(),
             self.total_triggers(),
             self.macro_success_count,
@@ -272,6 +344,13 @@ impl RuntimeStats {
             self.capability_probe_success_count,
             self.capability_probe_failure_count,
             self.shortcut_event_ignored_count,
+            self.callback_event_received_count,
+            self.callback_event_dispatched_count,
+            self.callback_event_dropped_count,
+            self.average_callback_dispatch_latency_ms(),
+            self.callback_dispatch_latency_p95_ms(),
+            self.callback_dispatch_latency_p99_ms(),
+            self.max_callback_dispatch_latency_ms,
             self.active_process_match_count,
             self.active_process_non_match_count,
             self.metadata_unavailable_count,
@@ -375,5 +454,37 @@ mod tests {
         assert!(summary.contains("avg_motion_dispatch_latency_ms=22"));
         assert!(summary.contains("p95_motion_dispatch_latency_ms=20"));
         assert!(summary.contains("p99_motion_dispatch_latency_ms=50"));
+    }
+
+    #[test]
+    fn callback_latency_metrics_report_average_p95_p99_and_drops() {
+        let mut stats = RuntimeStats::new();
+        for _ in 0..95 {
+            stats.record_callback_received();
+            stats.record_callback_dispatched(20);
+        }
+        for _ in 0..4 {
+            stats.record_callback_received();
+            stats.record_callback_dispatched(50);
+        }
+        stats.record_callback_received();
+        stats.record_callback_dispatched(100);
+        stats.record_callback_dropped(7);
+
+        assert_eq!(stats.callback_event_received_count, 100);
+        assert_eq!(stats.callback_event_dispatched_count, 100);
+        assert_eq!(stats.callback_event_dropped_count, 7);
+        assert_eq!(stats.average_callback_dispatch_latency_ms(), 22);
+        assert_eq!(stats.callback_dispatch_latency_p95_ms(), 20);
+        assert_eq!(stats.callback_dispatch_latency_p99_ms(), 50);
+        assert_eq!(stats.max_callback_dispatch_latency_ms, 100);
+
+        let summary = stats.render_summary(ShutdownReason::CtrlC);
+        assert!(summary.contains("callbacks_received=100"));
+        assert!(summary.contains("callbacks_dispatched=100"));
+        assert!(summary.contains("callbacks_dropped=7"));
+        assert!(summary.contains("avg_callback_dispatch_latency_ms=22"));
+        assert!(summary.contains("p95_callback_dispatch_latency_ms=20"));
+        assert!(summary.contains("p99_callback_dispatch_latency_ms=50"));
     }
 }

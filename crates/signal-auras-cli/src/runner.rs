@@ -834,6 +834,10 @@ pub trait RunnerLifecycle {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunnerEvent {
     Hotkey(HotkeyId),
+    Callback {
+        hotkey: HotkeyId,
+        received_at: Instant,
+    },
     Trigger(BindingTrigger),
     MotionInput(MotionInputEvent),
     MotionRepeatTick(MotionTrigger),
@@ -937,6 +941,27 @@ where
                     )?;
                 }
             }
+            RunnerEvent::Callback {
+                hotkey,
+                received_at,
+            } => {
+                stats.record_callback_received();
+                stats.record_callback_dispatched(received_at.elapsed().as_millis() as u64);
+                if let Some(binding) = bindings
+                    .iter()
+                    .find(|binding| binding.trigger == BindingTrigger::Keyboard(hotkey.clone()))
+                {
+                    handle_trigger(
+                        binding,
+                        active_process_provider,
+                        executor,
+                        &mut scheduler,
+                        stats,
+                    )?;
+                } else {
+                    stats.record_shortcut_ignored();
+                }
+            }
             RunnerEvent::Trigger(trigger) => {
                 if let Some(binding) = bindings.iter().find(|binding| binding.trigger == trigger) {
                     handle_trigger(
@@ -1009,39 +1034,16 @@ fn run_live_real_lifecycle(
     loop {
         stats.record_event_loop_wakeup();
         macro_queue.drive_ready(adapter, stats)?;
-        if let Some(hotkey) = adapter.next_shortcut_event() {
-            log.debug(format!(
-                "event=shortcut_received hotkey={}",
-                hotkey.as_str()
-            ));
-            if let Some(binding) = bindings
-                .iter()
-                .find(|binding| binding.trigger == BindingTrigger::Keyboard(hotkey.clone()))
-            {
-                let active_context = adapter.active_process_context()?;
-                log.debug(format!(
-                    "event=active_process_context confidence={:?} visible_name={} app_id={} window_class={}",
-                    active_context.confidence,
-                    active_context
-                        .visible_name
-                        .as_ref()
-                        .map(signal_auras_core::ProcessName::as_str)
-                        .unwrap_or("none"),
-                    active_context.app_id.as_deref().unwrap_or("none"),
-                    active_context.window_class.as_deref().unwrap_or("none")
-                ));
-                schedule_live_binding(binding, active_context, &mut macro_queue, stats)?;
-            }
-        }
+        drain_live_shortcut_callbacks(bindings, adapter, &mut macro_queue, stats, log)?;
         let wait_timeout =
             next_live_wait_timeout(&repeat_ticks, &last_repeat_ticks, &motion_runtime)
                 .min(macro_queue.next_wait_timeout());
         timer_fd.arm_after(wait_timeout)?;
-        let runtime_fds = [signal_fd.as_raw_fd(), timer_fd.as_raw_fd()];
-        match adapter.wait_next_input_or_runtime_fd(
-            wait_timeout.min(Duration::from_millis(50)),
-            &runtime_fds,
-        )? {
+        let mut runtime_fds = vec![signal_fd.as_raw_fd(), timer_fd.as_raw_fd()];
+        if let Some(fd) = adapter.callback_wake_fd() {
+            runtime_fds.push(fd);
+        }
+        match adapter.wait_next_input_or_runtime_fd(wait_timeout, &runtime_fds)? {
             signal_auras_wayland::evdev::EvdevInputWaitOutcome::Input(event) => {
                 handle_observed_input(
                     event,
@@ -1064,6 +1066,12 @@ fn run_live_real_lifecycle(
                 if fd == timer_fd.as_raw_fd() =>
             {
                 timer_fd.drain()?;
+            }
+            signal_auras_wayland::evdev::EvdevInputWaitOutcome::RuntimeFd(fd)
+                if adapter.callback_wake_fd() == Some(fd) =>
+            {
+                adapter.drain_callback_wake_fd()?;
+                drain_live_shortcut_callbacks(bindings, adapter, &mut macro_queue, stats, log)?;
             }
             signal_auras_wayland::evdev::EvdevInputWaitOutcome::RuntimeFd(_) => {}
             signal_auras_wayland::evdev::EvdevInputWaitOutcome::Timeout => {}
@@ -1122,6 +1130,57 @@ fn run_live_real_lifecycle(
         }
         macro_queue.drive_ready(adapter, stats)?;
     }
+}
+
+fn drain_live_shortcut_callbacks(
+    bindings: &[HotkeyBinding],
+    adapter: &mut RealWaylandAdapter,
+    macro_queue: &mut LiveMacroQueue,
+    stats: &mut RuntimeStats,
+    log: RuntimeLog,
+) -> Result<(), DiagnosableError> {
+    let dropped = adapter.take_callback_dropped_count();
+    if dropped > 0 {
+        stats.record_callback_dropped(dropped);
+        log.warn(format!(
+            "event=callback_burst_limited disposition=dropped count={dropped}"
+        ));
+    }
+
+    while let Some(event) = adapter.next_shortcut_event() {
+        stats.record_callback_received();
+        let dispatch_latency_ms = event.received_at.elapsed().as_millis() as u64;
+        stats.record_callback_dispatched(dispatch_latency_ms);
+        log.debug(format!(
+            "event=callback_received hotkey={} dispatch_latency_ms={dispatch_latency_ms}",
+            event.hotkey.as_str()
+        ));
+        if let Some(binding) = bindings
+            .iter()
+            .find(|binding| binding.trigger == BindingTrigger::Keyboard(event.hotkey.clone()))
+        {
+            let active_context = adapter.active_process_context()?;
+            log.debug(format!(
+                "event=active_process_context confidence={:?} visible_name={} app_id={} window_class={}",
+                active_context.confidence,
+                active_context
+                    .visible_name
+                    .as_ref()
+                    .map(signal_auras_core::ProcessName::as_str)
+                    .unwrap_or("none"),
+                active_context.app_id.as_deref().unwrap_or("none"),
+                active_context.window_class.as_deref().unwrap_or("none")
+            ));
+            schedule_live_binding(binding, active_context, macro_queue, stats)?;
+        } else {
+            stats.record_shortcut_ignored();
+            log.debug(format!(
+                "event=callback_ignored hotkey={} reason=unregistered",
+                event.hotkey.as_str()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn trigger_label_for_log(trigger: &MotionTrigger) -> String {
@@ -1183,7 +1242,7 @@ impl LiveMacroQueue {
             .filter_map(|run| run.state.next_deadline())
             .map(|deadline| deadline.saturating_duration_since(now))
             .min()
-            .unwrap_or_else(|| Duration::from_millis(50))
+            .unwrap_or_else(idle_wait_timeout)
     }
 
     fn drive_ready(
@@ -1243,7 +1302,7 @@ fn next_live_wait_timeout(
     last_repeat_ticks: &std::collections::BTreeMap<MotionTrigger, Instant>,
     motion_runtime: &MotionRuntime,
 ) -> Duration {
-    let mut timeout = Duration::from_millis(50);
+    let mut timeout = idle_wait_timeout();
     let now = Instant::now();
     for (trigger, interval_ms) in repeat_ticks {
         if !motion_runtime.repeat_is_active(trigger) {
@@ -1259,6 +1318,10 @@ fn next_live_wait_timeout(
         timeout = timeout.min(due_in);
     }
     timeout
+}
+
+fn idle_wait_timeout() -> Duration {
+    Duration::from_secs(300)
 }
 
 fn handle_observed_motion_input(
@@ -2012,6 +2075,17 @@ mod tests {
         let motions = vec![mouse_button_repeat_motion()];
 
         assert!(!observe_mode_mouse_button_repeat(Some(&provider), &motions));
+    }
+
+    #[test]
+    fn idle_wait_timeout_is_long_when_no_runtime_work_is_pending() {
+        let motion_runtime = MotionRuntime::new(std::iter::empty::<MotionDefinition>());
+        let repeat_timeout =
+            next_live_wait_timeout(&[], &std::collections::BTreeMap::new(), &motion_runtime);
+        let macro_timeout = LiveMacroQueue::default().next_wait_timeout();
+
+        assert_eq!(repeat_timeout, Duration::from_secs(300));
+        assert_eq!(macro_timeout, Duration::from_secs(300));
     }
 
     fn mouse_button_repeat_motion() -> MotionDefinition {

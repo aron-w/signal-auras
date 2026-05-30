@@ -6,4 +6,6 @@ For the runtime event-loop performance follow-up, also read
 `specs/007-runtime-event-loop-performance/plan.md`.
 For the stale focus handling follow-up, also read
 `specs/008-stale-focus-handling/plan.md`.
+For the callback wakeups follow-up, also read
+`specs/009-callback-wakeups/plan.md`.
 <!-- SPECKIT END -->

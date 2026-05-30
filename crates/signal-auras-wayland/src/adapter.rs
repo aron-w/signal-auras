@@ -226,7 +226,26 @@ impl RealWaylandAdapter {
         CleanupReport::all_succeeded(self.registrations.len())
     }
 
-    pub fn next_shortcut_event(&mut self) -> Option<signal_auras_core::HotkeyId> {
+    pub fn callback_wake_fd(&self) -> Option<std::os::fd::RawFd> {
+        self.shortcut_bridge
+            .as_ref()
+            .map(crate::kde_bridge::KwinShortcutBridge::callback_wake_fd)
+    }
+
+    pub fn drain_callback_wake_fd(&self) -> Result<bool, DiagnosableError> {
+        self.shortcut_bridge
+            .as_ref()
+            .map_or(Ok(false), |bridge| bridge.drain_callback_wake_fd())
+    }
+
+    pub fn take_callback_dropped_count(&mut self) -> u64 {
+        self.shortcut_bridge
+            .as_mut()
+            .map(crate::kde_bridge::KwinShortcutBridge::take_callback_dropped_count)
+            .unwrap_or_default()
+    }
+
+    pub fn next_shortcut_event(&mut self) -> Option<crate::kde_bridge::ObservedShortcutEvent> {
         self.shortcut_bridge
             .as_mut()
             .and_then(crate::kde_bridge::KwinShortcutBridge::next_shortcut_event)
