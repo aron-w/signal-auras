@@ -40,6 +40,7 @@ A user running under KDE Plasma Wayland expects process-aware bindings to behave
 1. **Given** focused-process metadata is unavailable because the compositor or permission is unavailable, **When** a process-scoped binding is triggered, **Then** the binding is denied with an unavailable-focus reason.
 2. **Given** metadata updates arrive after a focus change, **When** a process-scoped binding is triggered before the fresh update arrives, **Then** the binding is denied until current matching metadata is available.
 3. **Given** fresh matching metadata later becomes available, **When** the same process-scoped binding is triggered again, **Then** normal process matching resumes without restarting the runner.
+4. **Given** the live KDE active-process monitor is installed and focus remains on the same window, **When** the monitor heartbeat runs every second, **Then** the cached snapshot is refreshed from a new KWin callback without requiring a focus switch.
 
 ---
 
@@ -65,6 +66,8 @@ An operator debugging a missed process-aware binding needs to know whether the d
 - Focus metadata that moves backward in time, lacks a timestamp, or cannot be ordered against the runtime clock is treated as unknown.
 - Reading cached focus state from the live KDE bridge does not refresh `captured_at` or otherwise extend metadata freshness.
 - Cached matching KDE focus metadata becomes stale and denies process-scoped macros if no new compositor callback arrives before the stale threshold.
+- The live KDE active-process monitor refreshes the current active-window snapshot every 1 second through a real KWin script callback while the monitor is installed.
+- If the KWin heartbeat timer cannot be created or stops firing, no synthetic freshness is applied; process-scoped macros still fail closed once the last trusted callback exceeds the stale threshold.
 - Permission revocation, unsupported compositor behavior, and missing process metadata fail closed for process-scoped bindings.
 - Diagnostics avoid logging private command-line arguments, window text, or unrelated process data.
 
@@ -88,6 +91,9 @@ An operator debugging a missed process-aware binding needs to know whether the d
 - **FR-014**: System MUST NOT refresh active-process metadata freshness when cached focus state is read by the runner.
 - **FR-015**: System MUST fail closed for process-scoped macros once cached KDE focus metadata exceeds the stale threshold, even when the cached process name still matches the configured rule.
 - **FR-016**: System MUST include a regression test where a cached matching KDE process snapshot becomes stale without any new focus callback and denies macro execution.
+- **FR-017**: System MUST configure the live KDE active-process monitor to report the current active window every 1 second while the monitor is installed.
+- **FR-018**: System MUST treat heartbeat callbacks as normal compositor/KWin callbacks with fresh receipt timestamps, while preserving side-effect-free cached reads.
+- **FR-019**: System MUST fail closed rather than fabricate freshness if the KWin heartbeat timer is unavailable, fails to start, or stops emitting callbacks.
 
 ### Key Entities
 
@@ -109,6 +115,7 @@ An operator debugging a missed process-aware binding needs to know whether the d
 - **SC-007**: Existing process-aware Lua examples and configurations continue to load without migration.
 - **SC-008**: Feature verification passes with documented Nix commands or records unavailable Nix checks with the exact failure.
 - **SC-009**: Live KDE bridge regression coverage proves repeated reads of cached focus state preserve the original timestamp and do not keep matching process metadata fresh forever.
+- **SC-010**: Automated KDE bridge coverage proves the active-process monitor script installs a 1000 ms heartbeat and keeps the existing startup and focus-activation reports.
 
 ## Assumptions
 
@@ -117,3 +124,4 @@ An operator debugging a missed process-aware binding needs to know whether the d
 - Process-aware bindings are the only bindings affected by stale focus metadata; bindings without process rules keep their existing behavior.
 - The stale threshold remains a runtime policy with a 2-second default and no Lua API change in this feature.
 - When KWin does not provide a separate monotonic event timestamp, the bridge's callback receipt instant is the focus snapshot timestamp; later reads must preserve that instant.
+- The KDE active-process heartbeat is fixed at 1 second for this reliability increment and is not user-configurable through Lua.

@@ -27,6 +27,8 @@ The core scope API evaluates process-aware bindings from a configured scope, an 
 - `ActiveProcessContext.captured_at` represents when the compositor/KWin callback was received and converted into a focus snapshot.
 - Reading cached focus state from the live KDE bridge must return the cached timestamp unchanged.
 - A cached matching process snapshot must become stale and deny process-scoped matching if no newer focus callback refreshes the cache before the stale threshold.
+- The live KDE active-process monitor must emit a KWin callback heartbeat every 1000 ms while installed; each heartbeat is treated as a normal callback receipt that can refresh the cached snapshot.
+- If the heartbeat is unavailable or stops emitting, cached reads must not fabricate freshness and stale process-scoped matching must still deny.
 
 ## Privacy Rules
 

@@ -13,6 +13,7 @@ use std::{
 };
 
 const CALLBACK_QUEUE_LIMIT: usize = 1024;
+const ACTIVE_PROCESS_HEARTBEAT_MS: u64 = 1_000;
 
 #[derive(Debug, Clone)]
 pub struct ObservedShortcutEvent {
@@ -540,10 +541,19 @@ fn kwin_active_process_script(action_name: &str, bus_name: &str, object_path: &s
              callDBus({bus:?}, {path:?}, \"org.signalAuras.KWinBridge\", \"triggered\", {action:?}, caption, appId, windowClass, pid);\n\
          }}\n\
          signalAurasReportActiveWindow();\n\
-         workspace.windowActivated.connect(function(window) {{ signalAurasReportActiveWindow(); }});\n",
+         workspace.windowActivated.connect(function(window) {{ signalAurasReportActiveWindow(); }});\n\
+         try {{\n\
+             var signalAurasActiveProcessHeartbeat = new QTimer();\n\
+             signalAurasActiveProcessHeartbeat.interval = {heartbeat_ms};\n\
+             signalAurasActiveProcessHeartbeat.singleShot = false;\n\
+             signalAurasActiveProcessHeartbeat.timeout.connect(signalAurasReportActiveWindow);\n\
+             signalAurasActiveProcessHeartbeat.start();\n\
+         }} catch (error) {{\n\
+         }}\n",
         action = action_name,
         bus = bus_name,
         path = object_path,
+        heartbeat_ms = ACTIVE_PROCESS_HEARTBEAT_MS,
     )
 }
 
@@ -627,6 +637,27 @@ mod tests {
             diagnostic.kind,
             signal_auras_core::ScopeDenialKind::StaleFocus
         );
+    }
+
+    #[test]
+    fn active_process_monitor_script_installs_one_second_heartbeat() {
+        let script = kwin_active_process_script(
+            "SignalAurasActiveProcess_123_1",
+            "org.signalAuras.Runner123",
+            "/org/signalAuras/Runner",
+        );
+
+        assert!(script.contains("signalAurasReportActiveWindow();"));
+        assert!(script.contains(
+            "workspace.windowActivated.connect(function(window) { signalAurasReportActiveWindow(); });"
+        ));
+        assert!(script.contains("new QTimer()"));
+        assert!(script.contains("signalAurasActiveProcessHeartbeat.interval = 1000;"));
+        assert!(script.contains("signalAurasActiveProcessHeartbeat.singleShot = false;"));
+        assert!(script.contains(
+            "signalAurasActiveProcessHeartbeat.timeout.connect(signalAurasReportActiveWindow);"
+        ));
+        assert!(script.contains("signalAurasActiveProcessHeartbeat.start();"));
     }
 
     fn event(action_name: &str) -> KwinBridgeEvent {

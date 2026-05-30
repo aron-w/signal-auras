@@ -94,11 +94,25 @@
 - [x] T023 [US1] Run focused KDE bridge and stale-focus tests with `cargo test -p signal-auras-wayland kde_bridge` and related contract/integration tests
 - [x] T024 [US1] Mark the architecture review follow-up tasks complete in `specs/008-stale-focus-handling/tasks.md`
 
+## Phase 8: KDE Active-Process Heartbeat Follow-Up
+
+**Goal**: Keep live KDE active-process metadata fresh while focus remains on the same window by emitting real KWin callbacks every 1 second, without making cached reads refresh freshness.
+
+**Independent Test**: Generated active-process monitor script contains a 1000 ms `QTimer` heartbeat wired to the same active-window report function, while the cached-read stale regression remains valid.
+
+- [x] T025 [US2] Update stale-focus spec, plan, and freshness contract for a 1 second KDE active-process heartbeat
+- [x] T026 [P] [US2] Add KDE bridge generated-script regression coverage for the active-process heartbeat in `crates/signal-auras-wayland/src/kde_bridge.rs`
+- [x] T027 [US2] Add a 1000 ms `QTimer` heartbeat to the KWin active-process monitor script in `crates/signal-auras-wayland/src/kde_bridge.rs`
+- [x] T028 [US2] Keep heartbeat startup fail-closed by avoiding synthetic freshness if `QTimer` setup fails
+- [x] T029 [US2] Run focused KDE bridge tests and workspace verification commands
+- [x] T030 [US2] Mark heartbeat follow-up tasks complete in `specs/008-stale-focus-handling/tasks.md`
+
 ## Dependencies & Execution Order
 
 - Setup before foundational work.
 - Foundational work blocks user stories.
 - Implement User Story 1 first, then User Story 2, then User Story 3.
+- Phase 8 depends on the Phase 7 cached-read timestamp fix.
 - Tests for each user story precede implementation where practical.
 - Polish depends on all user stories.
 
@@ -108,6 +122,7 @@
 - T005 and T006 can be authored in parallel.
 - T009 and T010 can be authored in parallel.
 - T013 and T014 can be authored in parallel.
+- T026 can be authored after T025 and before T027.
 
 ## Implementation Strategy
 
