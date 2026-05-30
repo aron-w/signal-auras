@@ -1208,13 +1208,10 @@ impl LiveMacroQueue {
         definition: &MacroDefinition,
         inter_action_delay_ms: u64,
         stats: &mut RuntimeStats,
-    ) -> Result<MacroRunId, DiagnosableError> {
+    ) -> Option<MacroRunId> {
         if !self.active_triggers.insert(trigger_label.clone()) {
-            stats.denied_action_count += 1;
-            return Err(DiagnosableError::new(
-                ErrorPhase::Trigger,
-                format!("macro for '{trigger_label}' is already running"),
-            ));
+            record_non_repeat_collision_skip(stats);
+            return None;
         }
         self.next_id += 1;
         let id = MacroRunId::new(self.next_id);
@@ -1223,7 +1220,7 @@ impl LiveMacroQueue {
             state: MacroRunState::new(id, definition, inter_action_delay_ms, Instant::now()),
         });
         stats.record_output_queue_depth(self.runs.len() as u64);
-        Ok(id)
+        Some(id)
     }
 
     fn trigger_is_pending_or_active(&self, trigger_label: &str) -> bool {
@@ -1241,6 +1238,10 @@ impl LiveMacroQueue {
     }
 
     fn cancel_repeat(&mut self, trigger_label: &str) -> usize {
+        self.cancel_trigger(trigger_label)
+    }
+
+    fn cancel_trigger(&mut self, trigger_label: &str) -> usize {
         let mut cancelled = 0;
         for run in &mut self.runs {
             if run.trigger_label == trigger_label && !run.state.is_cancelled() {
@@ -1461,7 +1462,7 @@ fn schedule_live_binding(
     match binding.scope.decide_context(&active_context) {
         ScopeDecision::Allowed => {
             stats.record_active_process_match();
-            macro_queue.schedule(trigger_label, &binding.macro_definition, 0, stats)?;
+            macro_queue.schedule(trigger_label, &binding.macro_definition, 0, stats);
         }
         ScopeDecision::Denied { reason, diagnostic } => {
             record_scope_denial(stats, &diagnostic);
@@ -1527,7 +1528,7 @@ fn schedule_live_motion_trigger(
                     macro_definition,
                     motion.definition.inter_action_delay_ms,
                     stats,
-                )?;
+                );
             }
         }
         ScopeDecision::Denied { reason, diagnostic } => {
@@ -1576,7 +1577,7 @@ fn schedule_live_motion_repeat_tick(
                 &repeat.macro_definition,
                 motion.definition.inter_action_delay_ms,
                 stats,
-            )?;
+            );
         }
         ScopeDecision::Denied { reason, diagnostic } => {
             record_scope_denial(stats, &diagnostic);
@@ -1637,9 +1638,9 @@ where
             stats.record_active_process_match();
             let guard = match scheduler.begin(&trigger_label) {
                 Ok(guard) => guard,
-                Err(error) => {
-                    stats.denied_action_count += 1;
-                    return Err(error);
+                Err(_) => {
+                    record_non_repeat_collision_skip(stats);
+                    return Ok(());
                 }
             };
             let result = execute_macro_definition(&binding.macro_definition, 0, executor, stats);
@@ -1817,6 +1818,11 @@ fn record_scope_denial(stats: &mut RuntimeStats, diagnostic: &signal_auras_core:
     }
 }
 
+fn record_non_repeat_collision_skip(stats: &mut RuntimeStats) {
+    stats.denied_action_count += 1;
+    stats.record_non_repeat_trigger_skipped();
+}
+
 fn execute_motion_macro<E>(
     trigger_label: &str,
     macro_definition: &MacroDefinition,
@@ -1830,9 +1836,9 @@ where
 {
     let guard = match scheduler.begin(trigger_label) {
         Ok(guard) => guard,
-        Err(error) => {
-            stats.denied_action_count += 1;
-            return Err(error);
+        Err(_) => {
+            record_non_repeat_collision_skip(stats);
+            return Ok(());
         }
     };
     let result = execute_macro_definition(macro_definition, inter_action_delay_ms, executor, stats);
@@ -2158,6 +2164,67 @@ mod tests {
     }
 
     #[test]
+    fn non_repeat_trigger_collision_is_skipped_without_queue_error() {
+        let binding = runtime_hotkey_binding("F5", "x");
+        let active_context = signal_auras_core::ActiveProcessContext::unavailable("not needed");
+        let mut macro_queue = LiveMacroQueue::default();
+        let mut stats = RuntimeStats::new();
+
+        schedule_live_binding(
+            &binding,
+            active_context.clone(),
+            &mut macro_queue,
+            &mut stats,
+        )
+        .unwrap();
+        schedule_live_binding(&binding, active_context, &mut macro_queue, &mut stats).unwrap();
+
+        assert_eq!(macro_queue.runs.len(), 1);
+        assert_eq!(stats.max_output_queue_depth, 1);
+        assert_eq!(stats.denied_action_count, 1);
+        assert_eq!(stats.non_repeat_trigger_skipped_count, 1);
+        assert_eq!(stats.macro_failure_count, 0);
+    }
+
+    #[test]
+    fn non_repeat_trigger_state_clears_after_completion_or_cancellation() {
+        let binding = runtime_hotkey_binding("F5", "x");
+        let trigger_label = binding.trigger_label();
+        let active_context = signal_auras_core::ActiveProcessContext::unavailable("not needed");
+        let mut macro_queue = LiveMacroQueue::default();
+        let mut stats = RuntimeStats::new();
+        let mut executor = QueueExecutor::default();
+
+        schedule_live_binding(
+            &binding,
+            active_context.clone(),
+            &mut macro_queue,
+            &mut stats,
+        )
+        .unwrap();
+        assert!(macro_queue.trigger_is_pending_or_active(&trigger_label));
+        macro_queue.drive_ready(&mut executor, &mut stats).unwrap();
+        macro_queue.drive_ready(&mut executor, &mut stats).unwrap();
+        assert!(!macro_queue.trigger_is_pending_or_active(&trigger_label));
+
+        schedule_live_binding(
+            &binding,
+            active_context.clone(),
+            &mut macro_queue,
+            &mut stats,
+        )
+        .unwrap();
+        let cancelled = macro_queue.cancel_trigger(&trigger_label);
+        macro_queue.drive_ready(&mut executor, &mut stats).unwrap();
+        assert_eq!(cancelled, 1);
+        assert!(!macro_queue.trigger_is_pending_or_active(&trigger_label));
+
+        schedule_live_binding(&binding, active_context, &mut macro_queue, &mut stats).unwrap();
+        assert!(macro_queue.trigger_is_pending_or_active(&trigger_label));
+        assert_eq!(stats.non_repeat_trigger_skipped_count, 0);
+    }
+
+    #[test]
     fn repeat_overload_accounting_is_isolated_by_binding() {
         let first = repeat_runtime_motion(MotionTrigger::parse(["<Leader>", "a"]).unwrap(), "a");
         let second = repeat_runtime_motion(MotionTrigger::parse(["<Leader>", "b"]).unwrap(), "b");
@@ -2296,6 +2363,20 @@ mod tests {
             )
             .unwrap(),
             scope: ScopeSelection::explicit_global_from_prompt(true).unwrap(),
+        }
+    }
+
+    fn runtime_hotkey_binding(hotkey: &str, text: &str) -> HotkeyBinding {
+        HotkeyBinding {
+            trigger: BindingTrigger::keyboard(HotkeyId::parse(hotkey).unwrap()),
+            mode: BindingMode::Consume,
+            scope: ScopeSelection::ExplicitGlobal,
+            macro_definition: MacroDefinition::new(vec![signal_auras_core::MacroAction::text(
+                text,
+            )
+            .unwrap()])
+            .unwrap(),
+            registration_state: signal_auras_core::RegistrationState::Registered,
         }
     }
 

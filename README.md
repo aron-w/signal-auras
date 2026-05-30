@@ -46,6 +46,9 @@ verbose logs use `level=... event=... key=value` fields. Motion diagnostics
 include the source evdev path, dispatch latency, repeat trigger/cancel/tick
 events, and provider device counts so delayed or missed input can be traced
 without logging macro text payloads.
+If an already-active non-repeat trigger is pressed again, the later attempt is
+skipped/denied deterministically and counted in final stats without stopping the
+runner.
 Process-scope denials include a privacy-bounded reason such as
 `stale_focus`, `focus_unavailable`, `focus_permission_denied`, or
 `process_mismatch`; stale denials report the configured rule, metadata age, and
@@ -294,8 +297,9 @@ If repeat output for a held binding is still pending or active when another
 tick becomes due, the later tick is skipped/coalesced instead of queued; skipped
 ticks are not replayed after overload clears or after release. Final runtime
 stats include motion input count, executed repeat tick count, skipped/coalesced
-repeat count, repeat cancel count, cancelled queued macro runs, and maximum
-observed motion dispatch latency for the run.
+repeat count, non-repeat skipped/denied collision count, repeat cancel count,
+cancelled queued macro runs, and maximum observed motion dispatch latency for
+the run.
 
 ## Verification
 

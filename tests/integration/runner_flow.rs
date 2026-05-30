@@ -222,22 +222,36 @@ fn repeated_trigger_denial_keeps_macro_from_running_twice() {
     let mut executor = Executor::default();
     let mut stats = RuntimeStats::new();
     let mut scheduler = MacroScheduler::default();
-    let _running = scheduler.begin("F5").unwrap();
+    let running = scheduler.begin("F5").unwrap();
 
-    let error = handle_trigger(
+    handle_trigger(
         &binding,
         &Active(None),
         &mut executor,
         &mut scheduler,
         &mut stats,
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert_eq!(error.phase, ErrorPhase::Trigger);
     assert_eq!(executor.actions, 0);
     assert_eq!(stats.macro_success_count, 0);
     assert_eq!(stats.macro_failure_count, 0);
     assert_eq!(stats.denied_action_count, 1);
+    assert_eq!(stats.non_repeat_trigger_skipped_count, 1);
+
+    scheduler.finish(running);
+    handle_trigger(
+        &binding,
+        &Active(None),
+        &mut executor,
+        &mut scheduler,
+        &mut stats,
+    )
+    .unwrap();
+
+    assert_eq!(executor.actions, 1);
+    assert_eq!(stats.macro_success_count, 1);
+    assert_eq!(stats.trigger_count_by_hotkey["F5"], 2);
 }
 
 #[test]

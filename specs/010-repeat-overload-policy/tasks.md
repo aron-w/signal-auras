@@ -104,12 +104,12 @@
 
 **Independent Test**: Start a non-repeat macro, trigger the same binding again before completion, verify the collision is skipped/coalesced/denied without returning a fatal runner error, then complete or cancel the macro and verify a later legitimate trigger can run.
 
-- [ ] T022 [P] [US4] Add non-repeat already-active trigger collision tests in `crates/signal-auras-cli/src/runner.rs`
-- [ ] T023 [P] [US4] Add stats rendering tests for denied/skipped non-repeat collisions in `crates/signal-auras-core/src/stats.rs`
-- [ ] T024 [US4] Implement deterministic non-repeat collision policy in `crates/signal-auras-cli/src/runner.rs`
-- [ ] T025 [US4] Record denied/skipped non-repeat collision stats and bounded diagnostics in `crates/signal-auras-cli/src/runner.rs`
-- [ ] T026 [US4] Ensure active trigger state cleanup after macro completion, cancellation, denial, and shutdown in `crates/signal-auras-cli/src/runner.rs`
-- [ ] T027 [US4] Update README runtime diagnostics for non-repeat trigger overload in `README.md`
+- [x] T022 [P] [US4] Add non-repeat already-active trigger collision tests in `crates/signal-auras-cli/src/runner.rs`
+- [x] T023 [P] [US4] Add stats rendering tests for denied/skipped non-repeat collisions in `crates/signal-auras-core/src/stats.rs`
+- [x] T024 [US4] Implement deterministic non-repeat collision policy in `crates/signal-auras-cli/src/runner.rs`
+- [x] T025 [US4] Record denied/skipped non-repeat collision stats and bounded diagnostics in `crates/signal-auras-cli/src/runner.rs`
+- [x] T026 [US4] Ensure active trigger state cleanup after macro completion, cancellation, denial, and shutdown in `crates/signal-auras-cli/src/runner.rs`
+- [x] T027 [US4] Update README runtime diagnostics for non-repeat trigger overload in `README.md`
 
 ---
 
