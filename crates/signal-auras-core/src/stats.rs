@@ -41,6 +41,7 @@ pub struct RuntimeStats {
     pub passthrough_trigger_event_count: u64,
     pub motion_input_event_count: u64,
     pub motion_repeat_tick_count: u64,
+    pub motion_repeat_skipped_count: u64,
     pub motion_repeat_cancel_count: u64,
     pub max_motion_dispatch_latency_ms: u64,
     motion_dispatch_latency_total_ms: u64,
@@ -94,6 +95,7 @@ impl RuntimeStats {
             passthrough_trigger_event_count: 0,
             motion_input_event_count: 0,
             motion_repeat_tick_count: 0,
+            motion_repeat_skipped_count: 0,
             motion_repeat_cancel_count: 0,
             max_motion_dispatch_latency_ms: 0,
             motion_dispatch_latency_total_ms: 0,
@@ -287,6 +289,10 @@ impl RuntimeStats {
         self.motion_repeat_tick_count += 1;
     }
 
+    pub fn record_motion_repeat_skipped(&mut self, count: u64) {
+        self.motion_repeat_skipped_count += count;
+    }
+
     pub fn record_motion_repeat_cancel(&mut self) {
         self.motion_repeat_cancel_count += 1;
     }
@@ -333,7 +339,7 @@ impl RuntimeStats {
 
     pub fn render_summary(&self, reason: ShutdownReason) -> String {
         format!(
-            "final_summary reason={reason:?} elapsed_ms={} triggers={} successes={} failures={} denials={} permission_failures={} scope_mismatches={} capability_probe_successes={} capability_probe_failures={} ignored_events={} callbacks_received={} callbacks_dispatched={} callbacks_dropped={} avg_callback_dispatch_latency_ms={} p95_callback_dispatch_latency_ms={} p99_callback_dispatch_latency_ms={} max_callback_dispatch_latency_ms={} active_process_matches={} active_process_non_matches={} metadata_unavailable={} input_emitted={} input_denied={} consumed_events={} passthrough_events={} motion_inputs={} repeat_ticks={} repeat_cancels={} avg_motion_dispatch_latency_ms={} p95_motion_dispatch_latency_ms={} p99_motion_dispatch_latency_ms={} max_motion_dispatch_latency_ms={} event_loop_wakeups={} hotplug_adds={} hotplug_removes={} output_queue_failures={} cancelled_macro_runs={} max_output_queue_depth={} kde_bridge_setups={} kde_bridge_cleanups={} cleanup_successes={} cleanup_failures={}",
+            "final_summary reason={reason:?} elapsed_ms={} triggers={} successes={} failures={} denials={} permission_failures={} scope_mismatches={} capability_probe_successes={} capability_probe_failures={} ignored_events={} callbacks_received={} callbacks_dispatched={} callbacks_dropped={} avg_callback_dispatch_latency_ms={} p95_callback_dispatch_latency_ms={} p99_callback_dispatch_latency_ms={} max_callback_dispatch_latency_ms={} active_process_matches={} active_process_non_matches={} metadata_unavailable={} input_emitted={} input_denied={} consumed_events={} passthrough_events={} motion_inputs={} repeat_ticks={} repeat_skipped_or_coalesced={} repeat_cancels={} avg_motion_dispatch_latency_ms={} p95_motion_dispatch_latency_ms={} p99_motion_dispatch_latency_ms={} max_motion_dispatch_latency_ms={} event_loop_wakeups={} hotplug_adds={} hotplug_removes={} output_queue_failures={} cancelled_macro_runs={} max_output_queue_depth={} kde_bridge_setups={} kde_bridge_cleanups={} cleanup_successes={} cleanup_failures={}",
             self.elapsed_runtime().as_millis(),
             self.total_triggers(),
             self.macro_success_count,
@@ -360,6 +366,7 @@ impl RuntimeStats {
             self.passthrough_trigger_event_count,
             self.motion_input_event_count,
             self.motion_repeat_tick_count,
+            self.motion_repeat_skipped_count,
             self.motion_repeat_cancel_count,
             self.average_motion_dispatch_latency_ms(),
             self.motion_dispatch_latency_p95_ms(),
@@ -486,5 +493,21 @@ mod tests {
         assert!(summary.contains("avg_callback_dispatch_latency_ms=22"));
         assert!(summary.contains("p95_callback_dispatch_latency_ms=20"));
         assert!(summary.contains("p99_callback_dispatch_latency_ms=50"));
+    }
+
+    #[test]
+    fn repeat_overload_counters_are_rendered_in_summary() {
+        let mut stats = RuntimeStats::new();
+        stats.record_motion_repeat_tick();
+        stats.record_motion_repeat_skipped(3);
+        stats.record_motion_repeat_cancel();
+        stats.record_cancelled_macro_runs(1);
+
+        let summary = stats.render_summary(ShutdownReason::CtrlC);
+
+        assert!(summary.contains("repeat_ticks=1"));
+        assert!(summary.contains("repeat_skipped_or_coalesced=3"));
+        assert!(summary.contains("repeat_cancels=1"));
+        assert!(summary.contains("cancelled_macro_runs=1"));
     }
 }

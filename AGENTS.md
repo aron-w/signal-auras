@@ -8,4 +8,6 @@ For the stale focus handling follow-up, also read
 `specs/008-stale-focus-handling/plan.md`.
 For the callback wakeups follow-up, also read
 `specs/009-callback-wakeups/plan.md`.
+For the repeat overload policy follow-up, also read
+`specs/010-repeat-overload-policy/plan.md`.
 <!-- SPECKIT END -->

@@ -14,7 +14,7 @@ use signal_auras_wayland::{
     RealWaylandAdapter,
 };
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     io::{self, IsTerminal},
     path::{Path, PathBuf},
@@ -1123,6 +1123,7 @@ fn run_live_real_lifecycle(
                         active_context,
                         &mut macro_queue,
                         stats,
+                        log,
                     )?;
                 }
                 last_repeat_ticks.insert(trigger.clone(), now);
@@ -1191,6 +1192,7 @@ fn trigger_label_for_log(trigger: &MotionTrigger) -> String {
 struct LiveMacroQueue {
     next_id: u64,
     active_triggers: BTreeSet<String>,
+    repeat_skip_counts: BTreeMap<String, u64>,
     runs: Vec<LiveMacroRun>,
 }
 
@@ -1224,10 +1226,24 @@ impl LiveMacroQueue {
         Ok(id)
     }
 
-    fn cancel_repeats(&mut self) -> usize {
+    fn trigger_is_pending_or_active(&self, trigger_label: &str) -> bool {
+        self.active_triggers.contains(trigger_label)
+    }
+
+    fn record_repeat_skip(&mut self, trigger_label: &str, stats: &mut RuntimeStats) -> u64 {
+        stats.record_motion_repeat_skipped(1);
+        let count = self
+            .repeat_skip_counts
+            .entry(trigger_label.to_string())
+            .or_default();
+        *count += 1;
+        *count
+    }
+
+    fn cancel_repeat(&mut self, trigger_label: &str) -> usize {
         let mut cancelled = 0;
         for run in &mut self.runs {
-            if run.trigger_label.ends_with(" repeat") && !run.state.is_cancelled() {
+            if run.trigger_label == trigger_label && !run.state.is_cancelled() {
                 run.state.cancel();
                 cancelled += 1;
             }
@@ -1478,7 +1494,8 @@ fn schedule_live_motion_runtime_event(
         }
         MotionRuntimeEvent::RepeatCancelled { trigger } => {
             stats.record_motion_repeat_cancel();
-            let cancelled = macro_queue.cancel_repeats();
+            let trigger_label = format!("{} repeat", trigger.describe());
+            let cancelled = macro_queue.cancel_repeat(&trigger_label);
             stats.record_cancelled_macro_runs(cancelled as u64);
             println!(
                 "motion_repeat_cancelled trigger={} queued_macros_cancelled={cancelled}",
@@ -1530,15 +1547,30 @@ fn schedule_live_motion_repeat_tick(
     active_context: signal_auras_core::ActiveProcessContext,
     macro_queue: &mut LiveMacroQueue,
     stats: &mut RuntimeStats,
+    log: RuntimeLog,
 ) -> Result<(), DiagnosableError> {
     let Some(repeat) = &motion.definition.repeat else {
         return Ok(());
     };
     let trigger_label = format!("{} repeat", motion.definition.trigger.describe());
+    if macro_queue.trigger_is_pending_or_active(&trigger_label) {
+        let skipped_for_binding = macro_queue.record_repeat_skip(&trigger_label, stats);
+        if should_log_repeat_overload_skip(skipped_for_binding) {
+            log.debug(repeat_overload_log_message(
+                &trigger_label,
+                skipped_for_binding,
+            ));
+        }
+        return Ok(());
+    }
     match motion.scope.decide_context(&active_context) {
         ScopeDecision::Allowed => {
             stats.record_active_process_match();
             stats.record_motion_repeat_tick();
+            log.debug(format!(
+                "event=motion_repeat_tick_scheduled trigger={} disposition=executed",
+                trigger_label_for_log(&motion.definition.trigger)
+            ));
             macro_queue.schedule(
                 trigger_label,
                 &repeat.macro_definition,
@@ -1556,6 +1588,17 @@ fn schedule_live_motion_repeat_tick(
         }
     }
     Ok(())
+}
+
+fn should_log_repeat_overload_skip(skipped_for_binding: u64) -> bool {
+    skipped_for_binding == 1 || skipped_for_binding.is_power_of_two()
+}
+
+fn repeat_overload_log_message(trigger_label: &str, skipped_for_binding: u64) -> String {
+    format!(
+        "event=motion_repeat_overload trigger={} disposition=skipped_or_coalesced reason=output_pending skipped_for_binding={skipped_for_binding}",
+        trigger_label.replace(' ', "/")
+    )
 }
 
 pub fn handle_trigger<P, E>(
@@ -2088,6 +2131,131 @@ mod tests {
         assert_eq!(macro_timeout, Duration::from_secs(300));
     }
 
+    #[test]
+    fn overloaded_repeat_ticks_are_skipped_without_queue_growth() {
+        let motion = repeat_runtime_motion(MotionTrigger::parse(["<Leader>", "a"]).unwrap(), "x");
+        let active_context = signal_auras_core::ActiveProcessContext::unavailable("not needed");
+        let mut macro_queue = LiveMacroQueue::default();
+        let mut stats = RuntimeStats::new();
+
+        for _ in 0..=10_000 {
+            schedule_live_motion_repeat_tick(
+                &motion,
+                active_context.clone(),
+                &mut macro_queue,
+                &mut stats,
+                RuntimeLog::new(false),
+            )
+            .unwrap();
+        }
+
+        assert_eq!(macro_queue.runs.len(), 1);
+        assert_eq!(stats.max_output_queue_depth, 1);
+        assert_eq!(stats.motion_repeat_tick_count, 1);
+        assert_eq!(stats.motion_repeat_skipped_count, 10_000);
+        assert_eq!(stats.denied_action_count, 0);
+        assert_eq!(stats.macro_failure_count, 0);
+    }
+
+    #[test]
+    fn repeat_overload_accounting_is_isolated_by_binding() {
+        let first = repeat_runtime_motion(MotionTrigger::parse(["<Leader>", "a"]).unwrap(), "a");
+        let second = repeat_runtime_motion(MotionTrigger::parse(["<Leader>", "b"]).unwrap(), "b");
+        let active_context = signal_auras_core::ActiveProcessContext::unavailable("not needed");
+        let mut macro_queue = LiveMacroQueue::default();
+        let mut stats = RuntimeStats::new();
+
+        schedule_live_motion_repeat_tick(
+            &first,
+            active_context.clone(),
+            &mut macro_queue,
+            &mut stats,
+            RuntimeLog::new(false),
+        )
+        .unwrap();
+        schedule_live_motion_repeat_tick(
+            &first,
+            active_context.clone(),
+            &mut macro_queue,
+            &mut stats,
+            RuntimeLog::new(false),
+        )
+        .unwrap();
+        schedule_live_motion_repeat_tick(
+            &second,
+            active_context,
+            &mut macro_queue,
+            &mut stats,
+            RuntimeLog::new(false),
+        )
+        .unwrap();
+
+        assert_eq!(macro_queue.runs.len(), 2);
+        assert_eq!(stats.motion_repeat_tick_count, 2);
+        assert_eq!(stats.motion_repeat_skipped_count, 1);
+        let first_label = format!("{} repeat", first.definition.trigger.describe());
+        assert_eq!(macro_queue.repeat_skip_counts.get(&first_label), Some(&1));
+        let second_label = format!("{} repeat", second.definition.trigger.describe());
+        assert!(!macro_queue.repeat_skip_counts.contains_key(&second_label));
+    }
+
+    #[test]
+    fn cancellation_targets_only_the_released_repeat_binding() {
+        let first = repeat_runtime_motion(MotionTrigger::parse(["<Leader>", "a"]).unwrap(), "a");
+        let second = repeat_runtime_motion(MotionTrigger::parse(["<Leader>", "b"]).unwrap(), "b");
+        let active_context = signal_auras_core::ActiveProcessContext::unavailable("not needed");
+        let mut macro_queue = LiveMacroQueue::default();
+        let mut stats = RuntimeStats::new();
+
+        schedule_live_motion_repeat_tick(
+            &first,
+            active_context.clone(),
+            &mut macro_queue,
+            &mut stats,
+            RuntimeLog::new(false),
+        )
+        .unwrap();
+        schedule_live_motion_repeat_tick(
+            &second,
+            active_context,
+            &mut macro_queue,
+            &mut stats,
+            RuntimeLog::new(false),
+        )
+        .unwrap();
+
+        let first_label = format!("{} repeat", first.definition.trigger.describe());
+        let second_label = format!("{} repeat", second.definition.trigger.describe());
+        let cancelled = macro_queue.cancel_repeat(&first_label);
+        stats.record_cancelled_macro_runs(cancelled as u64);
+        macro_queue
+            .drive_ready(&mut QueueExecutor::default(), &mut stats)
+            .unwrap();
+
+        assert_eq!(cancelled, 1);
+        assert_eq!(stats.cancelled_macro_run_count, 1);
+        assert!(!macro_queue.trigger_is_pending_or_active(&first_label));
+        assert!(macro_queue.trigger_is_pending_or_active(&second_label));
+    }
+
+    #[test]
+    fn repeat_overload_log_message_is_rate_limited_and_payload_safe() {
+        assert!(should_log_repeat_overload_skip(1));
+        assert!(should_log_repeat_overload_skip(2));
+        assert!(!should_log_repeat_overload_skip(3));
+        assert!(should_log_repeat_overload_skip(4));
+
+        let rendered = RuntimeLog::new(true).render_plain(
+            "DEBUG",
+            &repeat_overload_log_message("<Leader> then a repeat", 8),
+        );
+
+        assert!(rendered.contains("motion_repeat_overload"));
+        assert!(rendered.contains("trigger=<Leader>/then/a/repeat"));
+        assert!(rendered.contains("skipped_for_binding=8"));
+        assert!(!rendered.contains("secret macro payload"));
+    }
+
     fn mouse_button_repeat_motion() -> MotionDefinition {
         let macro_definition =
             MacroDefinition::new(vec![signal_auras_core::MacroAction::mouse_click(
@@ -2107,6 +2275,43 @@ mod tests {
             0,
         )
         .unwrap()
+    }
+
+    fn repeat_runtime_motion(trigger: MotionTrigger, text: &str) -> RuntimeMotion {
+        let macro_definition =
+            MacroDefinition::new(vec![signal_auras_core::MacroAction::text(text).unwrap()])
+                .unwrap();
+        let repeat = signal_auras_core::RepeatDefinition::new(
+            trigger.clone(),
+            signal_auras_core::RepeatInterval::new(10, 10).unwrap(),
+            macro_definition,
+        );
+        RuntimeMotion {
+            definition: MotionDefinition::new(
+                trigger,
+                BindingMode::Passthrough,
+                None,
+                Some(repeat),
+                0,
+            )
+            .unwrap(),
+            scope: ScopeSelection::explicit_global_from_prompt(true).unwrap(),
+        }
+    }
+
+    #[derive(Default)]
+    struct QueueExecutor {
+        actions: usize,
+    }
+
+    impl MacroExecutor for QueueExecutor {
+        fn execute_action(
+            &mut self,
+            _action: &signal_auras_core::MacroAction,
+        ) -> Result<(), DiagnosableError> {
+            self.actions += 1;
+            Ok(())
+        }
     }
 
     #[derive(Default)]

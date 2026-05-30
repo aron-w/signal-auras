@@ -94,3 +94,29 @@ fn lua_api_denies_compositor_metadata_and_raw_input_apis() {
         );
     }
 }
+
+#[test]
+fn lua_api_accepts_existing_repeat_motion_syntax_without_policy_migration() {
+    let config = load_lua_source(
+        r#"
+        return {
+          leader = "F13",
+          motions = {
+            {
+              trigger = { "<Leader>", "<LClick>", "<LClick>" },
+              mode = "passthrough",
+              repeat = {
+                while_held = { "<Leader>", "<LClick>" },
+                interval_ms = { min = 50, max = 80 },
+                macro = macro { mouse_click "left" },
+              },
+            },
+          },
+        }
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(config.motions().len(), 1);
+    assert!(config.motions().values().next().unwrap().repeat.is_some());
+}
