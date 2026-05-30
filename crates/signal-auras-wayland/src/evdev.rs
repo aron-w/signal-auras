@@ -31,6 +31,7 @@ const BTN_MIDDLE: u16 = 0x112;
 #[derive(Debug)]
 pub struct EvdevObservationProvider {
     devices: Vec<EvdevDevice>,
+    configured_paths: Vec<PathBuf>,
     leader: Option<MotionToken>,
     grabbed: bool,
     next_device_index: usize,
@@ -49,8 +50,10 @@ impl EvdevObservationProvider {
         leader: Option<MotionToken>,
         all_devices: bool,
     ) -> Result<Self, DiagnosableError> {
-        let devices = devices
-            .into_iter()
+        let configured_paths = devices.into_iter().collect::<Vec<_>>();
+        let devices = configured_paths
+            .iter()
+            .cloned()
             .map(EvdevDevice::open)
             .collect::<Result<Vec<_>, _>>()?;
         if devices.is_empty() {
@@ -60,8 +63,14 @@ impl EvdevObservationProvider {
                 None,
             ));
         }
+        let monitor_enabled = all_devices || !devices.is_empty();
         let provider = Self {
             devices,
+            configured_paths: if all_devices {
+                Vec::new()
+            } else {
+                configured_paths
+            },
             leader,
             grabbed: false,
             next_device_index: 0,
@@ -70,7 +79,7 @@ impl EvdevObservationProvider {
             last_rescan: Instant::now(),
             rescan_interval: Duration::from_secs(1),
             skipped_paths: BTreeSet::new(),
-            udev_monitor: if all_devices {
+            udev_monitor: if monitor_enabled {
                 match UdevInputMonitor::open() {
                     Ok(monitor) => Some(monitor),
                     Err(error) => {
@@ -153,7 +162,7 @@ impl EvdevObservationProvider {
             std::thread::sleep(timeout.min(Duration::from_millis(50)));
         }
         if self.udev_monitor.is_none() {
-            self.rescan_all_devices_if_due()?;
+            self.rescan_devices_if_due()?;
         }
         Ok(match self.next_observed_motion_event()? {
             Some(event) => EvdevWaitOutcome::Motion(event),
@@ -219,7 +228,7 @@ impl EvdevObservationProvider {
             std::thread::sleep(timeout.min(Duration::from_millis(50)));
         }
         if self.udev_monitor.is_none() {
-            self.rescan_all_devices_if_due()?;
+            self.rescan_devices_if_due()?;
         }
         Ok(match self.next_observed_input_event()? {
             Some(event) => EvdevInputWaitOutcome::Input(event),
@@ -266,13 +275,17 @@ impl EvdevObservationProvider {
         self.devices.iter().filter(|device| device.active).count()
     }
 
-    pub fn rescan_all_devices_if_due(&mut self) -> Result<(), DiagnosableError> {
-        if !self.all_devices || self.last_rescan.elapsed() < self.rescan_interval {
+    pub fn rescan_devices_if_due(&mut self) -> Result<(), DiagnosableError> {
+        if self.last_rescan.elapsed() < self.rescan_interval {
             return Ok(());
         }
         self.last_rescan = Instant::now();
-        let devices = discover_event_devices()?;
-        self.rescan_devices(devices);
+        if self.all_devices {
+            let devices = discover_event_devices()?;
+            self.rescan_devices(devices);
+        } else {
+            self.rescan_configured_devices();
+        }
         Ok(())
     }
 
@@ -280,53 +293,81 @@ impl EvdevObservationProvider {
         if !self.all_devices {
             return;
         }
-        let known = self
+        self.rescan_known_devices(devices);
+    }
+
+    pub fn rescan_configured_devices(&mut self) {
+        if self.all_devices {
+            return;
+        }
+        self.rescan_known_devices(self.configured_paths.clone());
+    }
+
+    fn rescan_known_devices(&mut self, devices: impl IntoIterator<Item = PathBuf>) {
+        let discovered = devices.into_iter().collect::<BTreeSet<_>>();
+        for path in &discovered {
+            self.add_or_reopen_device(path.clone());
+        }
+        let active_paths = self
             .devices
             .iter()
+            .filter(|device| device.active)
             .map(|device| device.path.clone())
             .collect::<BTreeSet<_>>();
-        let mut discovered = BTreeSet::new();
-        for path in devices {
-            discovered.insert(path.clone());
-            if known.contains(&path) {
-                self.skipped_paths.remove(&path);
-                continue;
-            }
-            match EvdevDevice::open(path.clone()) {
-                Ok(mut device) => {
-                    self.skipped_paths.remove(&path);
-                    if self.grabbed
-                        && self.mode == InputProviderMode::Grab
-                        && device.pointer_capable
-                    {
-                        if let Err(error) = device.set_grabbed(true) {
-                            tracing::warn!(
-                                "level=warn event=evdev_device_grab_failed path={} error={}",
-                                path.display(),
-                                error
-                            );
-                            continue;
-                        }
+        self.skipped_paths
+            .retain(|path| discovered.contains(path) && !active_paths.contains(path));
+    }
+
+    fn add_or_reopen_device(&mut self, path: PathBuf) {
+        if self
+            .devices
+            .iter()
+            .any(|device| device.path == path && device.active)
+        {
+            self.skipped_paths.remove(&path);
+            return;
+        }
+        match EvdevDevice::open(path.clone()) {
+            Ok(mut device) => {
+                if self.grabbed && self.mode == InputProviderMode::Grab && device.pointer_capable {
+                    if let Err(error) = device.set_grabbed(true) {
+                        tracing::warn!(
+                            "level=warn event=evdev_device_grab_failed path={} error={}",
+                            path.display(),
+                            error
+                        );
+                        return;
                     }
+                }
+                self.skipped_paths.remove(&path);
+                if let Some(existing) = self
+                    .devices
+                    .iter_mut()
+                    .find(|existing| existing.path == path && !existing.active)
+                {
+                    tracing::info!(
+                        "level=info event=evdev_device_reopened path={}",
+                        path.display()
+                    );
+                    *existing = device;
+                } else {
                     tracing::info!(
                         "level=info event=evdev_device_added path={}",
                         path.display()
                     );
                     self.devices.push(device);
                 }
-                Err(error) => {
-                    if self.skipped_paths.insert(path.clone()) {
-                        tracing::warn!(
-                            "level=warn event=evdev_device_skipped path={} error={}",
-                            path.display(),
-                            error
-                        );
-                    }
+            }
+            Err(error) => {
+                if self.skipped_paths.insert(path.clone()) {
+                    tracing::warn!(
+                        "level=warn event=evdev_device_skipped path={} error={}",
+                        path.display(),
+                        error
+                    );
                 }
             }
         }
-        self.skipped_paths
-            .retain(|path| discovered.contains(path) && !known.contains(path));
     }
 
     fn wait_for_readable_device(
@@ -419,7 +460,11 @@ impl EvdevObservationProvider {
         }
         if should_rescan {
             self.last_rescan = Instant::now();
-            self.reconcile_discovered_devices(discover_event_devices()?);
+            if self.all_devices {
+                self.reconcile_discovered_devices(discover_event_devices()?);
+            } else {
+                self.rescan_configured_devices();
+            }
             device_or_hotplug = true;
         }
         Ok(if device_or_hotplug {
@@ -1039,6 +1084,28 @@ mod tests {
 
         assert!(!provider.skipped_paths.contains(&denied));
         assert_eq!(provider.device_count(), 2);
+    }
+
+    #[test]
+    fn explicit_configured_path_rescan_reopens_inactive_device() {
+        let path = temp_event_device("selected-reopen");
+        std::fs::write(&path, []).unwrap();
+        let mut provider =
+            EvdevObservationProvider::open([path.clone()], InputProviderMode::Observe, None, false)
+                .unwrap();
+        provider.devices[0].active = false;
+        std::fs::write(&path, input_event_bytes(EV_KEY, BTN_LEFT, 1)).unwrap();
+
+        provider.rescan_configured_devices();
+        let event = provider.next_observed_motion_event().unwrap().unwrap();
+
+        assert_eq!(provider.device_count(), 1);
+        assert_eq!(provider.active_device_count(), 1);
+        assert_eq!(event.source, path);
+        assert_eq!(
+            event.event,
+            MotionInputEvent::pressed(MotionToken::MouseButton(MouseButton::Left))
+        );
     }
 
     #[test]

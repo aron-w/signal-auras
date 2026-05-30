@@ -17,6 +17,7 @@ guide:
     @printf '\n%s\n' '# Run the CLI'
     @printf '%s\n' 'just run          # run the scoped poe2 example and wait for Ctrl-C'
     @printf '%s\n' 'just run-verbose  # run the scoped poe2 example with debug event logs'
+    @printf '%s\n' 'just input-doctor # check evdev/uinput access for a Lua script'
     @printf '%s\n' 'just unsafe-input-acl # temporarily grant this user evdev/uinput access'
     @printf '%s\n' 'just run-prompt   # run the scope-free example and exercise terminal consent'
     @printf '%s\n' 'just sigint-smoke # send SIGINT to the runner and verify final stats print'
@@ -65,6 +66,10 @@ run file="examples/poe2-hideout.lua":
 run-verbose file="examples/poe2-hideout.lua":
     @printf '%s\n' '# running scoped Lua example with verbose debug logs; press Ctrl-C to stop'
     nix develop -c cargo run -p signal-auras-cli -- run --verbose --color=always {{file}}
+
+# Check unsafe input permissions needed by a script without grabbing or emitting input.
+input-doctor file="examples/poe2-hideout.lua":
+    nix develop -c cargo run -p signal-auras-cli -- doctor input {{file}}
 
 # Temporarily grant the current user access to unsafe input devices for local testing.
 # These ACLs are reset by reboot, device replug, or udev permission changes.
