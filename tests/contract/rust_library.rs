@@ -4,9 +4,10 @@ use signal_auras_core::{
     CapabilitySet, CapabilityStatus, CompositeTrigger, DiagnosableError, ErrorPhase, HotkeyBinding,
     HotkeyRegistrar, InputEmission, LuaAutomationConfiguration, MacroAction, MacroDefinition,
     MacroExecutor, ModifierSet, MotionDefinition, MotionTrigger, MouseTrigger, ProcessName,
-    RegistrationId, RuntimeStats, ShortcutRegistrationState, SynthesizedInputRequest,
-    WheelDirection,
+    RegistrationId, RuntimeStats, ScopeDenialKind, ShortcutRegistrationState,
+    SynthesizedInputRequest, WheelDirection, DEFAULT_FOCUS_STALE_THRESHOLD,
 };
+use std::time::{Duration, Instant};
 
 struct FailingRegistrar;
 
@@ -213,6 +214,127 @@ fn active_process_context_denies_ambiguous_unavailable_and_denied_metadata() {
         signal_auras_core::ScopeDecision::Allowed
     );
     assert_eq!(allowed.confidence, ActiveProcessConfidence::NameOnly);
+}
+
+#[test]
+fn focus_freshness_uses_default_two_second_boundary() {
+    let scope =
+        signal_auras_core::ScopeSelection::process_list(vec![
+            ProcessName::parse("poe2.exe").unwrap()
+        ])
+        .unwrap();
+    let now = Instant::now();
+    let base = ActiveProcessContext::name_only(ProcessName::parse("poe2.exe").unwrap());
+
+    let mut below = base.clone();
+    below.captured_at = now - DEFAULT_FOCUS_STALE_THRESHOLD + Duration::from_millis(1);
+    assert_eq!(
+        scope.decide_context_at(&below, now),
+        signal_auras_core::ScopeDecision::Allowed
+    );
+
+    let mut exactly = base.clone();
+    exactly.captured_at = now - DEFAULT_FOCUS_STALE_THRESHOLD;
+    assert_eq!(
+        scope.decide_context_at(&exactly, now),
+        signal_auras_core::ScopeDecision::Allowed
+    );
+
+    let mut above = base;
+    above.captured_at = now - DEFAULT_FOCUS_STALE_THRESHOLD - Duration::from_millis(1);
+    let signal_auras_core::ScopeDecision::Denied { diagnostic, .. } =
+        scope.decide_context_at(&above, now)
+    else {
+        panic!("stale focus metadata should deny the process-scoped binding");
+    };
+    assert_eq!(diagnostic.kind, ScopeDenialKind::StaleFocus);
+    assert_eq!(
+        diagnostic.metadata_age,
+        Some(DEFAULT_FOCUS_STALE_THRESHOLD + Duration::from_millis(1))
+    );
+    assert_eq!(
+        diagnostic.stale_threshold,
+        Some(DEFAULT_FOCUS_STALE_THRESHOLD)
+    );
+}
+
+#[test]
+fn focus_metadata_failures_are_distinct_and_recover_on_fresh_match() {
+    let scope =
+        signal_auras_core::ScopeSelection::process_list(vec![
+            ProcessName::parse("poe2.exe").unwrap()
+        ])
+        .unwrap();
+    let now = Instant::now();
+
+    let cases = [
+        (
+            ActiveProcessContext::unavailable("missing metadata"),
+            ScopeDenialKind::FocusUnavailable,
+        ),
+        (
+            ActiveProcessContext::denied("permission denied"),
+            ScopeDenialKind::FocusPermissionDenied,
+        ),
+        (
+            ActiveProcessContext::ambiguous("multiple candidates"),
+            ScopeDenialKind::AmbiguousFocus,
+        ),
+    ];
+
+    for (mut context, expected) in cases {
+        context.captured_at = now;
+        let signal_auras_core::ScopeDecision::Denied { diagnostic, .. } =
+            scope.decide_context_at(&context, now)
+        else {
+            panic!("untrusted focus metadata should deny");
+        };
+        assert_eq!(diagnostic.kind, expected);
+        assert!(diagnostic.counts_as_metadata_unavailable());
+    }
+
+    let mut future = ActiveProcessContext::name_only(ProcessName::parse("poe2.exe").unwrap());
+    future.captured_at = now + Duration::from_millis(1);
+    let signal_auras_core::ScopeDecision::Denied { diagnostic, .. } =
+        scope.decide_context_at(&future, now)
+    else {
+        panic!("unordered focus metadata timestamp should deny");
+    };
+    assert_eq!(diagnostic.kind, ScopeDenialKind::UntrustedFocusTimestamp);
+
+    let mut recovered = ActiveProcessContext::name_only(ProcessName::parse("poe2.exe").unwrap());
+    recovered.captured_at = now;
+    assert_eq!(
+        scope.decide_context_at(&recovered, now),
+        signal_auras_core::ScopeDecision::Allowed
+    );
+}
+
+#[test]
+fn focus_denial_diagnostics_are_classified_and_privacy_bounded() {
+    let scope =
+        signal_auras_core::ScopeSelection::process_list(vec![ProcessName::parse("kate").unwrap()])
+            .unwrap();
+    let now = Instant::now();
+    let mut stale = ActiveProcessContext::name_only(ProcessName::parse("kate").unwrap());
+    stale.captured_at = now - Duration::from_millis(2_001);
+
+    let signal_auras_core::ScopeDecision::Denied { diagnostic, reason } =
+        scope.decide_context_at(&stale, now)
+    else {
+        panic!("stale metadata should deny");
+    };
+
+    assert_eq!(diagnostic.kind, ScopeDenialKind::StaleFocus);
+    assert!(reason.contains("stale"));
+    let fields = diagnostic.render_fields();
+    assert!(fields.contains("denial_reason=stale_focus"));
+    assert!(fields.contains("configured_rule=processes:kate"));
+    assert!(fields.contains("metadata_age_ms=2001"));
+    assert!(fields.contains("stale_threshold_ms=2000"));
+    assert!(!fields.contains("--private-arg"));
+    assert!(!fields.contains("window_title"));
+    assert!(!fields.contains("unrelated"));
 }
 
 #[test]

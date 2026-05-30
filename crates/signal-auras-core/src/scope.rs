@@ -1,6 +1,8 @@
 use crate::{AdapterDiagnostic, DiagnosableError, ErrorPhase};
 use std::time::{Duration, Instant};
 
+pub const DEFAULT_FOCUS_STALE_THRESHOLD: Duration = Duration::from_secs(2);
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProcessName(String);
 
@@ -47,7 +49,114 @@ pub enum ScopeSelection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScopeDecision {
     Allowed,
-    Denied { reason: String },
+    Denied {
+        reason: String,
+        diagnostic: ScopeDenial,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FocusFreshnessPolicy {
+    pub stale_threshold: Duration,
+}
+
+impl Default for FocusFreshnessPolicy {
+    fn default() -> Self {
+        Self {
+            stale_threshold: DEFAULT_FOCUS_STALE_THRESHOLD,
+        }
+    }
+}
+
+impl FocusFreshnessPolicy {
+    pub fn new(stale_threshold: Duration) -> Self {
+        Self { stale_threshold }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusFreshness {
+    Fresh { age: Duration },
+    Stale { age: Duration, threshold: Duration },
+    UntrustedTimestamp { threshold: Duration },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeDenialKind {
+    StaleFocus,
+    FocusUnavailable,
+    FocusPermissionDenied,
+    AmbiguousFocus,
+    UntrustedFocusTimestamp,
+    ProcessMismatch,
+}
+
+impl ScopeDenialKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StaleFocus => "stale_focus",
+            Self::FocusUnavailable => "focus_unavailable",
+            Self::FocusPermissionDenied => "focus_permission_denied",
+            Self::AmbiguousFocus => "ambiguous_focus",
+            Self::UntrustedFocusTimestamp => "untrusted_focus_timestamp",
+            Self::ProcessMismatch => "process_mismatch",
+        }
+    }
+
+    pub fn counts_as_metadata_unavailable(self) -> bool {
+        matches!(
+            self,
+            Self::StaleFocus
+                | Self::FocusUnavailable
+                | Self::FocusPermissionDenied
+                | Self::AmbiguousFocus
+                | Self::UntrustedFocusTimestamp
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeDenial {
+    pub kind: ScopeDenialKind,
+    pub rule: String,
+    pub metadata_age: Option<Duration>,
+    pub stale_threshold: Option<Duration>,
+}
+
+impl ScopeDenial {
+    fn new(kind: ScopeDenialKind, rule: String) -> Self {
+        Self {
+            kind,
+            rule,
+            metadata_age: None,
+            stale_threshold: None,
+        }
+    }
+
+    fn with_freshness(mut self, age: Option<Duration>, threshold: Duration) -> Self {
+        self.metadata_age = age;
+        self.stale_threshold = Some(threshold);
+        self
+    }
+
+    pub fn counts_as_metadata_unavailable(&self) -> bool {
+        self.kind.counts_as_metadata_unavailable()
+    }
+
+    pub fn render_fields(&self) -> String {
+        let mut fields = format!(
+            "denial_reason={} configured_rule={}",
+            self.kind.as_str(),
+            sanitize_diagnostic_value(&self.rule)
+        );
+        if let Some(age) = self.metadata_age {
+            fields.push_str(&format!(" metadata_age_ms={}", age.as_millis()));
+        }
+        if let Some(threshold) = self.stale_threshold {
+            fields.push_str(&format!(" stale_threshold_ms={}", threshold.as_millis()));
+        }
+        fields
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,7 +247,26 @@ impl ActiveProcessContext {
     }
 
     pub fn is_stale(&self, max_age: Duration) -> bool {
-        self.captured_at.elapsed() > max_age
+        matches!(
+            self.freshness_at(Instant::now(), FocusFreshnessPolicy::new(max_age)),
+            FocusFreshness::Stale { .. }
+        )
+    }
+
+    pub fn freshness_at(&self, now: Instant, policy: FocusFreshnessPolicy) -> FocusFreshness {
+        let Some(age) = now.checked_duration_since(self.captured_at) else {
+            return FocusFreshness::UntrustedTimestamp {
+                threshold: policy.stale_threshold,
+            };
+        };
+        if age > policy.stale_threshold {
+            FocusFreshness::Stale {
+                age,
+                threshold: policy.stale_threshold,
+            }
+        } else {
+            FocusFreshness::Fresh { age }
+        }
     }
 
     pub fn with_app_id(mut self, app_id: impl Into<String>) -> Self {
@@ -198,38 +326,82 @@ impl ScopeSelection {
                 Some(active) if processes.iter().any(|allowed| allowed == active) => {
                     ScopeDecision::Allowed
                 }
-                Some(active) => ScopeDecision::Denied {
-                    reason: format!(
+                Some(active) => self.denied(
+                    ScopeDenialKind::ProcessMismatch,
+                    format!(
                         "active process '{}' is outside configured scope",
                         active.as_str()
                     ),
-                },
-                None => ScopeDecision::Denied {
-                    reason: "active process is unavailable".to_string(),
-                },
+                ),
+                None => self.denied(
+                    ScopeDenialKind::FocusUnavailable,
+                    "active process is unavailable".to_string(),
+                ),
             },
         }
     }
 
     pub fn decide_context(&self, active_context: &ActiveProcessContext) -> ScopeDecision {
+        self.decide_context_with_policy(active_context, FocusFreshnessPolicy::default())
+    }
+
+    pub fn decide_context_at(
+        &self,
+        active_context: &ActiveProcessContext,
+        now: Instant,
+    ) -> ScopeDecision {
+        self.decide_context_at_with_policy(active_context, now, FocusFreshnessPolicy::default())
+    }
+
+    pub fn decide_context_with_policy(
+        &self,
+        active_context: &ActiveProcessContext,
+        policy: FocusFreshnessPolicy,
+    ) -> ScopeDecision {
+        self.decide_context_at_with_policy(active_context, Instant::now(), policy)
+    }
+
+    pub fn decide_context_at_with_policy(
+        &self,
+        active_context: &ActiveProcessContext,
+        now: Instant,
+        policy: FocusFreshnessPolicy,
+    ) -> ScopeDecision {
         if matches!(self, Self::ExplicitGlobal) {
             return ScopeDecision::Allowed;
         }
-        if active_context.is_stale(Duration::from_secs(2)) {
-            return ScopeDecision::Denied {
-                reason: "active process metadata is stale".to_string(),
-            };
+        match active_context.freshness_at(now, policy) {
+            FocusFreshness::Fresh { .. } => {}
+            FocusFreshness::Stale { age, threshold } => {
+                return self.denied_with_freshness(
+                    ScopeDenialKind::StaleFocus,
+                    "active process metadata is stale".to_string(),
+                    Some(age),
+                    threshold,
+                );
+            }
+            FocusFreshness::UntrustedTimestamp { threshold } => {
+                return self.denied_with_freshness(
+                    ScopeDenialKind::UntrustedFocusTimestamp,
+                    "active process metadata timestamp is untrusted".to_string(),
+                    None,
+                    threshold,
+                );
+            }
         }
         match active_context.confidence {
-            ActiveProcessConfidence::Ambiguous => ScopeDecision::Denied {
-                reason: "active process metadata is ambiguous".to_string(),
-            },
-            ActiveProcessConfidence::Unavailable => ScopeDecision::Denied {
-                reason: "active process metadata is unavailable".to_string(),
-            },
-            ActiveProcessConfidence::Denied => ScopeDecision::Denied {
-                reason: "active process metadata permission was denied".to_string(),
-            },
+            ActiveProcessConfidence::Ambiguous => self.denied(
+                ScopeDenialKind::AmbiguousFocus,
+                "active process metadata is ambiguous".to_string(),
+            ),
+            ActiveProcessConfidence::Unavailable => self.denied(
+                ScopeDenialKind::FocusUnavailable,
+                "active process metadata is unavailable".to_string(),
+            ),
+            ActiveProcessConfidence::Denied => self.denied(
+                ScopeDenialKind::FocusPermissionDenied,
+                "active process metadata permission was denied".to_string(),
+            ),
             ActiveProcessConfidence::Exact | ActiveProcessConfidence::NameOnly => {
                 self.decide(active_context.matchable_name())
             }
@@ -249,6 +421,48 @@ impl ScopeSelection {
             ),
         }
     }
+
+    fn denied(&self, kind: ScopeDenialKind, reason: String) -> ScopeDecision {
+        ScopeDecision::Denied {
+            reason,
+            diagnostic: ScopeDenial::new(kind, self.diagnostic_rule()),
+        }
+    }
+
+    fn denied_with_freshness(
+        &self,
+        kind: ScopeDenialKind,
+        reason: String,
+        age: Option<Duration>,
+        threshold: Duration,
+    ) -> ScopeDecision {
+        ScopeDecision::Denied {
+            reason,
+            diagnostic: ScopeDenial::new(kind, self.diagnostic_rule())
+                .with_freshness(age, threshold),
+        }
+    }
+
+    fn diagnostic_rule(&self) -> String {
+        match self {
+            Self::ExplicitGlobal => "global".to_string(),
+            Self::ProcessList { processes } => format!(
+                "processes:{}",
+                processes
+                    .iter()
+                    .map(ProcessName::as_str)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        }
+    }
+}
+
+fn sanitize_diagnostic_value(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_ascii_graphic() { ch } else { '_' })
+        .collect()
 }
 
 #[cfg(test)]

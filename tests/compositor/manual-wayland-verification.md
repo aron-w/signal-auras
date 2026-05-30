@@ -78,6 +78,8 @@ Record before the run:
 5. Confirm the runner logs a non-match and emits no macro input.
 6. Repeat on a privileged or compositor-owned surface such as a lock screen or launcher when practical and confirm it is treated as unavailable or ambiguous.
 7. Invalidate or deny the metadata path when practical and confirm startup or event handling fails closed with a KWin diagnostic.
+8. When practical, delay or interrupt active-process metadata updates during a focus change and confirm the trigger is denied with `denial_reason=stale_focus` or `denial_reason=focus_unavailable`.
+9. Confirm stale-focus diagnostics include `configured_rule`, `metadata_age_ms`, and `stale_threshold_ms=2000`, and do not include command-line arguments or window title text.
 
 ## Synthesized Input Verification
 

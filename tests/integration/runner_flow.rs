@@ -11,7 +11,7 @@ use signal_auras_core::{
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 struct Active(Option<ProcessName>);
 
@@ -19,6 +19,22 @@ impl ActiveProcessProvider for Active {
     fn active_process_name(
         &self,
     ) -> Result<Option<ProcessName>, signal_auras_core::DiagnosableError> {
+        Ok(self.0.clone())
+    }
+}
+
+struct ActiveContext(signal_auras_core::ActiveProcessContext);
+
+impl ActiveProcessProvider for ActiveContext {
+    fn active_process_name(
+        &self,
+    ) -> Result<Option<ProcessName>, signal_auras_core::DiagnosableError> {
+        Ok(self.0.visible_name.clone())
+    }
+
+    fn active_process_context(
+        &self,
+    ) -> Result<signal_auras_core::ActiveProcessContext, signal_auras_core::DiagnosableError> {
         Ok(self.0.clone())
     }
 }
@@ -79,6 +95,82 @@ fn scoped_trigger_executes_only_for_matching_process() {
     .unwrap();
     assert_eq!(executor.actions, 1);
     assert_eq!(stats.scope_mismatch_count, 1);
+}
+
+#[test]
+fn stale_focus_metadata_denies_before_macro_emission() {
+    let binding = HotkeyBinding {
+        trigger: signal_auras_core::BindingTrigger::keyboard(HotkeyId::parse("F5").unwrap()),
+        mode: signal_auras_core::BindingMode::Consume,
+        scope: ScopeSelection::process_list(vec![ProcessName::parse("poe2.exe").unwrap()]).unwrap(),
+        macro_definition: MacroDefinition::new(vec![MacroAction::text("/hideout").unwrap()])
+            .unwrap(),
+        registration_state: RegistrationState::Registered,
+    };
+    let mut stale =
+        signal_auras_core::ActiveProcessContext::name_only(ProcessName::parse("poe2.exe").unwrap());
+    stale.captured_at = Instant::now()
+        - signal_auras_core::DEFAULT_FOCUS_STALE_THRESHOLD
+        - Duration::from_millis(1);
+    let mut executor = Executor::default();
+    let mut stats = RuntimeStats::new();
+    let mut scheduler = MacroScheduler::default();
+
+    handle_trigger(
+        &binding,
+        &ActiveContext(stale),
+        &mut executor,
+        &mut scheduler,
+        &mut stats,
+    )
+    .unwrap();
+
+    assert_eq!(executor.actions, 0);
+    assert_eq!(stats.denied_action_count, 1);
+    assert_eq!(stats.metadata_unavailable_count, 1);
+    assert_eq!(stats.scope_mismatch_count, 1);
+}
+
+#[test]
+fn focus_metadata_recovery_allows_next_matching_trigger() {
+    let binding = HotkeyBinding {
+        trigger: signal_auras_core::BindingTrigger::keyboard(HotkeyId::parse("F5").unwrap()),
+        mode: signal_auras_core::BindingMode::Consume,
+        scope: ScopeSelection::process_list(vec![ProcessName::parse("poe2.exe").unwrap()]).unwrap(),
+        macro_definition: MacroDefinition::new(vec![MacroAction::text("/hideout").unwrap()])
+            .unwrap(),
+        registration_state: RegistrationState::Registered,
+    };
+    let mut executor = Executor::default();
+    let mut stats = RuntimeStats::new();
+    let mut scheduler = MacroScheduler::default();
+
+    handle_trigger(
+        &binding,
+        &ActiveContext(signal_auras_core::ActiveProcessContext::unavailable(
+            "metadata delayed",
+        )),
+        &mut executor,
+        &mut scheduler,
+        &mut stats,
+    )
+    .unwrap();
+    assert_eq!(executor.actions, 0);
+
+    handle_trigger(
+        &binding,
+        &ActiveContext(signal_auras_core::ActiveProcessContext::name_only(
+            ProcessName::parse("poe2.exe").unwrap(),
+        )),
+        &mut executor,
+        &mut scheduler,
+        &mut stats,
+    )
+    .unwrap();
+
+    assert_eq!(executor.actions, 1);
+    assert_eq!(stats.denied_action_count, 1);
+    assert_eq!(stats.active_process_match_count, 1);
 }
 
 #[test]
