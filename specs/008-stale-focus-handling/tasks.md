@@ -82,6 +82,18 @@
 - [x] T018 Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, and `nix flake check` or document limitations
 - [x] T019 Mark completed tasks in `specs/008-stale-focus-handling/tasks.md`
 
+## Phase 7: Architecture Review Follow-Up
+
+**Goal**: Close the live KDE bridge gap where reading cached active-process state refreshed `captured_at` and made stale matching focus metadata look fresh forever.
+
+**Independent Test**: A cached KDE active-process snapshot for a matching process keeps its original callback timestamp, becomes stale without a new callback, and denies a process-scoped macro before scheduling or input emission.
+
+- [x] T020 [P] [US1] Add cached KDE focus timestamp regression coverage in `crates/signal-auras-wayland/src/kde_bridge.rs`
+- [x] T021 [US1] Preserve original callback receipt timestamps when constructing KDE active-process contexts in `crates/signal-auras-wayland/src/kde_bridge.rs`
+- [x] T022 [US1] Stop `active_process_context()` reads from refreshing cached KDE focus freshness in `crates/signal-auras-wayland/src/kde_bridge.rs`
+- [x] T023 [US1] Run focused KDE bridge and stale-focus tests with `cargo test -p signal-auras-wayland kde_bridge` and related contract/integration tests
+- [x] T024 [US1] Mark the architecture review follow-up tasks complete in `specs/008-stale-focus-handling/tasks.md`
+
 ## Dependencies & Execution Order
 
 - Setup before foundational work.

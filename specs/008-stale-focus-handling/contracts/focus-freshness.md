@@ -22,6 +22,12 @@ The core scope API evaluates process-aware bindings from a configured scope, an 
 - ambiguous or untrusted focus metadata
 - process mismatch
 
+## Timestamp Rules
+
+- `ActiveProcessContext.captured_at` represents when the compositor/KWin callback was received and converted into a focus snapshot.
+- Reading cached focus state from the live KDE bridge must return the cached timestamp unchanged.
+- A cached matching process snapshot must become stale and deny process-scoped matching if no newer focus callback refreshes the cache before the stale threshold.
+
 ## Privacy Rules
 
 Diagnostics may include configured process names, denial kind, metadata age, and stale threshold. Diagnostics must not include command-line arguments, window titles, unrelated process names, or unconfigured process details beyond the already consented active process name used for a mismatch reason.

@@ -269,9 +269,7 @@ impl KwinShortcutBridge {
     }
 
     pub fn active_process_context(&self) -> ActiveProcessContext {
-        let mut context = self.active_process.clone();
-        context.captured_at = Instant::now();
-        context
+        cached_active_process_context(&self.active_process)
     }
 
     pub fn unload(&mut self) -> Result<CleanupReport, DiagnosableError> {
@@ -391,15 +389,17 @@ fn spawn_kwin_callback_listener(
                 let _ = connection.reply(&header, &());
                 continue;
             };
+            let received_at = Instant::now();
             let event = KwinBridgeEvent {
                 action_name,
-                active_process: kwin_callback_context(
+                active_process: kwin_callback_context_at(
                     visible_name,
                     app_id,
                     window_class,
                     pid.parse::<u32>().unwrap_or_default(),
+                    received_at,
                 ),
-                received_at: Instant::now(),
+                received_at,
             };
             if let Ok(mut queue) = queue.lock() {
                 queue.push(event);
@@ -411,11 +411,16 @@ fn spawn_kwin_callback_listener(
     Ok(())
 }
 
-fn kwin_callback_context(
+fn cached_active_process_context(active_process: &ActiveProcessContext) -> ActiveProcessContext {
+    active_process.clone()
+}
+
+fn kwin_callback_context_at(
     visible_name: String,
     app_id: String,
     window_class: String,
     pid: u32,
+    captured_at: Instant,
 ) -> ActiveProcessContext {
     let matchable_name = first_non_empty([
         app_id.as_str(),
@@ -423,10 +428,16 @@ fn kwin_callback_context(
         visible_name.as_str(),
     ]);
     let Some(matchable_name) = matchable_name else {
-        return ActiveProcessContext::unavailable("KDE active window metadata is unavailable");
+        let mut context =
+            ActiveProcessContext::unavailable("KDE active window metadata is unavailable");
+        context.captured_at = captured_at;
+        return context;
     };
     let Ok(process_name) = ProcessName::parse(matchable_name) else {
-        return ActiveProcessContext::unavailable("KDE active window metadata is invalid");
+        let mut context =
+            ActiveProcessContext::unavailable("KDE active window metadata is invalid");
+        context.captured_at = captured_at;
+        return context;
     };
     let mut context = if pid > 0 || !app_id.is_empty() {
         ActiveProcessContext::exact(process_name, (pid > 0).then_some(pid))
@@ -439,6 +450,7 @@ fn kwin_callback_context(
     if !window_class.is_empty() {
         context = context.with_window_class(window_class);
     }
+    context.captured_at = captured_at;
     context
 }
 
@@ -579,6 +591,42 @@ mod tests {
         assert!(queue.pop_front().is_none());
         assert_eq!(queue.take_dropped_count(), 2);
         assert_eq!(queue.take_dropped_count(), 0);
+    }
+
+    #[test]
+    fn cached_active_process_context_preserves_callback_timestamp_until_stale() {
+        let captured_at = Instant::now()
+            - signal_auras_core::DEFAULT_FOCUS_STALE_THRESHOLD
+            - std::time::Duration::from_millis(1);
+        let context = kwin_callback_context_at(
+            "kate".to_string(),
+            String::new(),
+            String::new(),
+            0,
+            captured_at,
+        );
+
+        let cached = cached_active_process_context(&context);
+
+        assert_eq!(cached.captured_at, captured_at);
+        assert_eq!(cached.matchable_name().unwrap().as_str(), "kate");
+
+        let scope =
+            signal_auras_core::ScopeSelection::process_list(vec![
+                ProcessName::parse("kate").unwrap()
+            ])
+            .unwrap();
+        let signal_auras_core::ScopeDecision::Denied { diagnostic, .. } =
+            scope.decide_context(&cached)
+        else {
+            panic!(
+                "cached matching focus must deny after the original callback timestamp is stale"
+            );
+        };
+        assert_eq!(
+            diagnostic.kind,
+            signal_auras_core::ScopeDenialKind::StaleFocus
+        );
     }
 
     fn event(action_name: &str) -> KwinBridgeEvent {

@@ -6,7 +6,7 @@
 
 ## Summary
 
-Make process-aware macro matching fail closed when focused-process metadata is stale, missing, denied, or otherwise untrusted. The implementation keeps the Lua configuration API unchanged, adds a small Rust freshness and denial model around existing active-process contexts, uses the existing KDE/Wayland provider boundary, and improves diagnostics so stale denials identify the configured rule, age, threshold, and reason without logging private command-line or window text.
+Make process-aware macro matching fail closed when focused-process metadata is stale, missing, denied, or otherwise untrusted. The implementation keeps the Lua configuration API unchanged, adds a small Rust freshness and denial model around existing active-process contexts, preserves the original KDE/KWin callback receipt timestamp in the live bridge cache, uses the existing KDE/Wayland provider boundary, and improves diagnostics so stale denials identify the configured rule, age, threshold, and reason without logging private command-line or window text.
 
 ## Technical Context
 
@@ -16,7 +16,7 @@ Make process-aware macro matching fail closed when focused-process metadata is s
 
 **Storage**: Repository files only. No persistent focus cache, daemon state, IPC state, or background metadata store.
 
-**Testing**: `nix develop -c cargo fmt --check`, `nix develop -c cargo clippy --all-targets -- -D warnings`, `nix develop -c cargo test`, and `nix flake check` when feasible. Automated tests cover freshness boundary behavior, unavailable/denied metadata, recovery after fresh metadata arrives, no macro emission on denial, and diagnostic classification.
+**Testing**: `nix develop -c cargo fmt --check`, `nix develop -c cargo clippy --all-targets -- -D warnings`, `nix develop -c cargo test`, and `nix flake check` when feasible. Automated tests cover freshness boundary behavior, unavailable/denied metadata, recovery after fresh metadata arrives, no macro emission on denial, live KDE cached-focus timestamp preservation, cached matching metadata becoming stale without a new callback, and diagnostic classification.
 
 **Target Platform**: NixOS/Linux/KDE Plasma Wayland with existing explicit current-run consent for process metadata and synthesized input.
 
@@ -24,7 +24,7 @@ Make process-aware macro matching fail closed when focused-process metadata is s
 
 **Performance Goals**: Scope evaluation remains an in-memory constant-time check for each trigger. No new blocking compositor query is added to the hot path.
 
-**Constraints**: Preserve Lua process-scope syntax, default stale threshold of 2 seconds, explicit current-run process inspection consent, fail-closed behavior for unavailable compositor metadata, privacy-bounded diagnostics, and no hidden global behavior.
+**Constraints**: Preserve Lua process-scope syntax, default stale threshold of 2 seconds, explicit current-run process inspection consent, fail-closed behavior for unavailable compositor metadata, privacy-bounded diagnostics, and no hidden global behavior. Reading cached focus state must be side-effect free for freshness.
 
 **Scale/Scope**: One terminal-started runner process, one current focus snapshot at a time from the existing KDE active-window bridge, process-scoped hotkeys and motions, and existing verbose diagnostics.
 
@@ -83,7 +83,7 @@ tests/integration/
 └── runner_flow.rs
 ```
 
-**Structure Decision**: Keep freshness and privacy-preserving denial classification in `signal-auras-core::scope`, keep provider timestamp creation inside existing Wayland adapter contexts, and keep CLI changes limited to logging/metrics and no-emission behavior.
+**Structure Decision**: Keep freshness and privacy-preserving denial classification in `signal-auras-core::scope`, keep provider timestamp creation inside existing Wayland adapter contexts, preserve live KDE bridge callback timestamps in `signal-auras-wayland::kde_bridge`, and keep CLI changes limited to logging/metrics and no-emission behavior.
 
 ## Complexity Tracking
 

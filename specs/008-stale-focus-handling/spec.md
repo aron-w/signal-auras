@@ -23,6 +23,7 @@ A user binds a macro to a specific focused process and expects the macro to run 
 1. **Given** a process-scoped macro and fresh focused-process metadata that matches its rule, **When** the user triggers the binding, **Then** the macro is allowed to proceed under the existing consent boundary.
 2. **Given** the last focused-process metadata is older than the stale threshold, **When** the user triggers a process-scoped binding, **Then** the binding is denied and no macro action is emitted.
 3. **Given** stale metadata still names the previously focused allowed process, **When** another application has focus but no fresh metadata has arrived, **Then** the stale process name is not trusted and the process-scoped macro is denied.
+4. **Given** the live KDE bridge has cached a matching active-process snapshot from a compositor callback, **When** that cached state is read later without a new focus callback, **Then** the snapshot keeps the original callback timestamp and becomes stale according to the configured threshold.
 
 ---
 
@@ -62,6 +63,8 @@ An operator debugging a missed process-aware binding needs to know whether the d
 - Global bindings without process rules remain governed by their own input and macro consent requirements and are not denied solely because focused-process metadata is stale.
 - Metadata that arrives after a denied trigger does not retroactively allow the denied macro.
 - Focus metadata that moves backward in time, lacks a timestamp, or cannot be ordered against the runtime clock is treated as unknown.
+- Reading cached focus state from the live KDE bridge does not refresh `captured_at` or otherwise extend metadata freshness.
+- Cached matching KDE focus metadata becomes stale and denies process-scoped macros if no new compositor callback arrives before the stale threshold.
 - Permission revocation, unsupported compositor behavior, and missing process metadata fail closed for process-scoped bindings.
 - Diagnostics avoid logging private command-line arguments, window text, or unrelated process data.
 
@@ -81,6 +84,10 @@ An operator debugging a missed process-aware binding needs to know whether the d
 - **FR-010**: System MUST keep process inspection explicit, visible in configuration, least-privilege, current-run scoped, and revocable.
 - **FR-011**: System MUST fail closed with a diagnosable denial when compositor support or process metadata permission is unavailable.
 - **FR-012**: System MUST include automated coverage for fresh allow, stale deny, unavailable metadata, delayed recovery, threshold boundary, and diagnostic classification behavior.
+- **FR-013**: System MUST ensure active-process timestamps represent the original compositor/KWin callback receipt time used to create the focus snapshot.
+- **FR-014**: System MUST NOT refresh active-process metadata freshness when cached focus state is read by the runner.
+- **FR-015**: System MUST fail closed for process-scoped macros once cached KDE focus metadata exceeds the stale threshold, even when the cached process name still matches the configured rule.
+- **FR-016**: System MUST include a regression test where a cached matching KDE process snapshot becomes stale without any new focus callback and denies macro execution.
 
 ### Key Entities
 
@@ -101,6 +108,7 @@ An operator debugging a missed process-aware binding needs to know whether the d
 - **SC-006**: Privacy checks confirm stale-focus diagnostics do not include private command-line arguments, window text, or unrelated process data.
 - **SC-007**: Existing process-aware Lua examples and configurations continue to load without migration.
 - **SC-008**: Feature verification passes with documented Nix commands or records unavailable Nix checks with the exact failure.
+- **SC-009**: Live KDE bridge regression coverage proves repeated reads of cached focus state preserve the original timestamp and do not keep matching process metadata fresh forever.
 
 ## Assumptions
 
@@ -108,3 +116,4 @@ An operator debugging a missed process-aware binding needs to know whether the d
 - The focused-process metadata source may be delayed or temporarily unavailable during normal desktop operation.
 - Process-aware bindings are the only bindings affected by stale focus metadata; bindings without process rules keep their existing behavior.
 - The stale threshold remains a runtime policy with a 2-second default and no Lua API change in this feature.
+- When KWin does not provide a separate monotonic event timestamp, the bridge's callback receipt instant is the focus snapshot timestamp; later reads must preserve that instant.
