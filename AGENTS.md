@@ -4,4 +4,6 @@ For additional context about technologies to be used, project structure,
 shell commands, and other important information, read `specs/006-input-performance/plan.md`.
 For the runtime event-loop performance follow-up, also read
 `specs/007-runtime-event-loop-performance/plan.md`.
+For the stale focus handling follow-up, also read
+`specs/008-stale-focus-handling/plan.md`.
 <!-- SPECKIT END -->

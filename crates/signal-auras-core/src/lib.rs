@@ -32,8 +32,9 @@ pub use motion::{
     MotionRuntimeEvent, MotionToken, MotionTrigger, RepeatDefinition, RepeatInterval,
 };
 pub use scope::{
-    ActiveProcessConfidence, ActiveProcessContext, ProcessName, ScopeDecision, ScopeSelection,
-    ScriptScope,
+    ActiveProcessConfidence, ActiveProcessContext, FocusFreshness, FocusFreshnessPolicy,
+    ProcessName, ScopeDecision, ScopeDenial, ScopeDenialKind, ScopeSelection, ScriptScope,
+    DEFAULT_FOCUS_STALE_THRESHOLD,
 };
 pub use stats::{RuntimeStats, ShutdownReason};
 

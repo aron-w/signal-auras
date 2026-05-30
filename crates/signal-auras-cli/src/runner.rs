@@ -1319,14 +1319,13 @@ fn schedule_live_binding(
             stats.record_active_process_match();
             macro_queue.schedule(trigger_label, &binding.macro_definition, 0, stats)?;
         }
-        ScopeDecision::Denied { reason } => {
-            stats.denied_action_count += 1;
-            stats.scope_mismatch_count += 1;
-            stats.record_active_process_non_match();
-            if active_context.matchable_name().is_none() {
-                stats.record_metadata_unavailable();
-            }
-            println!("denied_trigger hotkey={} reason={reason}", trigger_label);
+        ScopeDecision::Denied { reason, diagnostic } => {
+            record_scope_denial(stats, &diagnostic);
+            println!(
+                "denied_trigger hotkey={} reason={reason} {}",
+                trigger_label,
+                diagnostic.render_fields()
+            );
         }
     }
     Ok(())
@@ -1386,14 +1385,13 @@ fn schedule_live_motion_trigger(
                 )?;
             }
         }
-        ScopeDecision::Denied { reason } => {
-            stats.denied_action_count += 1;
-            stats.scope_mismatch_count += 1;
-            stats.record_active_process_non_match();
-            if active_context.matchable_name().is_none() {
-                stats.record_metadata_unavailable();
-            }
-            println!("denied_motion trigger={} reason={reason}", trigger_label);
+        ScopeDecision::Denied { reason, diagnostic } => {
+            record_scope_denial(stats, &diagnostic);
+            println!(
+                "denied_motion trigger={} reason={reason} {}",
+                trigger_label,
+                diagnostic.render_fields()
+            );
         }
     }
     Ok(())
@@ -1420,16 +1418,12 @@ fn schedule_live_motion_repeat_tick(
                 stats,
             )?;
         }
-        ScopeDecision::Denied { reason } => {
-            stats.denied_action_count += 1;
-            stats.scope_mismatch_count += 1;
-            stats.record_active_process_non_match();
-            if active_context.matchable_name().is_none() {
-                stats.record_metadata_unavailable();
-            }
+        ScopeDecision::Denied { reason, diagnostic } => {
+            record_scope_denial(stats, &diagnostic);
             println!(
-                "denied_motion_repeat trigger={} reason={reason}",
-                trigger_label
+                "denied_motion_repeat trigger={} reason={reason} {}",
+                trigger_label,
+                diagnostic.render_fields()
             );
         }
     }
@@ -1487,14 +1481,13 @@ where
                 }
             }
         }
-        ScopeDecision::Denied { reason } => {
-            stats.denied_action_count += 1;
-            stats.scope_mismatch_count += 1;
-            stats.record_active_process_non_match();
-            if active_context.matchable_name().is_none() {
-                stats.record_metadata_unavailable();
-            }
-            println!("denied_trigger hotkey={} reason={reason}", trigger_label);
+        ScopeDecision::Denied { reason, diagnostic } => {
+            record_scope_denial(stats, &diagnostic);
+            println!(
+                "denied_trigger hotkey={} reason={reason} {}",
+                trigger_label,
+                diagnostic.render_fields()
+            );
         }
     }
     Ok(())
@@ -1575,14 +1568,13 @@ where
                 )?;
             }
         }
-        ScopeDecision::Denied { reason } => {
-            stats.denied_action_count += 1;
-            stats.scope_mismatch_count += 1;
-            stats.record_active_process_non_match();
-            if active_context.matchable_name().is_none() {
-                stats.record_metadata_unavailable();
-            }
-            println!("denied_motion trigger={} reason={reason}", trigger_label);
+        ScopeDecision::Denied { reason, diagnostic } => {
+            record_scope_denial(stats, &diagnostic);
+            println!(
+                "denied_motion trigger={} reason={reason} {}",
+                trigger_label,
+                diagnostic.render_fields()
+            );
         }
     }
     Ok(())
@@ -1633,20 +1625,25 @@ where
                 stats,
             )?;
         }
-        ScopeDecision::Denied { reason } => {
-            stats.denied_action_count += 1;
-            stats.scope_mismatch_count += 1;
-            stats.record_active_process_non_match();
-            if active_context.matchable_name().is_none() {
-                stats.record_metadata_unavailable();
-            }
+        ScopeDecision::Denied { reason, diagnostic } => {
+            record_scope_denial(stats, &diagnostic);
             println!(
-                "denied_motion_repeat trigger={} reason={reason}",
-                trigger_label
+                "denied_motion_repeat trigger={} reason={reason} {}",
+                trigger_label,
+                diagnostic.render_fields()
             );
         }
     }
     Ok(())
+}
+
+fn record_scope_denial(stats: &mut RuntimeStats, diagnostic: &signal_auras_core::ScopeDenial) {
+    stats.denied_action_count += 1;
+    stats.scope_mismatch_count += 1;
+    stats.record_active_process_non_match();
+    if diagnostic.counts_as_metadata_unavailable() {
+        stats.record_metadata_unavailable();
+    }
 }
 
 fn execute_motion_macro<E>(

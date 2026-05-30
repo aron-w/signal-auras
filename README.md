@@ -46,6 +46,11 @@ verbose logs use `level=... event=... key=value` fields. Motion diagnostics
 include the source evdev path, dispatch latency, repeat trigger/cancel/tick
 events, and provider device counts so delayed or missed input can be traced
 without logging macro text payloads.
+Process-scope denials include a privacy-bounded reason such as
+`stale_focus`, `focus_unavailable`, `focus_permission_denied`, or
+`process_mismatch`; stale denials report the configured rule, metadata age, and
+2 second default freshness threshold without logging command-line arguments or
+window text.
 
 ## Consent Model
 
@@ -81,6 +86,11 @@ Select scope for this run:
 Process selection applies only to the current process. Global selection requires
 an explicit `GLOBAL` confirmation and is also current-run only. Cancel exits
 without registering hotkeys.
+For process-scoped bindings, focused-process metadata must be fresh. Metadata
+older than the 2 second default threshold, unavailable metadata, permission
+denial, ambiguous focus, or an untrusted timestamp denies the trigger before any
+macro action is emitted. Matching resumes automatically on the next trigger
+after fresh matching metadata is available.
 
 ## Lua API
 

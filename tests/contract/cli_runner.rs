@@ -5,13 +5,13 @@ use signal_auras_cli::runner::{
 };
 use signal_auras_core::{
     ActiveProcessProvider, ConsentDecision, DiagnosableError, ErrorPhase, HotkeyBinding,
-    HotkeyRegistrar, MacroAction, MacroExecutor, ProcessName, RegistrationId, ScopeSelection,
-    ShutdownReason,
+    HotkeyRegistrar, MacroAction, MacroExecutor, ProcessName, RegistrationId, ScopeDenialKind,
+    ScopeSelection, ShutdownReason,
 };
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use signal_auras_wayland::RealWaylandAdapter;
 
@@ -45,6 +45,27 @@ fn prompt_accepts_process_scope_for_current_run() {
     let output = String::from_utf8(output).unwrap();
     assert!(output.contains("No scope declared by script"));
     assert!(output.contains("Process names"));
+}
+
+#[test]
+fn stale_focus_denial_diagnostic_identifies_rule_age_and_threshold() {
+    let scope = ScopeSelection::process_list(vec![ProcessName::parse("kate").unwrap()]).unwrap();
+    let now = Instant::now();
+    let mut context =
+        signal_auras_core::ActiveProcessContext::name_only(ProcessName::parse("kate").unwrap());
+    context.captured_at = now - Duration::from_millis(2_050);
+
+    let signal_auras_core::ScopeDecision::Denied { diagnostic, .. } =
+        scope.decide_context_at(&context, now)
+    else {
+        panic!("stale metadata should deny");
+    };
+
+    assert_eq!(diagnostic.kind, ScopeDenialKind::StaleFocus);
+    let fields = diagnostic.render_fields();
+    assert!(fields.contains("configured_rule=processes:kate"));
+    assert!(fields.contains("metadata_age_ms=2050"));
+    assert!(fields.contains("stale_threshold_ms=2000"));
 }
 
 #[test]
