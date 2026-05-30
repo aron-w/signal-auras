@@ -120,3 +120,59 @@ fn lua_api_accepts_existing_repeat_motion_syntax_without_policy_migration() {
     assert_eq!(config.motions().len(), 1);
     assert!(config.motions().values().next().unwrap().repeat.is_some());
 }
+
+#[test]
+fn lua_api_accepts_expanded_keyboard_keys_on_trigger_surfaces() {
+    let config = load_lua_source(
+        r#"
+        return {
+          leader = "PageUp",
+          hotkeys = {
+            ["VolumeUp"] = macro { key "Enter" },
+          },
+          bindings = {
+            {
+              trigger = { key = "KPEnter" },
+              macro = macro { key "PageDown" },
+            },
+          },
+          motions = {
+            {
+              trigger = { "<Leader>", "Return" },
+              repeat = {
+                while_held = { "<Leader>", "Return" },
+                interval_ms = { min = 50, max = 80 },
+                macro = macro { key "Mute" },
+              },
+            },
+          },
+        }
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(config.leader.as_ref().unwrap().describe(), "PageUp");
+    assert_eq!(config.bindings().len(), 2);
+    assert_eq!(config.motions().len(), 1);
+    assert_eq!(
+        config.motions().keys().next().unwrap().describe(),
+        "<Leader> Enter"
+    );
+}
+
+#[test]
+fn lua_api_rejects_alias_equivalent_duplicate_keys() {
+    let error = load_lua_source(
+        r#"
+        return {
+          hotkeys = {
+            ["Return"] = macro { text "one" },
+            ["Enter"] = macro { text "two" },
+          },
+        }
+        "#,
+    )
+    .unwrap_err();
+
+    assert!(error.message.contains("duplicate binding trigger"));
+}

@@ -365,6 +365,18 @@ mod tests {
     }
 
     #[test]
+    fn rejects_duplicate_keyboard_aliases_after_normalization() {
+        assert!(LuaAutomationConfiguration::new(
+            None,
+            vec![
+                (HotkeyId::parse("Return").unwrap(), macro_def()),
+                (HotkeyId::parse("Enter").unwrap(), macro_def()),
+            ],
+        )
+        .is_err());
+    }
+
+    #[test]
     fn converts_hotkeys_into_unified_bindings() {
         let config = LuaAutomationConfiguration::new(
             None,
@@ -407,6 +419,38 @@ mod tests {
         .unwrap();
         let second = MotionDefinition::new(
             trigger,
+            BindingMode::Passthrough,
+            Some(macro_def()),
+            None,
+            0,
+        )
+        .unwrap();
+
+        assert!(LuaAutomationConfiguration::with_bindings_and_motions(
+            None,
+            None,
+            AutomationDefaults::default(),
+            None,
+            Vec::new(),
+            vec![first, second],
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_motion_aliases_after_normalization() {
+        let first_trigger = MotionTrigger::parse(["<Leader>", "Return"]).unwrap();
+        let second_trigger = MotionTrigger::parse(["<Leader>", "Enter"]).unwrap();
+        let first = MotionDefinition::new(
+            first_trigger,
+            BindingMode::Consume,
+            Some(macro_def()),
+            None,
+            0,
+        )
+        .unwrap();
+        let second = MotionDefinition::new(
+            second_trigger,
             BindingMode::Passthrough,
             Some(macro_def()),
             None,

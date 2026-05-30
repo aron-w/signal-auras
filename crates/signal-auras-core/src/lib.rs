@@ -2,6 +2,7 @@ mod config;
 mod consent;
 mod error;
 mod hotkey;
+mod key;
 mod macro_plan;
 mod motion;
 mod scope;
@@ -22,6 +23,7 @@ pub use hotkey::{
     MouseTrigger, RegistrationId, ShortcutRegistrationHandle, ShortcutRegistrationState,
     WheelDirection,
 };
+pub use key::{KeyCategory, KeyToken};
 pub use macro_plan::{
     execute_plan, execute_plan_with_inter_action_delay, InputEmission, MacroAction,
     MacroDefinition, MacroRunId, MacroRunPoll, MacroRunState, MacroScheduler,

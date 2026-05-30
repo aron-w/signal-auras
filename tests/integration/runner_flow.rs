@@ -62,6 +62,26 @@ impl MacroExecutor for Executor {
     }
 }
 
+struct RejectingKeyExecutor {
+    rejected_key: String,
+    observed_keys: Vec<String>,
+}
+
+impl MacroExecutor for RejectingKeyExecutor {
+    fn execute_action(&mut self, action: &MacroAction) -> Result<(), DiagnosableError> {
+        if let MacroAction::KeyPress { key } = action {
+            self.observed_keys.push(key.clone());
+            if key == &self.rejected_key {
+                return Err(DiagnosableError::new(
+                    ErrorPhase::MacroExecution,
+                    format!("key '{key}' is unsupported by the test output backend"),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[test]
 fn scoped_trigger_executes_only_for_matching_process() {
     let binding = HotkeyBinding {
@@ -208,6 +228,39 @@ fn trigger_failure_stops_remaining_actions_and_updates_failure_stats() {
     assert_eq!(stats.macro_success_count, 0);
     assert_eq!(stats.macro_failure_count, 1);
     assert_eq!(stats.trigger_count_by_hotkey["F5"], 1);
+}
+
+#[test]
+fn unsupported_macro_key_output_fails_without_substitution() {
+    let binding = HotkeyBinding {
+        trigger: BindingTrigger::keyboard(HotkeyId::parse("F5").unwrap()),
+        mode: BindingMode::Consume,
+        scope: ScopeSelection::ExplicitGlobal,
+        macro_definition: MacroDefinition::new(vec![MacroAction::key("VolumeUp").unwrap()])
+            .unwrap(),
+        registration_state: RegistrationState::Registered,
+    };
+    let mut executor = RejectingKeyExecutor {
+        rejected_key: "VolumeUp".to_string(),
+        observed_keys: Vec::new(),
+    };
+    let mut stats = RuntimeStats::new();
+    let mut scheduler = MacroScheduler::default();
+
+    let error = handle_trigger(
+        &binding,
+        &Active(None),
+        &mut executor,
+        &mut scheduler,
+        &mut stats,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.phase, ErrorPhase::MacroExecution);
+    assert!(error.message.contains("VolumeUp"));
+    assert_eq!(executor.observed_keys, vec!["VolumeUp"]);
+    assert_eq!(stats.macro_success_count, 0);
+    assert_eq!(stats.macro_failure_count, 1);
 }
 
 #[test]

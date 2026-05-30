@@ -1,6 +1,7 @@
 use crate::evdev::RawInputEvent;
 use signal_auras_core::{
-    Capability, DiagnosableError, ErrorPhase, MacroAction, MouseButton, SynthesizedInputRequest,
+    Capability, DiagnosableError, ErrorPhase, KeyToken, MacroAction, MouseButton,
+    SynthesizedInputRequest,
 };
 use std::{
     fs::{File, OpenOptions},
@@ -21,23 +22,24 @@ const REL_X: u16 = 0x00;
 const REL_Y: u16 = 0x01;
 const REL_HWHEEL: u16 = 0x06;
 const REL_WHEEL: u16 = 0x08;
-const KEY_ESC: u16 = 1;
 const KEY_1: u16 = 2;
 const KEY_0: u16 = 11;
-const KEY_BACKSPACE: u16 = 14;
-const KEY_TAB: u16 = 15;
 const KEY_Q: u16 = 16;
+#[cfg(test)]
 const KEY_ENTER: u16 = 28;
+const KEY_LEFTCTRL: u16 = 29;
 const KEY_A: u16 = 30;
 const KEY_LEFTSHIFT: u16 = 42;
 const KEY_Z: u16 = 44;
+const KEY_LEFTALT: u16 = 56;
 const KEY_SLASH: u16 = 53;
 const KEY_SPACE: u16 = 57;
-const KEY_F1: u16 = 59;
-const KEY_F11: u16 = 87;
+const KEY_LEFTMETA: u16 = 125;
+#[cfg(test)]
 const KEY_LEFT: u16 = 105;
+#[cfg(test)]
 const KEY_RIGHT: u16 = 106;
-const KEY_DELETE: u16 = 111;
+#[cfg(test)]
 const KEY_F13: u16 = 183;
 const KEY_MAX: u16 = 0x2ff;
 const BTN_LEFT: u16 = 0x110;
@@ -152,6 +154,14 @@ impl UinputOutputSession {
     }
 
     fn emit_named_key(&mut self, key: &str) -> Result<(), DiagnosableError> {
+        if key.contains('+') {
+            let events = named_key_chord_events(key).ok_or_else(|| {
+                uinput_error(format!(
+                    "key '{key}' is unsupported by the uinput output path"
+                ))
+            })?;
+            return self.write_events(&events);
+        }
         let code = named_key_code(key).ok_or_else(|| {
             uinput_error(format!(
                 "key '{key}' is unsupported by the uinput output path"
@@ -244,30 +254,38 @@ fn character_to_key(character: char) -> Option<KeyStroke> {
 }
 
 fn named_key_code(key: &str) -> Option<u16> {
-    match key.trim().to_ascii_lowercase().as_str() {
-        "enter" | "return" => Some(KEY_ENTER),
-        "tab" => Some(KEY_TAB),
-        "escape" | "esc" => Some(KEY_ESC),
-        "backspace" => Some(KEY_BACKSPACE),
-        "delete" | "del" => Some(KEY_DELETE),
-        "left" => Some(KEY_LEFT),
-        "right" => Some(KEY_RIGHT),
-        "space" => Some(KEY_SPACE),
-        key if key.len() == 1 => key
-            .chars()
-            .next()
-            .and_then(character_to_key)
-            .map(|key| key.code),
-        key => function_key_code(key),
-    }
+    KeyToken::parse(key).ok().map(|key| key.evdev_code())
 }
 
-fn function_key_code(key: &str) -> Option<u16> {
-    let number = key.strip_prefix('f')?.parse::<u16>().ok()?;
-    match number {
-        1..=10 => Some(KEY_F1 + number - 1),
-        11..=12 => Some(KEY_F11 + number - 11),
-        13..=24 => Some(KEY_F13 + number - 13),
+fn named_key_chord_events(key: &str) -> Option<Vec<InputEvent>> {
+    let parts = key.split('+').map(str::trim).collect::<Vec<_>>();
+    if parts.len() < 2 || parts.iter().any(|part| part.is_empty()) {
+        return None;
+    }
+    let (key, modifiers) = parts.split_last()?;
+    let key_code = named_key_code(key)?;
+    let modifier_codes = modifiers
+        .iter()
+        .map(|modifier| modifier_key_code(modifier))
+        .collect::<Option<Vec<_>>>()?;
+    let mut events = Vec::with_capacity((modifier_codes.len() * 2 + 1) * 2);
+    for code in &modifier_codes {
+        events.extend(key_events(*code, 1));
+    }
+    events.extend(key_events(key_code, 1));
+    events.extend(key_events(key_code, 0));
+    for code in modifier_codes.iter().rev() {
+        events.extend(key_events(*code, 0));
+    }
+    Some(events)
+}
+
+fn modifier_key_code(modifier: &str) -> Option<u16> {
+    match modifier {
+        "Ctrl" => Some(KEY_LEFTCTRL),
+        "Alt" => Some(KEY_LEFTALT),
+        "Shift" => Some(KEY_LEFTSHIFT),
+        "Super" => Some(KEY_LEFTMETA),
         _ => None,
     }
 }
@@ -456,7 +474,25 @@ mod tests {
         assert_eq!(named_key_code("Left"), Some(KEY_LEFT));
         assert_eq!(named_key_code("Right"), Some(KEY_RIGHT));
         assert_eq!(named_key_code("F13"), Some(KEY_F13));
+        assert_eq!(named_key_code("PageUp"), Some(104));
+        assert_eq!(named_key_code("KPEnter"), Some(96));
+        assert_eq!(named_key_code("VolumeUp"), Some(115));
         assert_eq!(named_key_code("nope"), None);
+    }
+
+    #[test]
+    fn maps_named_key_chords_without_substitution() {
+        let events = named_key_chord_events("Alt+Right").unwrap();
+
+        assert_eq!(events[0].code, KEY_LEFTALT);
+        assert_eq!(events[0].value, 1);
+        assert_eq!(events[2].code, KEY_RIGHT);
+        assert_eq!(events[2].value, 1);
+        assert_eq!(events[4].code, KEY_RIGHT);
+        assert_eq!(events[4].value, 0);
+        assert_eq!(events[6].code, KEY_LEFTALT);
+        assert_eq!(events[6].value, 0);
+        assert!(named_key_chord_events("Alt+Nope").is_none());
     }
 
     #[test]

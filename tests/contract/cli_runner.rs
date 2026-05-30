@@ -1,7 +1,7 @@
 use signal_auras_cli::prompt::{ScopePrompt, TerminalPrompt};
 use signal_auras_cli::runner::{
-    parse_run_args, start_real_runner_with_lifecycle, start_runner, start_runner_with_lifecycle,
-    RunnerEvent, RunnerLifecycle,
+    parse_doctor_args, parse_run_args, start_real_runner_with_lifecycle, start_runner,
+    start_runner_with_lifecycle, DoctorCommand, RunnerEvent, RunnerLifecycle,
 };
 use signal_auras_core::{
     ActiveProcessProvider, ConsentDecision, DiagnosableError, ErrorPhase, HotkeyBinding,
@@ -22,6 +22,19 @@ fn cli_requires_run_and_one_path() {
     let options = parse_run_args(&["run".into(), "--verbose".into(), "a.lua".into()]).unwrap();
     assert_eq!(options.lua_file, PathBuf::from("a.lua"));
     assert!(options.log.verbose);
+}
+
+#[test]
+fn cli_accepts_doctor_keys_command_shape() {
+    let options = parse_doctor_args(&[
+        "doctor".into(),
+        "keys".into(),
+        "examples/poe2-hideout.lua".into(),
+    ])
+    .unwrap();
+
+    assert_eq!(options.command, DoctorCommand::Keys);
+    assert_eq!(options.lua_file, PathBuf::from("examples/poe2-hideout.lua"));
 }
 
 #[test]

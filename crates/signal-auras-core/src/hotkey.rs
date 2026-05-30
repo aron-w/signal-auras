@@ -1,4 +1,4 @@
-use crate::{DiagnosableError, ErrorPhase};
+use crate::{DiagnosableError, ErrorPhase, KeyToken};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Modifier {
@@ -86,28 +86,47 @@ impl HotkeyId {
                 "hotkey identifier cannot be empty",
             ));
         }
-        if is_supported_hotkey(value) {
-            Ok(Self(value.to_string()))
-        } else {
-            Err(DiagnosableError::new(
+        let parts = value.split('+').map(str::trim).collect::<Vec<_>>();
+        let mut modifiers = Vec::new();
+        let mut key = None;
+        for part in &parts {
+            if part.is_empty() {
+                return Err(DiagnosableError::new(
+                    ErrorPhase::ScriptValidation,
+                    format!("unsupported hotkey '{value}'"),
+                ));
+            }
+            if parts.len() > 1 {
+                if let Ok(modifier) = Modifier::parse(part) {
+                    modifiers.push(modifier);
+                    continue;
+                }
+            }
+            if key.replace(KeyToken::parse(part)?).is_some() {
+                return Err(DiagnosableError::new(
+                    ErrorPhase::ScriptValidation,
+                    format!("hotkey '{value}' must contain exactly one non-modifier key"),
+                ));
+            }
+        }
+        let Some(key) = key else {
+            return Err(DiagnosableError::new(
                 ErrorPhase::ScriptValidation,
-                format!("unsupported hotkey '{value}'"),
-            ))
+                format!("hotkey '{value}' must contain a key"),
+            ));
+        };
+        let modifiers = ModifierSet::new(modifiers)?;
+        let prefix = modifiers.describe();
+        if prefix.is_empty() {
+            Ok(Self(key.name().to_string()))
+        } else {
+            Ok(Self(format!("{prefix}+{}", key.name())))
         }
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
     }
-}
-
-fn is_supported_hotkey(value: &str) -> bool {
-    matches!(
-        value,
-        "F1" | "F2" | "F3" | "F4" | "F5" | "F6" | "F7" | "F8" | "F9" | "F10" | "F11" | "F12"
-    ) || value
-        .split('+')
-        .all(|part| matches!(part, "Ctrl" | "Alt" | "Shift" | "Super") || part.len() == 1)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -300,6 +319,12 @@ mod tests {
     #[test]
     fn validates_supported_function_key() {
         assert_eq!(HotkeyId::parse("F5").unwrap().as_str(), "F5");
+        assert_eq!(HotkeyId::parse("F24").unwrap().as_str(), "F24");
+        assert_eq!(HotkeyId::parse("Return").unwrap().as_str(), "Enter");
+        assert_eq!(
+            HotkeyId::parse("Ctrl+PageUp").unwrap().as_str(),
+            "Ctrl+PageUp"
+        );
     }
 
     #[test]

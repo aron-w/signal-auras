@@ -1,4 +1,4 @@
-use crate::{AdapterDiagnostic, DiagnosableError, ErrorPhase, MouseButton};
+use crate::{AdapterDiagnostic, DiagnosableError, ErrorPhase, HotkeyId, KeyToken, MouseButton};
 use std::collections::BTreeSet;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -56,13 +56,25 @@ pub enum InputEmission {
 impl MacroAction {
     pub fn key(key: impl Into<String>) -> Result<Self, DiagnosableError> {
         let key = key.into();
-        if key.trim().is_empty() {
-            return Err(DiagnosableError::new(
-                ErrorPhase::ScriptValidation,
-                "key action requires a non-empty key",
-            ));
+        if key.contains('+') {
+            let hotkey = HotkeyId::parse(&key)?;
+            return Ok(Self::KeyPress {
+                key: hotkey.as_str().to_string(),
+            });
         }
-        Ok(Self::KeyPress { key })
+        let key = KeyToken::parse(key).map_err(|error| {
+            if error.message == "key name cannot be empty" {
+                DiagnosableError::new(
+                    ErrorPhase::ScriptValidation,
+                    "key action requires a non-empty key",
+                )
+            } else {
+                error
+            }
+        })?;
+        Ok(Self::KeyPress {
+            key: key.name().to_string(),
+        })
     }
 
     pub fn text(text: impl Into<String>) -> Result<Self, DiagnosableError> {
@@ -310,6 +322,19 @@ mod tests {
             macro_def.actions()[1],
             MacroAction::TextInput { .. }
         ));
+    }
+
+    #[test]
+    fn canonicalizes_macro_key_aliases() {
+        let action = MacroAction::key("Return").unwrap();
+
+        assert_eq!(
+            action,
+            MacroAction::KeyPress {
+                key: "Enter".to_string()
+            }
+        );
+        assert!(MacroAction::key("NotAStandardKey").is_err());
     }
 
     #[test]

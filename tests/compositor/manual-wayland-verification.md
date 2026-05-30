@@ -328,6 +328,21 @@ checks with `--verbose` enabled and confirm:
   the runner continues and increments unavailable event-age samples while
   dispatch-after-read latency remains available.
 
+### Follow-up: full keyboard key coverage
+
+After implementing full keyboard key coverage, repeat unsafe evdev/uinput
+checks with a selected keyboard path and confirm:
+
+- `signal-auras doctor keys <lua-file>` reports current-run device status, raw
+  key code, canonical token, aliases, triggerability, emittability, and
+  unavailable reasons without persisting observed keys.
+- Representative Keychron K5 Pro letter, number, punctuation, function,
+  navigation, keypad, and media keys produce canonical names.
+- Hardware-only Fn/layer/firmware controls that emit no Linux input event are
+  reported as unobserved rather than guessed.
+- Macros can emit supported expanded keys through `/dev/uinput`; unsupported
+  backend keys fail closed without substituting another key.
+
 ## Composite Pointer Bindings
 
 Composite pointer bindings remain blocked on a real KDE provider for pointer

@@ -3,14 +3,14 @@ use signal_auras_core::{
     execute_plan_with_inter_action_delay, ActiveProcessProvider, BindingMode, BindingTrigger,
     CapabilityKind, CapabilitySet, DiagnosableError, ErrorPhase, FocusFreshnessPolicy,
     HotkeyBinding, HotkeyId, HotkeyRegistrar, InputProviderConfig, InputProviderMode,
-    InputProviderOutput, MacroDefinition, MacroExecutor, MacroRunId, MacroRunPoll, MacroRunState,
-    MacroScheduler, MotionDefinition, MotionInputEvent, MotionInputState, MotionRuntime,
-    MotionRuntimeEvent, MotionToken, MotionTrigger, RuntimeMotion, RuntimeStats, ScopeDecision,
-    ScopeSelection, ShutdownReason, SynthesizedInputRequest,
+    InputProviderOutput, KeyToken, MacroDefinition, MacroExecutor, MacroRunId, MacroRunPoll,
+    MacroRunState, MacroScheduler, MotionDefinition, MotionInputEvent, MotionInputState,
+    MotionRuntime, MotionRuntimeEvent, MotionToken, MotionTrigger, RuntimeMotion, RuntimeStats,
+    ScopeDecision, ScopeSelection, ShutdownReason, SynthesizedInputRequest,
 };
 use signal_auras_lua::load_lua_file;
 use signal_auras_wayland::{
-    evdev::KernelEventTimestamp,
+    evdev::{EvdevInputWaitOutcome, EvdevObservationProvider, KernelEventTimestamp},
     event_loop::{RuntimeSignalFd, RuntimeTimerFd},
     RealWaylandAdapter,
 };
@@ -47,14 +47,21 @@ pub fn run_cli(
     let args = args.into_iter().collect::<Vec<_>>();
     if args.first().map(String::as_str) == Some("doctor") {
         let options = parse_doctor_args(&args)?;
-        let report = input_doctor_report(&options.lua_file)?;
+        let failure_message = match options.command {
+            DoctorCommand::Input => "input doctor found missing unsafe input permissions",
+            DoctorCommand::Keys => "key doctor found missing unsafe input permissions",
+        };
+        let report = match options.command {
+            DoctorCommand::Input => input_doctor_report(&options.lua_file)?,
+            DoctorCommand::Keys => key_doctor_report(&options.lua_file)?,
+        };
         println!("{}", report.render());
         if report.ok {
             return Ok(());
         }
         return Err(DiagnosableError::new(
             ErrorPhase::CapabilityProbe,
-            "input doctor found missing unsafe input permissions",
+            failure_message,
         ));
     }
     let options = parse_run_args(&args)?;
@@ -72,7 +79,14 @@ pub struct RunOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorOptions {
+    pub command: DoctorCommand,
     pub lua_file: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoctorCommand {
+    Input,
+    Keys,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,16 +244,23 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions, DiagnosableError> {
 }
 
 pub fn parse_doctor_args(args: &[String]) -> Result<DoctorOptions, DiagnosableError> {
-    if args.first().map(String::as_str) != Some("doctor")
-        || args.get(1).map(String::as_str) != Some("input")
-        || args.len() != 3
-    {
+    if args.first().map(String::as_str) != Some("doctor") || args.len() != 3 {
         return Err(DiagnosableError::new(
             ErrorPhase::ArgumentValidation,
-            "usage: signal-auras doctor input <lua-file>",
+            "usage: signal-auras doctor input <lua-file> | signal-auras doctor keys <lua-file>",
         ));
     }
+    let command =
+        match args.get(1).map(String::as_str) {
+            Some("input") => DoctorCommand::Input,
+            Some("keys") => DoctorCommand::Keys,
+            _ => return Err(DiagnosableError::new(
+                ErrorPhase::ArgumentValidation,
+                "usage: signal-auras doctor input <lua-file> | signal-auras doctor keys <lua-file>",
+            )),
+        };
     Ok(DoctorOptions {
+        command,
         lua_file: PathBuf::from(&args[2]),
     })
 }
@@ -254,6 +275,169 @@ impl InputDoctorReport {
     pub fn render(&self) -> String {
         self.lines.join("\n")
     }
+}
+
+pub type KeyDoctorReport = InputDoctorReport;
+
+const KEY_DOCTOR_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+const KEY_DOCTOR_DISCOVERY_LIMIT: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KeyDiscoveryObservation {
+    device: String,
+    raw_code: u16,
+}
+
+pub fn key_doctor_report(lua_file: &Path) -> Result<KeyDoctorReport, DiagnosableError> {
+    let observations = collect_key_doctor_observations(lua_file)?;
+    key_doctor_report_with_probe_and_observations(
+        lua_file,
+        &RealInputPermissionProbe,
+        &observations,
+    )
+}
+
+fn collect_key_doctor_observations(
+    lua_file: &Path,
+) -> Result<Vec<KeyDiscoveryObservation>, DiagnosableError> {
+    let config = load_lua_file(lua_file)?;
+    let Some(provider) = config.input_provider.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let devices = if provider.all_devices {
+        signal_auras_wayland::evdev::discover_event_devices()?
+    } else {
+        provider.devices.clone()
+    };
+    let mut evdev = EvdevObservationProvider::open(
+        devices,
+        InputProviderMode::Observe,
+        config.leader.clone(),
+        provider.all_devices,
+    )?;
+    let deadline = Instant::now() + KEY_DOCTOR_DISCOVERY_TIMEOUT;
+    let mut observations = Vec::new();
+    while Instant::now() < deadline && observations.len() < KEY_DOCTOR_DISCOVERY_LIMIT {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let timeout = remaining.min(Duration::from_millis(250));
+        match evdev.wait_next_observed_input_event_or_runtime_fd(timeout, &[])? {
+            EvdevInputWaitOutcome::Input(event) => {
+                if event.raw.event_type == 0x01 {
+                    observations.push(KeyDiscoveryObservation {
+                        device: event.source.display().to_string(),
+                        raw_code: event.raw.code,
+                    });
+                }
+            }
+            EvdevInputWaitOutcome::RuntimeFd(_) | EvdevInputWaitOutcome::Timeout => {}
+        }
+    }
+    Ok(observations)
+}
+
+fn key_doctor_report_with_probe_and_observations(
+    lua_file: &Path,
+    probe: &impl InputPermissionProbe,
+    observations: &[KeyDiscoveryObservation],
+) -> Result<KeyDoctorReport, DiagnosableError> {
+    let config = load_lua_file(lua_file)?;
+    let mut ok = true;
+    let mut lines = vec![
+        "# Signal Auras key doctor".to_string(),
+        format!("user={}", probe.current_user()),
+        "persistence=none".to_string(),
+    ];
+
+    let Some(provider) = config.input_provider.as_ref() else {
+        lines.push("input_provider=none".to_string());
+        lines.push(
+            "result=failed key discovery requires an explicit evdev input_provider".to_string(),
+        );
+        return Ok(KeyDoctorReport { ok: false, lines });
+    };
+
+    lines.push(format!(
+        "input_provider backend=evdev mode={:?} output={:?}",
+        provider.mode, provider.output
+    ));
+    if provider.all_devices {
+        lines.push("evdev=all status=explicit_current_run".to_string());
+    } else {
+        let mut seen = BTreeSet::new();
+        for path in &provider.devices {
+            let mut status = probe.read_access(path);
+            if !seen.insert(path.clone()) {
+                status = InputPathStatus::Duplicate;
+            }
+            if status != InputPathStatus::Accessible {
+                ok = false;
+            }
+            lines.push(format!(
+                "evdev path={} {}",
+                path.display(),
+                render_input_path_status(&status)
+            ));
+        }
+    }
+
+    if provider.output == InputProviderOutput::Uinput {
+        let status = probe.read_write_access(Path::new("/dev/uinput"));
+        if status != InputPathStatus::Accessible {
+            ok = false;
+        }
+        lines.push(format!(
+            "uinput path=/dev/uinput {}",
+            render_input_path_status(&status)
+        ));
+    } else {
+        lines.push("uinput=not_required output=portal".to_string());
+    }
+
+    if observations.is_empty() {
+        lines.push("observed=none reason=no_key_events_received".to_string());
+    }
+    for observation in observations {
+        lines.push(render_key_discovery_observation(provider, observation));
+    }
+
+    if ok {
+        lines.push("result=ok key discovery report is current-run only".to_string());
+    } else {
+        lines.push("result=failed key discovery permissions are incomplete".to_string());
+    }
+
+    Ok(KeyDoctorReport { ok, lines })
+}
+
+fn render_key_discovery_observation(
+    provider: &InputProviderConfig,
+    observation: &KeyDiscoveryObservation,
+) -> String {
+    let Some(token) = KeyToken::from_evdev_code(observation.raw_code) else {
+        return format!(
+            "key device={} raw_code={} token=unknown aliases=none triggerability=unsupported emittability=unsupported reason=unknown_key_code",
+            observation.device, observation.raw_code
+        );
+    };
+    let aliases = token.aliases();
+    let aliases = if aliases.is_empty() {
+        "none".to_string()
+    } else {
+        aliases.join(",")
+    };
+    let emittability = if provider.output == InputProviderOutput::Uinput {
+        "supported"
+    } else {
+        "unavailable"
+    };
+    format!(
+        "key device={} raw_code={} token={} aliases={} triggerability=supported emittability={}",
+        observation.device,
+        observation.raw_code,
+        token.name(),
+        aliases,
+        emittability
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2085,6 +2269,20 @@ mod tests {
         ];
         let options = parse_doctor_args(&args).unwrap();
 
+        assert_eq!(options.command, DoctorCommand::Input);
+        assert_eq!(options.lua_file, PathBuf::from("examples/poe2-hideout.lua"));
+    }
+
+    #[test]
+    fn parses_key_doctor_command() {
+        let args = vec![
+            "doctor".to_string(),
+            "keys".to_string(),
+            "examples/poe2-hideout.lua".to_string(),
+        ];
+        let options = parse_doctor_args(&args).unwrap();
+
+        assert_eq!(options.command, DoctorCommand::Keys);
         assert_eq!(options.lua_file, PathBuf::from("examples/poe2-hideout.lua"));
     }
 
@@ -2244,6 +2442,105 @@ mod tests {
         assert!(!report.ok);
         assert!(rendered.contains("warning=devices_all"));
         assert!(rendered.contains("evdev=all status=not_checked"));
+    }
+
+    #[test]
+    fn key_doctor_reports_observed_tokens_aliases_and_support() {
+        let lua_file = write_doctor_lua(
+            r#"
+            return {
+              input_provider = {
+                backend = "evdev",
+                mode = "observe",
+                output = "uinput",
+                devices = { "/dev/input/event9" },
+              },
+              motions = {
+                {
+                  trigger = { "PageUp" },
+                  macro = macro { key "PageDown" },
+                },
+              },
+            }
+            "#,
+        );
+        let mut probe = FakeInputProbe::default();
+        probe.read.insert(
+            PathBuf::from("/dev/input/event9"),
+            InputPathStatus::Accessible,
+        );
+        probe
+            .read_write
+            .insert(PathBuf::from("/dev/uinput"), InputPathStatus::Accessible);
+        let observations = vec![
+            KeyDiscoveryObservation {
+                device: "/dev/input/event9".to_string(),
+                raw_code: 104,
+            },
+            KeyDiscoveryObservation {
+                device: "/dev/input/event9".to_string(),
+                raw_code: 999,
+            },
+        ];
+
+        let report =
+            key_doctor_report_with_probe_and_observations(&lua_file, &probe, &observations)
+                .unwrap();
+        let rendered = report.render();
+
+        assert!(report.ok);
+        assert!(rendered.contains("persistence=none"));
+        assert!(rendered.contains("key device=/dev/input/event9 raw_code=104 token=PageUp"));
+        assert!(rendered.contains("aliases=PgUp"));
+        assert!(rendered.contains("triggerability=supported emittability=supported"));
+        assert!(
+            rendered.contains("raw_code=999 token=unknown aliases=none triggerability=unsupported")
+        );
+    }
+
+    #[test]
+    fn key_doctor_reports_no_persistence_between_runs() {
+        let lua_file = write_doctor_lua(
+            r#"
+            return {
+              input_provider = {
+                backend = "evdev",
+                mode = "observe",
+                devices = { "/dev/input/event9" },
+              },
+              motions = {
+                {
+                  trigger = { "f" },
+                  macro = macro { text "x" },
+                },
+              },
+            }
+            "#,
+        );
+        let mut probe = FakeInputProbe::default();
+        probe.read.insert(
+            PathBuf::from("/dev/input/event9"),
+            InputPathStatus::Accessible,
+        );
+
+        let first = key_doctor_report_with_probe_and_observations(
+            &lua_file,
+            &probe,
+            &[KeyDiscoveryObservation {
+                device: "/dev/input/event9".to_string(),
+                raw_code: 104,
+            }],
+        )
+        .unwrap()
+        .render();
+        let second = key_doctor_report_with_probe_and_observations(&lua_file, &probe, &[])
+            .unwrap()
+            .render();
+
+        assert!(first.contains("token=PageUp"));
+        assert!(!second.contains("token=PageUp"));
+        assert!(second.contains("observed=none"));
+        assert!(second.contains("persistence=none"));
     }
 
     #[test]

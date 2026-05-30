@@ -113,6 +113,14 @@ The Lua surface is intentionally small:
 - `bindings = { ... }` accepts structured triggers with modifiers, mouse buttons, mouse wheel directions, and an explicit mode.
 - `motions = { ... }` accepts uniform sequence notation for leader, keyboard, and mouse tokens.
 
+Keyboard key names are normalized through one Linux evdev-backed vocabulary
+across `leader`, motion triggers, repeat `while_held` tokens, structured
+binding keys, legacy hotkeys, and macro `key` actions. Existing spellings such
+as one-character keys, `F1` through `F24`, `Left`, `Right`, `Enter`, `Return`,
+`Tab`, `Esc`, `Escape`, `Delete`, `Del`, `Backspace`, and `Space` remain valid.
+Expanded names cover standard navigation, editing, keypad, modifier, system,
+and media keys when the configured input or output backend supports them.
+
 Structured composite bindings use one primary trigger and optional modifiers:
 
 ```lua
@@ -249,6 +257,12 @@ Use `signal-auras doctor input <script.lua>` or `just input-doctor file=<script.
 to check the configured evdev paths and `/dev/uinput` access without grabbing
 devices or emitting input. `just unsafe-input-acl` remains available for short
 local tests; those ACLs can still be reset by reboot, replug, or udev changes.
+Use `signal-auras doctor keys <script.lua>` when you need key-name discovery
+for the current run. Key diagnostics report current-run device status, raw key
+code, canonical token, aliases, triggerability, emittability, and unavailable
+reasons without persisting discovered keys. Hardware-only Fn or firmware layer
+controls that do not emit Linux input events are reported as unobserved rather
+than guessed.
 
 ```lua
 return {

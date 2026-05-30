@@ -1,5 +1,5 @@
 use signal_auras_core::{
-    DiagnosableError, ErrorPhase, InputProviderMode, MotionInputEvent, MotionInputState,
+    DiagnosableError, ErrorPhase, InputProviderMode, KeyToken, MotionInputEvent, MotionInputState,
     MotionToken, MouseButton, WheelDirection,
 };
 use std::{
@@ -17,13 +17,20 @@ const EV_SYN: u16 = 0x00;
 const REL_X: u16 = 0x00;
 const REL_Y: u16 = 0x01;
 const REL_WHEEL: u16 = 0x08;
+#[cfg(test)]
 const KEY_F: u16 = 33;
+#[cfg(test)]
 const KEY_F1: u16 = 59;
-const KEY_F10: u16 = 68;
-const KEY_F11: u16 = 87;
-const KEY_F12: u16 = 88;
+#[cfg(test)]
+const KEY_KPENTER: u16 = 96;
+#[cfg(test)]
+const KEY_PAGEUP: u16 = 104;
+#[cfg(test)]
 const KEY_F13: u16 = 183;
+#[cfg(test)]
 const KEY_F24: u16 = 194;
+#[cfg(test)]
+const KEY_VOLUMEUP: u16 = 115;
 const BTN_LEFT: u16 = 0x110;
 const BTN_RIGHT: u16 = 0x111;
 const BTN_MIDDLE: u16 = 0x112;
@@ -932,14 +939,10 @@ const TIMEVAL_SIZE: usize = 8;
 
 fn evdev_code_to_motion_token(code: u16) -> Option<MotionToken> {
     match code {
-        KEY_F => Some(MotionToken::Key("f".to_string())),
-        KEY_F1..=KEY_F10 => Some(MotionToken::Key(format!("F{}", code - KEY_F1 + 1))),
-        KEY_F11..=KEY_F12 => Some(MotionToken::Key(format!("F{}", code - KEY_F11 + 11))),
-        KEY_F13..=KEY_F24 => Some(MotionToken::Key(format!("F{}", code - KEY_F13 + 13))),
         BTN_LEFT => Some(MotionToken::MouseButton(MouseButton::Left)),
         BTN_RIGHT => Some(MotionToken::MouseButton(MouseButton::Right)),
         BTN_MIDDLE => Some(MotionToken::MouseButton(MouseButton::Middle)),
-        _ => None,
+        _ => KeyToken::from_evdev_code(code).map(|key| MotionToken::Key(key.name().to_string())),
     }
 }
 
@@ -1266,6 +1269,27 @@ mod tests {
             evdev_code_to_motion_token(KEY_F24),
             Some(MotionToken::Key("F24".to_string()))
         );
+    }
+
+    #[test]
+    fn maps_standard_keyboard_media_navigation_and_keypad_codes() {
+        assert_eq!(
+            evdev_code_to_motion_token(KEY_F),
+            Some(MotionToken::Key("f".to_string()))
+        );
+        assert_eq!(
+            evdev_code_to_motion_token(KEY_PAGEUP),
+            Some(MotionToken::Key("PageUp".to_string()))
+        );
+        assert_eq!(
+            evdev_code_to_motion_token(KEY_KPENTER),
+            Some(MotionToken::Key("KPEnter".to_string()))
+        );
+        assert_eq!(
+            evdev_code_to_motion_token(KEY_VOLUMEUP),
+            Some(MotionToken::Key("VolumeUp".to_string()))
+        );
+        assert!(evdev_code_to_motion_token(999).is_none());
     }
 
     #[test]

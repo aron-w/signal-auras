@@ -1,4 +1,4 @@
-use crate::{DiagnosableError, ErrorPhase, MacroDefinition, MouseButton, WheelDirection};
+use crate::{DiagnosableError, ErrorPhase, KeyToken, MacroDefinition, MouseButton, WheelDirection};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,11 +44,7 @@ impl MotionToken {
             "<MClick>" => Ok(Self::MouseButton(MouseButton::Middle)),
             "<WheelUp>" => Ok(Self::Wheel(WheelDirection::Up)),
             "<WheelDown>" => Ok(Self::Wheel(WheelDirection::Down)),
-            value if supported_key_token(value) => Ok(Self::Key(value.to_string())),
-            value => Err(DiagnosableError::new(
-                ErrorPhase::ScriptValidation,
-                format!("unsupported motion token '{value}'"),
-            )),
+            value => KeyToken::parse(value).map(|key| Self::Key(key.name().to_string())),
         }
     }
 
@@ -67,17 +63,6 @@ impl MotionToken {
     pub fn requires_pointer_observation(&self) -> bool {
         matches!(self, Self::MouseButton(_) | Self::Wheel(_))
     }
-}
-
-fn supported_key_token(value: &str) -> bool {
-    value.len() == 1 || function_key_number(value).is_some()
-}
-
-fn function_key_number(value: &str) -> Option<u8> {
-    value
-        .strip_prefix('F')
-        .and_then(|digits| digits.parse::<u8>().ok())
-        .filter(|number| (1..=24).contains(number))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -403,6 +388,26 @@ mod tests {
         assert_eq!(
             MotionToken::parse("<WheelDown>").unwrap().describe(),
             "<WheelDown>"
+        );
+    }
+
+    #[test]
+    fn parses_expanded_keyboard_motion_tokens() {
+        assert_eq!(
+            MotionToken::parse("PageDown").unwrap(),
+            MotionToken::Key("PageDown".to_string())
+        );
+        assert_eq!(
+            MotionToken::parse("Return").unwrap(),
+            MotionToken::Key("Enter".to_string())
+        );
+        assert_eq!(
+            MotionToken::parse("KPEnter").unwrap(),
+            MotionToken::Key("KPEnter".to_string())
+        );
+        assert_eq!(
+            MotionToken::parse("VolumeUp").unwrap(),
+            MotionToken::Key("VolumeUp".to_string())
         );
     }
 

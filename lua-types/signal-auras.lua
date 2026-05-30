@@ -7,6 +7,7 @@
 ---@alias SignalAurasBindingMode '"consume"'|'"passthrough"'
 ---@alias SignalAurasMouseButton '"left"'|'"right"'|'"middle"'
 ---@alias SignalAurasWheelDirection '"up"'|'"down"'
+---@alias SignalAurasKeyName string Key names are normalized by Signal Auras; common aliases include Enter, Return, Esc, Escape, F1-F24, PageUp, PageDown, KPEnter, VolumeUp, and one-character keys.
 ---@alias SignalAurasMotionToken '"<Leader>"'|'"<LClick>"'|'"<RClick>"'|'"<MClick>"'|'"<WheelUp>"'|'"<WheelDown>"'|string
 ---@alias SignalAurasInputProviderBackend '"evdev"'
 ---@alias SignalAurasInputProviderMode '"observe"'|'"grab"'|'"consume"'
@@ -19,7 +20,7 @@
 ---@class SignalAurasBindingTrigger
 ---@field modifiers? SignalAurasModifier[]
 ---@field mouse? SignalAurasMouseTrigger
----@field key? string
+---@field key? SignalAurasKeyName
 
 ---@class SignalAurasBinding
 ---@field trigger SignalAurasBindingTrigger
@@ -53,7 +54,7 @@
 ---@field acknowledge_risk? string
 
 ---@class SignalAurasConfig
----@field leader? string
+---@field leader? SignalAurasKeyName
 ---@field defaults? SignalAurasDefaults
 ---@field input_provider? SignalAurasInputProvider
 ---@field hotkeys? table<string, SignalAurasMacro>
@@ -66,7 +67,7 @@
 function macro(actions) end
 
 ---Creates a key press macro action.
----@param name string
+---@param name SignalAurasKeyName
 ---@return SignalAurasMacroAction
 function key(name) end
 

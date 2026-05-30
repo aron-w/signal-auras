@@ -10,4 +10,6 @@ For the callback wakeups follow-up, also read
 `specs/009-callback-wakeups/plan.md`.
 For the repeat overload policy follow-up, also read
 `specs/010-repeat-overload-policy/plan.md`.
+For the full keyboard key coverage follow-up, also read
+`specs/014-full-key-coverage/plan.md`.
 <!-- SPECKIT END -->
