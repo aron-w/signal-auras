@@ -647,10 +647,12 @@ fn lifecycle_executes_motion_sequence_and_repeat_ticks_until_release() {
             {
               trigger = { "<Leader>", "<LClick>", "<LClick>" },
               mode = "passthrough",
-              repeat = {
+              loop = {
                 while_held = { "<Leader>", "<LClick>" },
-                interval_ms = { min = 50, max = 80 },
-                macro = macro { mouse_click "left" },
+                repeat = {
+                  every_ms = 50,
+                  macro = macro { mouse_click "left" },
+                },
               },
             },
           },
@@ -702,6 +704,100 @@ fn lifecycle_executes_motion_sequence_and_repeat_ticks_until_release() {
     assert_eq!(stats.motion_repeat_tick_count, 1);
     assert_eq!(stats.motion_repeat_cancel_count, 1);
     assert_eq!(stats.max_motion_dispatch_latency_ms, 0);
+}
+
+#[test]
+fn guarded_press_fires_immediately_only_when_guard_is_held() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          leader = "F13",
+          presses = {
+            {
+              requires_held = { "<Leader>" },
+              trigger = "<WheelUp>",
+              mode = "passthrough",
+              macro = macro { key "Left" },
+            },
+          },
+        }
+        "#,
+    );
+    let mut prompt = Prompt::new(ConsentDecision::ExplicitGlobalConfirmed);
+    let mut registrar = Registrar::default();
+    let active = Active(Some(ProcessName::parse("poe2.exe").unwrap()));
+    let mut executor = Executor::default();
+    let mut lifecycle = ScriptedLifecycle::new(vec![
+        RunnerEvent::MotionInput(MotionInputEvent::pressed(MotionToken::Wheel(
+            WheelDirection::Up,
+        ))),
+        RunnerEvent::MotionInput(MotionInputEvent::pressed(MotionToken::Leader)),
+        RunnerEvent::MotionInput(MotionInputEvent::pressed(MotionToken::Wheel(
+            WheelDirection::Up,
+        ))),
+        RunnerEvent::Shutdown(signal_auras_core::ShutdownReason::CtrlC),
+    ]);
+
+    let stats = start_runner_with_lifecycle(
+        &lua_file,
+        &mut prompt,
+        &mut registrar,
+        &active,
+        &mut executor,
+        &mut lifecycle,
+    )
+    .unwrap();
+
+    assert_eq!(executor.actions, 1);
+    assert_eq!(stats.total_triggers(), 1);
+    assert_eq!(stats.consumed_trigger_event_count, 0);
+    assert_eq!(stats.passthrough_trigger_event_count, 1);
+    assert_eq!(stats.motion_input_event_count, 3);
+}
+
+#[test]
+fn inactive_scoped_press_does_not_record_consumption_or_macro_output() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          scope = { processes = { "poe2.exe" } },
+          leader = "F13",
+          presses = {
+            {
+              requires_held = { "<Leader>" },
+              trigger = "<WheelDown>",
+              macro = macro { key "Right" },
+            },
+          },
+        }
+        "#,
+    );
+    let mut prompt = Prompt::new(ConsentDecision::Cancel);
+    let mut registrar = Registrar::default();
+    let active = Active(Some(ProcessName::parse("konsole").unwrap()));
+    let mut executor = Executor::default();
+    let mut lifecycle = ScriptedLifecycle::new(vec![
+        RunnerEvent::MotionInput(MotionInputEvent::pressed(MotionToken::Leader)),
+        RunnerEvent::MotionInput(MotionInputEvent::pressed(MotionToken::Wheel(
+            WheelDirection::Down,
+        ))),
+        RunnerEvent::Shutdown(signal_auras_core::ShutdownReason::CtrlC),
+    ]);
+
+    let stats = start_runner_with_lifecycle(
+        &lua_file,
+        &mut prompt,
+        &mut registrar,
+        &active,
+        &mut executor,
+        &mut lifecycle,
+    )
+    .unwrap();
+
+    assert_eq!(executor.actions, 0);
+    assert_eq!(stats.total_triggers(), 0);
+    assert_eq!(stats.consumed_trigger_event_count, 0);
+    assert_eq!(stats.denied_action_count, 1);
 }
 
 #[test]
@@ -825,10 +921,12 @@ fn lifecycle_does_not_emit_repeat_after_cancellation_release() {
             {
               trigger = { "<Leader>", "<LClick>", "<LClick>" },
               mode = "passthrough",
-              repeat = {
+              loop = {
                 while_held = { "<Leader>", "<LClick>" },
-                interval_ms = { min = 50, max = 80 },
-                macro = macro { mouse_click "left" },
+                repeat = {
+                  every_ms = 50,
+                  macro = macro { mouse_click "left" },
+                },
               },
             },
           },
@@ -886,10 +984,12 @@ fn lifecycle_callback_coexists_with_repeat_cancellation() {
             {
               trigger = { "<Leader>", "<LClick>", "<LClick>" },
               mode = "passthrough",
-              repeat = {
+              loop = {
                 while_held = { "<Leader>", "<LClick>" },
-                interval_ms = { min = 50, max = 80 },
-                macro = macro { mouse_click "left" },
+                repeat = {
+                  every_ms = 50,
+                  macro = macro { mouse_click "left" },
+                },
               },
             },
           },

@@ -22,27 +22,51 @@ Ordered non-empty list of `MotionToken` values. Duplicate motion triggers are in
 
 One logical input motion:
 
+- `requires_held`: optional holdable-token precondition
 - `trigger`: required `MotionTrigger`
+- `within_ms`: positive trigger completion window, default `500`
 - `mode`: `consume` or `passthrough`, default `consume`
 - `macro`: optional macro emitted once when the trigger completes
-- `repeat`: optional repeat behavior
+- `loop`: optional held loop behavior
 - `inter_action_delay_ms`: resolved delay from global defaults or a motion override
 
-At least one of `macro` or `repeat` is required.
+At least one of `macro` or `loop` is required.
 
-## RepeatDefinition
+`requires_held` tokens are not part of the sequence. They must be held before
+the first trigger press and remain held until the attempt completes. Wheel
+tokens are invalid here because they do not have release events.
 
-Repeat-specific behavior owned by the motion:
+## PressDefinition
+
+One immediate guarded action:
+
+- `requires_held`: optional holdable-token precondition
+- `trigger`: required single `MotionToken`
+- `mode`: `consume` or `passthrough`, default `consume`
+- `macro`: required macro emitted on the trigger press
+- `inter_action_delay_ms`: resolved delay from global defaults or a press override
+
+Presses do not create active motion attempts, do not use `within_ms`, and do
+not own loops.
+
+## LoopDefinition
+
+Held-loop behavior owned by the motion:
 
 - `while_held`: required `MotionTrigger` describing inputs that must remain held
-- `interval`: positive min/max interval in milliseconds with `min <= max`
-- `macro`: required macro emitted on repeat ticks
+- `before`: optional macro emitted once when the loop starts
+- `body`: exactly one of `once` macro or fixed `repeat` body
+- `repeat.every_ms`: positive interval in milliseconds
+- `repeat.macro`: required macro emitted on repeat ticks
+- `after`: optional macro emitted once when the loop ends or is cancelled
 
 ## MacroAction
 
 Existing actions remain:
 
 - key press
+- key press-only
+- key release-only
 - text input
 - explicit delay
 

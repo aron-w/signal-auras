@@ -89,6 +89,8 @@ impl UinputOutputSession {
                 Ok(())
             }
             MacroAction::KeyPress { key } => self.emit_named_key(key),
+            MacroAction::KeyDown { key } => self.emit_named_key_state(key, 1),
+            MacroAction::KeyUp { key } => self.emit_named_key_state(key, 0),
             MacroAction::MouseClick { button } => {
                 let mut events = Vec::new();
                 events.extend(key_events(mouse_button_code(*button), 1));
@@ -169,6 +171,20 @@ impl UinputOutputSession {
         })?;
         self.emit_key(code, 1)?;
         self.emit_key(code, 0)
+    }
+
+    fn emit_named_key_state(&mut self, key: &str, value: i32) -> Result<(), DiagnosableError> {
+        if key.contains('+') {
+            return Err(uinput_error(format!(
+                "key chord '{key}' is unsupported for key_down/key_up by the uinput output path"
+            )));
+        }
+        let code = named_key_code(key).ok_or_else(|| {
+            uinput_error(format!(
+                "key '{key}' is unsupported by the uinput output path"
+            ))
+        })?;
+        self.emit_key(code, value)
     }
 
     fn emit_key(&mut self, code: u16, value: i32) -> Result<(), DiagnosableError> {

@@ -106,16 +106,20 @@ The Lua surface is intentionally small:
 
 - `macro { ... }` creates one ordered macro.
 - `key "<key-name>"` sends a key action.
+- `key_down "<key-name>"` sends a key press without the release.
+- `key_up "<key-name>"` sends a key release without the press.
 - `text "<string>"` sends text input.
 - `mouse_click "<left|right|middle>"` sends a mouse button click action.
 - `delay <milliseconds>` waits before the next action.
 - `hotkeys = { ["F5"] = macro { ... } }` keeps the legacy keyboard binding shape.
 - `bindings = { ... }` accepts structured triggers with modifiers, mouse buttons, mouse wheel directions, and an explicit mode.
 - `motions = { ... }` accepts uniform sequence notation for leader, keyboard, and mouse tokens.
+- `presses = { ... }` accepts immediate single-token actions, optionally guarded by `requires_held`.
 
 Keyboard key names are normalized through one Linux evdev-backed vocabulary
-across `leader`, motion triggers, repeat `while_held` tokens, structured
-binding keys, legacy hotkeys, and macro `key` actions. Existing spellings such
+across `leader`, motion triggers, motion `requires_held`, loop `while_held`
+tokens, press triggers, press `requires_held`, structured
+binding keys, legacy hotkeys, and macro `key`/`key_down`/`key_up` actions. Existing spellings such
 as one-character keys, `F1` through `F24`, `Left`, `Right`, `Enter`, `Return`,
 `Tab`, `Esc`, `Escape`, `Delete`, `Del`, `Backspace`, and `Space` remain valid.
 Expanded names cover standard navigation, editing, keypad, modifier, system,
@@ -184,14 +188,42 @@ return {
       },
     },
     {
-      trigger = { "<Leader>", "<LClick>", "<LClick>" },
+      requires_held = { "<Leader>" },
+      trigger = { "<LClick>", "<LClick>" },
       mode = "passthrough",
-      repeat = {
-        while_held = { "<Leader>", "<LClick>" },
-        interval_ms = { min = 50, max = 80 },
-        macro = macro {
-          mouse_click "left",
+      within_ms = 500,
+      loop = {
+        while_held = { "<LClick>" },
+        before = macro {
+          key_down "Ctrl",
         },
+        repeat = {
+          every_ms = 65,
+          macro = macro {
+            mouse_click "left",
+          },
+        },
+        after = macro {
+          key_up "Ctrl",
+        },
+      },
+    },
+  },
+  presses = {
+    {
+      requires_held = { "<Leader>" },
+      trigger = "<WheelUp>",
+      mode = "passthrough",
+      macro = macro {
+        key "Left",
+      },
+    },
+    {
+      requires_held = { "<Leader>" },
+      trigger = "<WheelDown>",
+      mode = "passthrough",
+      macro = macro {
+        key "Right",
       },
     },
   },
@@ -277,13 +309,16 @@ return {
   leader = "F13",
   motions = {
     {
-      trigger = { "<Leader>", "<LClick>", "<LClick>" },
+      requires_held = { "<Leader>" },
+      trigger = { "<LClick>", "<LClick>" },
       mode = "passthrough",
-      repeat = {
-        while_held = { "<Leader>", "<LClick>" },
-        interval_ms = { min = 50, max = 80 },
-        macro = macro {
-          mouse_click "left",
+      loop = {
+        while_held = { "<LClick>" },
+        repeat = {
+          every_ms = 65,
+          macro = macro {
+            mouse_click "left",
+          },
         },
       },
     },
@@ -291,6 +326,15 @@ return {
 }
 ```
 
+`within_ms` defaults to `500` and controls how quickly the trigger sequence
+must complete. `requires_held` accepts holdable tokens (`<Leader>`, keyboard
+keys, and mouse buttons) and rejects wheel tokens because wheel input has no
+held state. For motions, all required tokens must already be held before the
+first trigger press and must remain held until the motion completes; releasing a
+required token cancels the active attempt or active loop. Presses fire
+immediately when their single trigger press arrives and their guard is
+satisfied. `motions[].repeat` has been removed; migrate
+`repeat.interval_ms.{min,max}` to `loop.repeat.every_ms` with one fixed interval.
 `defaults.inter_action_delay_ms` applies between generated macro actions;
 `motion.inter_action_delay_ms` overrides it for one motion. Explicit
 `delay(ms)` actions remain part of macros. Delays are valid from zero for
@@ -303,7 +347,7 @@ inter-action defaults and one millisecond for explicit `delay` actions.
   consent prompt.
 - `examples/composite-bindings.lua`: structured `Ctrl` plus wheel and left-click
   bindings.
-- `examples/input-motions.lua`: uniform leader, keyboard, mouse, and repeat
+- `examples/input-motions.lua`: uniform leader, keyboard, mouse, and loop repeat
   motion notation.
 
 ## Input Performance Diagnostics

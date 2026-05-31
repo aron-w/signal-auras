@@ -9,6 +9,7 @@
 ---@alias SignalAurasWheelDirection '"up"'|'"down"'
 ---@alias SignalAurasKeyName string Key names are normalized by Signal Auras; common aliases include Enter, Return, Esc, Escape, F1-F24, PageUp, PageDown, KPEnter, VolumeUp, and one-character keys.
 ---@alias SignalAurasMotionToken '"<Leader>"'|'"<LClick>"'|'"<RClick>"'|'"<MClick>"'|'"<WheelUp>"'|'"<WheelDown>"'|string
+---@alias SignalAurasHeldToken '"<Leader>"'|'"<LClick>"'|'"<RClick>"'|'"<MClick>"'|string
 ---@alias SignalAurasInputProviderBackend '"evdev"'
 ---@alias SignalAurasInputProviderMode '"observe"'|'"grab"'|'"consume"'
 ---@alias SignalAurasInputProviderOutput '"portal"'|'"uinput"'
@@ -30,20 +31,31 @@
 ---@class SignalAurasDefaults
 ---@field inter_action_delay_ms? integer
 
----@class SignalAurasRepeatInterval
----@field min integer
----@field max integer
-
----@class SignalAurasRepeat
----@field while_held SignalAurasMotionToken[]
----@field interval_ms SignalAurasRepeatInterval
+---@class SignalAurasLoopRepeat
+---@field every_ms integer
 ---@field macro SignalAurasMacro
 
+---@class SignalAurasLoop
+---@field while_held SignalAurasMotionToken[]
+---@field before? SignalAurasMacro
+---@field once? SignalAurasMacro
+---@field repeat? SignalAurasLoopRepeat
+---@field after? SignalAurasMacro
+
 ---@class SignalAurasMotion
+---@field requires_held? SignalAurasHeldToken[]
 ---@field trigger SignalAurasMotionToken[]
+---@field within_ms? integer
 ---@field mode? SignalAurasBindingMode
 ---@field macro? SignalAurasMacro
----@field repeat? SignalAurasRepeat
+---@field loop? SignalAurasLoop
+---@field inter_action_delay_ms? integer
+
+---@class SignalAurasPress
+---@field requires_held? SignalAurasHeldToken[]
+---@field trigger SignalAurasMotionToken
+---@field mode? SignalAurasBindingMode
+---@field macro SignalAurasMacro
 ---@field inter_action_delay_ms? integer
 
 ---@class SignalAurasInputProvider
@@ -60,6 +72,7 @@
 ---@field hotkeys? table<string, SignalAurasMacro>
 ---@field bindings? SignalAurasBinding[]
 ---@field motions? SignalAurasMotion[]
+---@field presses? SignalAurasPress[]
 
 ---Creates an ordered Signal Auras macro definition.
 ---@param actions SignalAurasMacroAction[]
@@ -70,6 +83,16 @@ function macro(actions) end
 ---@param name SignalAurasKeyName
 ---@return SignalAurasMacroAction
 function key(name) end
+
+---Creates a key press-only macro action.
+---@param name SignalAurasKeyName
+---@return SignalAurasMacroAction
+function key_down(name) end
+
+---Creates a key release-only macro action.
+---@param name SignalAurasKeyName
+---@return SignalAurasMacroAction
+function key_up(name) end
 
 ---Creates a text input macro action.
 ---@param value string

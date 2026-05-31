@@ -26,28 +26,41 @@ return {
       },
     },
     {
-      trigger = { "<Leader>", "<WheelUp>" },
+      requires_held = { "<Leader>" },
+      trigger = { "<LClick>", "<LClick>" },
+      mode = "passthrough",
+      loop = {
+        while_held = { "<LClick>" },
+        before = macro {
+          key_down "Ctrl",
+        },
+        repeat = {
+          every_ms = 65,
+          macro = macro {
+            mouse_click "left",
+          },
+        },
+        after = macro {
+          key_up "Ctrl",
+        },
+      },
+    },
+  },
+  presses = {
+    {
+      requires_held = { "<Leader>" },
+      trigger = "<WheelUp>",
       mode = "passthrough",
       macro = macro {
         key "Left",
       },
     },
     {
-      trigger = { "<Leader>", "<WheelDown>" },
+      requires_held = { "<Leader>" },
+      trigger = "<WheelDown>",
       mode = "passthrough",
       macro = macro {
         key "Right",
-      },
-    },
-    {
-      trigger = { "<Leader>", "<LClick>", "<LClick>" },
-      mode = "passthrough",
-      repeat = {
-        while_held = { "<LClick>" },
-        interval_ms = { min = 50, max = 80 },
-        macro = macro {
-          mouse_click "left",
-        },
       },
     },
   },

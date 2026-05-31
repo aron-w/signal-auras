@@ -11,7 +11,7 @@ mod stats;
 pub use config::{
     BindingDefinition, BindingMode, HotkeyBinding, InputProviderBackend, InputProviderConfig,
     InputProviderMode, InputProviderOutput, LuaAutomationConfiguration, RegistrationState,
-    RuntimeMotion,
+    RuntimeMotion, RuntimePress,
 };
 pub use consent::ConsentDecision;
 pub use error::{
@@ -30,9 +30,9 @@ pub use macro_plan::{
     SynthesizedInputRequest, SynthesizedInputState,
 };
 pub use motion::{
-    AutomationDefaults, MotionDefinition, MotionDiscardReason, MotionInputEvent, MotionInputState,
-    MotionRuntime, MotionRuntimeEvent, MotionToken, MotionTrigger, RepeatDefinition,
-    RepeatInterval, DEFAULT_MOTION_DURATION,
+    AutomationDefaults, HeldCondition, LoopBody, LoopDefinition, LoopInterval, LoopRepeat,
+    MotionDefinition, MotionDiscardReason, MotionInputEvent, MotionInputState, MotionRuntime,
+    MotionRuntimeEvent, MotionToken, MotionTrigger, PressDefinition, DEFAULT_MOTION_DURATION,
 };
 pub use scope::{
     ActiveProcessConfidence, ActiveProcessContext, FocusFreshness, FocusFreshnessPolicy,

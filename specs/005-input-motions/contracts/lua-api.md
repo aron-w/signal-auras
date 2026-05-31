@@ -1,6 +1,7 @@
 # Lua API Contract: Unified Input Motions
 
-Existing `hotkeys` and `bindings` remain supported. New scripts may define `motions`:
+Existing `hotkeys` and `bindings` remain supported. New scripts may define
+`motions` and immediate guarded `presses`:
 
 ```lua
 return {
@@ -26,15 +27,33 @@ return {
       },
     },
     {
-      trigger = { "<Leader>", "<LClick>", "<LClick>" },
+      requires_held = { "<Leader>" },
+      trigger = { "<LClick>", "<LClick>" },
       mode = "passthrough",
-      repeat = {
-        while_held = { "<Leader>", "<LClick>" },
-        interval_ms = { min = 50, max = 80 },
-        macro = macro {
-          mouse_click "left",
+      within_ms = 500,
+      loop = {
+        while_held = { "<LClick>" },
+        before = macro {
+          key_down "Ctrl",
+        },
+        repeat = {
+          every_ms = 65,
+          macro = macro {
+            mouse_click "left",
+          },
+        },
+        after = macro {
+          key_up "Ctrl",
         },
       },
+    },
+  },
+  presses = {
+    {
+      requires_held = { "<Leader>" },
+      trigger = "<WheelUp>",
+      mode = "passthrough",
+      macro = macro { key "Left" },
     },
   },
 }
@@ -43,12 +62,31 @@ return {
 ## Motion Fields
 
 - `trigger`: required non-empty token list.
+- `requires_held`: optional list of holdable tokens that must already be held.
+- `within_ms`: optional positive trigger completion window; missing means `500`.
 - `mode`: optional `consume` or `passthrough`; missing means `consume`.
 - `macro`: optional one-shot macro.
-- `repeat`: optional repeat behavior.
+- `loop`: optional held loop behavior.
 - `inter_action_delay_ms`: optional non-negative override for generated actions.
 
-Each motion must define `macro` or `repeat`.
+Each motion must define `macro` or `loop`.
+
+For guarded motions, all `requires_held` tokens must be held before the first
+trigger press and must remain held until the motion completes. Releasing a
+required token discards the active attempt; if the motion already started a
+loop, the release cancels the loop and runs `after` cleanup.
+
+## Press Fields
+
+- `trigger`: required single token string.
+- `requires_held`: optional list of holdable tokens that must currently be held.
+- `mode`: optional `consume` or `passthrough`; missing means `consume`.
+- `macro`: required macro emitted immediately when the trigger press arrives.
+- `inter_action_delay_ms`: optional non-negative override for generated actions.
+
+Presses do not use `within_ms`, sequence matching, or loop scheduling. A guarded
+press whose guard is not currently satisfied emits no macro and records no
+trigger stats.
 
 ## Input Provider Fields
 
@@ -65,16 +103,26 @@ should use `mode = "passthrough"` for motions. `grab`/`consume` asks evdev for
 exclusive delivery and may support consumed motions when device permissions and
 kernel policy allow it.
 
-## Repeat Fields
+## Loop Fields
 
-- `while_held`: required token list; repeat stops when any token is released.
-- `interval_ms.min`: positive lower bound.
-- `interval_ms.max`: positive upper bound greater than or equal to `min`.
-- `macro`: required macro emitted on repeat ticks.
+- `while_held`: required token list; loop stops when any token is released.
+- `before`: optional macro emitted once when the loop starts.
+- `once`: optional one-shot loop body macro.
+- `repeat.every_ms`: positive fixed repeat interval.
+- `repeat.macro`: required macro emitted on repeat ticks.
+- `after`: optional macro emitted once when the loop ends or is cancelled.
+
+Exactly one loop body is accepted: `once` or `repeat`. `loop.next = function(...)`
+is reserved for a later callback design and is rejected for now. The removed
+`motions[].repeat.interval_ms.{min,max}` shape migrates to
+`motions[].loop.repeat.every_ms`.
 
 ## Token Set
 
-Supported tokens include `<Leader>`, printable keys, `F1` through `F24`, `<LClick>`, `<RClick>`, `<MClick>`, `<WheelUp>`, and `<WheelDown>`.
+Supported trigger tokens include `<Leader>`, printable keys, `F1` through
+`F24`, `<LClick>`, `<RClick>`, `<MClick>`, `<WheelUp>`, and `<WheelDown>`.
+`requires_held` accepts only holdable tokens: `<Leader>`, keyboard keys, and
+mouse buttons. Wheel tokens are rejected because wheel input has no held state.
 
 ## Delay Semantics
 

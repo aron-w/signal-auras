@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MacroAction {
     KeyPress { key: String },
+    KeyDown { key: String },
+    KeyUp { key: String },
     TextInput { text: String },
     MouseClick { button: MouseButton },
     Delay { duration_ms: u64 },
@@ -55,26 +57,18 @@ pub enum InputEmission {
 
 impl MacroAction {
     pub fn key(key: impl Into<String>) -> Result<Self, DiagnosableError> {
-        let key = key.into();
-        if key.contains('+') {
-            let hotkey = HotkeyId::parse(&key)?;
-            return Ok(Self::KeyPress {
-                key: hotkey.as_str().to_string(),
-            });
-        }
-        let key = KeyToken::parse(key).map_err(|error| {
-            if error.message == "key name cannot be empty" {
-                DiagnosableError::new(
-                    ErrorPhase::ScriptValidation,
-                    "key action requires a non-empty key",
-                )
-            } else {
-                error
-            }
-        })?;
-        Ok(Self::KeyPress {
-            key: key.name().to_string(),
-        })
+        let key = parse_key_name(key, "key action requires a non-empty key", true)?;
+        Ok(Self::KeyPress { key })
+    }
+
+    pub fn key_down(key: impl Into<String>) -> Result<Self, DiagnosableError> {
+        let key = parse_key_name(key, "key_down action requires a non-empty key", false)?;
+        Ok(Self::KeyDown { key })
+    }
+
+    pub fn key_up(key: impl Into<String>) -> Result<Self, DiagnosableError> {
+        let key = parse_key_name(key, "key_up action requires a non-empty key", false)?;
+        Ok(Self::KeyUp { key })
     }
 
     pub fn text(text: impl Into<String>) -> Result<Self, DiagnosableError> {
@@ -101,6 +95,26 @@ impl MacroAction {
         }
         Ok(Self::Delay { duration_ms })
     }
+}
+
+fn parse_key_name(
+    key: impl Into<String>,
+    empty_message: &'static str,
+    allow_chord: bool,
+) -> Result<String, DiagnosableError> {
+    let key = key.into();
+    if allow_chord && key.contains('+') {
+        let hotkey = HotkeyId::parse(&key)?;
+        return Ok(hotkey.as_str().to_string());
+    }
+    let key = KeyToken::parse(key).map_err(|error| {
+        if error.message == "key name cannot be empty" {
+            DiagnosableError::new(ErrorPhase::ScriptValidation, empty_message)
+        } else {
+            error
+        }
+    })?;
+    Ok(key.name().to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

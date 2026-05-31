@@ -71,7 +71,7 @@ A user configures default and per-motion generated-action delays while retaining
 - **FR-002**: Each motion MUST have `trigger = { ... }` with one or more uniform tokens.
 - **FR-003**: Supported tokens MUST include `<Leader>`, printable keys, function keys, `<LClick>`, `<RClick>`, `<MClick>`, `<WheelUp>`, and `<WheelDown>`.
 - **FR-004**: Each motion MUST support `mode = "consume"` and `mode = "passthrough"`, defaulting to `consume`.
-- **FR-005**: Each motion MUST define either `macro` or `repeat`; a repeat MUST define `while_held`, `interval_ms`, and an emitted macro.
+- **FR-005**: Each motion MUST define either `macro` or `loop`; a loop MUST define `while_held` and exactly one body, either `once` or `repeat = { every_ms, macro }`.
 - **FR-006**: Repeat intervals MUST reject zero, negative, and `min > max` values.
 - **FR-007**: The final matching mouse token MAY remain physically down and satisfy `repeat.while_held`.
 - **FR-008**: `defaults.inter_action_delay_ms` MUST apply between generated macro actions, and `motion.inter_action_delay_ms` MUST override it.

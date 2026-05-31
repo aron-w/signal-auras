@@ -8,7 +8,9 @@ Use `motions` as the preferred future model while preserving `hotkeys` and struc
 
 ## Decision: Repeat Owns Held State
 
-Represent repeat behavior with `repeat.while_held`, `repeat.interval_ms`, and `repeat.macro`.
+Represent held loop behavior with `loop.while_held` and exactly one body:
+`loop.once = macro { ... }` or
+`loop.repeat = { every_ms = <positive integer>, macro = macro { ... } }`.
 
 **Rationale**: A separate `hold = true` flag duplicates the held-state list and makes cancellation less explicit.
 

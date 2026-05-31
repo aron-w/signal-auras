@@ -11,10 +11,13 @@ The same parser accepts key names in:
 
 - `leader`
 - `motions[].trigger`
-- `motions[].repeat.while_held`
+- `motions[].requires_held`
+- `motions[].loop.while_held`
+- `presses[].trigger`
+- `presses[].requires_held`
 - `bindings[].trigger.key`
 - legacy `hotkeys` table keys
-- `macro { key "..." }`
+- `macro { key "..." }`, `macro { key_down "..." }`, and `macro { key_up "..." }`
 
 Mouse tokens such as `<LClick>` and wheel tokens remain separate motion tokens.
 

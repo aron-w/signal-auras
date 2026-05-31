@@ -25,11 +25,19 @@ pub fn validate_request_for_portal(
 ) -> Result<(), DiagnosableError> {
     match &request.action {
         MacroAction::TextInput { text } => validate_text_for_key_translation(text),
-        MacroAction::KeyPress { key } if key.trim().is_empty() => Err(DiagnosableError::new(
-            ErrorPhase::MacroExecution,
-            "key input cannot be empty",
-        )),
+        MacroAction::KeyPress { key }
+        | MacroAction::KeyDown { key }
+        | MacroAction::KeyUp { key }
+            if key.trim().is_empty() =>
+        {
+            Err(DiagnosableError::new(
+                ErrorPhase::MacroExecution,
+                "key input cannot be empty",
+            ))
+        }
         MacroAction::KeyPress { .. }
+        | MacroAction::KeyDown { .. }
+        | MacroAction::KeyUp { .. }
         | MacroAction::MouseClick { .. }
         | MacroAction::Delay { .. } => Ok(()),
     }

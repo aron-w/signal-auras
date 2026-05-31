@@ -1,6 +1,6 @@
 use crate::{
     AutomationDefaults, BindingTrigger, DiagnosableError, ErrorPhase, HotkeyId, MacroDefinition,
-    MotionDefinition, MotionToken, ScopeSelection, ScriptScope,
+    MotionDefinition, MotionToken, PressDefinition, ScopeSelection, ScriptScope,
 };
 use std::{collections::BTreeMap, path::PathBuf};
 
@@ -12,6 +12,7 @@ pub struct LuaAutomationConfiguration {
     pub input_provider: Option<InputProviderConfig>,
     bindings: BTreeMap<BindingTrigger, BindingDefinition>,
     motions: BTreeMap<crate::MotionTrigger, MotionDefinition>,
+    presses: BTreeMap<MotionToken, PressDefinition>,
 }
 
 impl LuaAutomationConfiguration {
@@ -51,6 +52,7 @@ impl LuaAutomationConfiguration {
             None,
             bindings,
             Vec::new(),
+            Vec::new(),
         )
     }
 
@@ -61,11 +63,12 @@ impl LuaAutomationConfiguration {
         input_provider: Option<InputProviderConfig>,
         bindings: Vec<BindingDefinition>,
         motions: Vec<MotionDefinition>,
+        presses: Vec<PressDefinition>,
     ) -> Result<Self, DiagnosableError> {
-        if bindings.is_empty() && motions.is_empty() {
+        if bindings.is_empty() && motions.is_empty() && presses.is_empty() {
             return Err(DiagnosableError::new(
                 ErrorPhase::ScriptValidation,
-                "configuration must contain at least one binding or motion",
+                "configuration must contain at least one binding, motion, or press",
             ));
         }
 
@@ -94,6 +97,18 @@ impl LuaAutomationConfiguration {
             }
         }
         reject_prefix_overlapping_motion_triggers(normalized_motions.keys())?;
+        let mut normalized_presses = BTreeMap::new();
+        for press in presses {
+            if normalized_presses
+                .insert(press.trigger.clone(), press)
+                .is_some()
+            {
+                return Err(DiagnosableError::new(
+                    ErrorPhase::ScriptValidation,
+                    "duplicate press trigger after normalization",
+                ));
+            }
+        }
 
         Ok(Self {
             scope,
@@ -102,6 +117,7 @@ impl LuaAutomationConfiguration {
             input_provider,
             bindings: normalized,
             motions: normalized_motions,
+            presses: normalized_presses,
         })
     }
 
@@ -125,11 +141,25 @@ impl LuaAutomationConfiguration {
         &self.motions
     }
 
+    pub fn presses(&self) -> &BTreeMap<MotionToken, PressDefinition> {
+        &self.presses
+    }
+
     pub fn motions_for_scope(&self, scope: ScopeSelection) -> Vec<RuntimeMotion> {
         self.motions
             .values()
             .map(|motion| RuntimeMotion {
                 definition: motion.clone(),
+                scope: scope.clone(),
+            })
+            .collect()
+    }
+
+    pub fn presses_for_scope(&self, scope: ScopeSelection) -> Vec<RuntimePress> {
+        self.presses
+            .values()
+            .map(|press| RuntimePress {
+                definition: press.clone(),
                 scope: scope.clone(),
             })
             .collect()
@@ -350,6 +380,12 @@ pub struct RuntimeMotion {
     pub scope: ScopeSelection,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePress {
+    pub definition: PressDefinition,
+    pub scope: ScopeSelection,
+}
+
 impl HotkeyBinding {
     pub fn trigger_label(&self) -> String {
         self.trigger.describe()
@@ -440,6 +476,7 @@ mod tests {
             BindingMode::Consume,
             Some(macro_def()),
             None,
+            crate::motion::DEFAULT_MOTION_DURATION.as_millis() as u64,
             0,
         )
         .unwrap();
@@ -448,6 +485,7 @@ mod tests {
             BindingMode::Passthrough,
             Some(macro_def()),
             None,
+            crate::motion::DEFAULT_MOTION_DURATION.as_millis() as u64,
             0,
         )
         .unwrap();
@@ -459,6 +497,7 @@ mod tests {
             None,
             Vec::new(),
             vec![first, second],
+            Vec::new(),
         )
         .is_err());
     }
@@ -472,6 +511,7 @@ mod tests {
             BindingMode::Consume,
             Some(macro_def()),
             None,
+            crate::motion::DEFAULT_MOTION_DURATION.as_millis() as u64,
             0,
         )
         .unwrap();
@@ -480,6 +520,7 @@ mod tests {
             BindingMode::Passthrough,
             Some(macro_def()),
             None,
+            crate::motion::DEFAULT_MOTION_DURATION.as_millis() as u64,
             0,
         )
         .unwrap();
@@ -491,6 +532,7 @@ mod tests {
             None,
             Vec::new(),
             vec![first, second],
+            Vec::new(),
         )
         .is_err());
     }

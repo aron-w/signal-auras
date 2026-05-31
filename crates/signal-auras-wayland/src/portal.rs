@@ -134,7 +134,9 @@ fn emit_request(
             }
             Ok(())
         }
-        MacroAction::KeyPress { key } => {
+        MacroAction::KeyPress { key }
+        | MacroAction::KeyDown { key }
+        | MacroAction::KeyUp { key } => {
             let keysym = key_name_to_keysym(key).ok_or_else(|| {
                 DiagnosableError::new(
                     ErrorPhase::MacroExecution,
@@ -144,7 +146,15 @@ fn emit_request(
                 .with_source("xdg-desktop-portal RemoteDesktop")
                 .with_remediation("use a supported named key or ASCII text input")
             })?;
-            emit_keysym(proxy, session, keysym)
+            match &request.action {
+                MacroAction::KeyDown { .. } => {
+                    emit_keysym_state(proxy, session, keysym, KeyState::Pressed)
+                }
+                MacroAction::KeyUp { .. } => {
+                    emit_keysym_state(proxy, session, keysym, KeyState::Released)
+                }
+                _ => emit_keysym(proxy, session, keysym),
+            }
         }
         MacroAction::MouseClick { button } => {
             let evdev_button = mouse_button_to_evdev(*button);
@@ -174,6 +184,25 @@ fn emit_keysym(
                 session,
                 keysym,
                 KeyState::Released,
+                NotifyKeyboardKeysymOptions::default(),
+            )
+            .await
+    })
+    .map_err(portal_error)
+}
+
+fn emit_keysym_state(
+    proxy: &RemoteDesktop,
+    session: &Session<RemoteDesktop>,
+    keysym: i32,
+    state: KeyState,
+) -> Result<(), DiagnosableError> {
+    portal_block_on(async {
+        proxy
+            .notify_keyboard_keysym(
+                session,
+                keysym,
+                state,
                 NotifyKeyboardKeysymOptions::default(),
             )
             .await

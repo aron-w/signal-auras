@@ -12,14 +12,27 @@ return {
       },
     },
     {
-      trigger = { "<Leader>", "<LClick>", "<LClick>" },
+      requires_held = { "<Leader>" },
+      trigger = { "<LClick>", "<LClick>" },
       mode = "passthrough",
-      repeat = {
-        while_held = { "<Leader>", "<LClick>" },
-        interval_ms = { min = 50, max = 80 },
-        macro = macro {
-          mouse_click "left",
+      loop = {
+        while_held = { "<LClick>" },
+        repeat = {
+          every_ms = 65,
+          macro = macro {
+            mouse_click "left",
+          },
         },
+      },
+    },
+  },
+  presses = {
+    {
+      requires_held = { "<Leader>" },
+      trigger = "<WheelUp>",
+      mode = "passthrough",
+      macro = macro {
+        key "Left",
       },
     },
   },

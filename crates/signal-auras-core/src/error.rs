@@ -211,6 +211,8 @@ impl CapabilitySet {
                 matches!(
                     action,
                     crate::macro_plan::MacroAction::KeyPress { .. }
+                        | crate::macro_plan::MacroAction::KeyDown { .. }
+                        | crate::macro_plan::MacroAction::KeyUp { .. }
                         | crate::macro_plan::MacroAction::TextInput { .. }
                         | crate::macro_plan::MacroAction::MouseClick { .. }
                 )
@@ -247,10 +249,42 @@ impl CapabilitySet {
                 .macro_definition
                 .as_ref()
                 .is_some_and(macro_requires_synthesized_input)
-                || motion.repeat.as_ref().is_some_and(|repeat| {
-                    macro_requires_synthesized_input(&repeat.macro_definition)
-                });
+                || motion
+                    .loop_definition
+                    .as_ref()
+                    .is_some_and(|loop_definition| {
+                        loop_definition
+                            .before
+                            .as_ref()
+                            .is_some_and(macro_requires_synthesized_input)
+                            || match &loop_definition.body {
+                                crate::motion::LoopBody::Once(macro_definition) => {
+                                    macro_requires_synthesized_input(macro_definition)
+                                }
+                                crate::motion::LoopBody::Repeat(repeat) => {
+                                    macro_requires_synthesized_input(&repeat.macro_definition)
+                                }
+                            }
+                            || loop_definition
+                                .after
+                                .as_ref()
+                                .is_some_and(macro_requires_synthesized_input)
+                    });
             if has_generated_input {
+                required.push(CapabilityKind::SynthesizedInput);
+            }
+        }
+        if !config.presses().is_empty()
+            && matches!(scope, crate::scope::ScopeSelection::ProcessList { .. })
+        {
+            required.push(CapabilityKind::ActiveProcessMetadata);
+        }
+        for press in config.presses().values() {
+            required.push(CapabilityKind::CompositePointerObservation);
+            if press.mode == crate::config::BindingMode::Consume {
+                required.push(CapabilityKind::CompositePointerConsumption);
+            }
+            if macro_requires_synthesized_input(&press.macro_definition) {
                 required.push(CapabilityKind::SynthesizedInput);
             }
         }
@@ -340,6 +374,8 @@ fn macro_requires_synthesized_input(definition: &crate::macro_plan::MacroDefinit
         matches!(
             action,
             crate::macro_plan::MacroAction::KeyPress { .. }
+                | crate::macro_plan::MacroAction::KeyDown { .. }
+                | crate::macro_plan::MacroAction::KeyUp { .. }
                 | crate::macro_plan::MacroAction::TextInput { .. }
                 | crate::macro_plan::MacroAction::MouseClick { .. }
         )

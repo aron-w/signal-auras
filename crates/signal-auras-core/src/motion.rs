@@ -66,6 +66,60 @@ impl MotionToken {
     pub fn requires_pointer_observation(&self) -> bool {
         matches!(self, Self::MouseButton(_) | Self::Wheel(_))
     }
+
+    pub fn can_be_held(&self) -> bool {
+        !matches!(self, Self::Wheel(_))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldCondition(Vec<MotionToken>);
+
+impl HeldCondition {
+    pub fn new(tokens: Vec<MotionToken>) -> Result<Self, DiagnosableError> {
+        for token in &tokens {
+            if !token.can_be_held() {
+                return Err(DiagnosableError::new(
+                    ErrorPhase::ScriptValidation,
+                    format!("requires_held token '{}' cannot be held", token.describe()),
+                ));
+            }
+        }
+        Ok(Self(tokens))
+    }
+
+    pub fn parse(
+        tokens: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Result<Self, DiagnosableError> {
+        Self::new(
+            tokens
+                .into_iter()
+                .map(MotionToken::parse)
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+    }
+
+    pub fn tokens(&self) -> &[MotionToken] {
+        &self.0
+    }
+
+    pub fn is_satisfied_by(&self, held: &BTreeSet<MotionToken>) -> bool {
+        self.0.iter().all(|token| held.contains(token))
+    }
+
+    pub fn contains(&self, token: &MotionToken) -> bool {
+        self.0.contains(token)
+    }
+
+    pub fn contains_leader(&self) -> bool {
+        self.0
+            .iter()
+            .any(|token| matches!(token, MotionToken::Leader))
+    }
+
+    pub fn requires_pointer_observation(&self) -> bool {
+        self.0.iter().any(MotionToken::requires_pointer_observation)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -117,38 +171,31 @@ impl MotionTrigger {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RepeatInterval {
-    pub min_ms: u64,
-    pub max_ms: u64,
+pub struct LoopInterval {
+    pub every_ms: u64,
 }
 
-impl RepeatInterval {
-    pub fn new(min_ms: u64, max_ms: u64) -> Result<Self, DiagnosableError> {
-        if min_ms == 0 || max_ms == 0 || min_ms > max_ms {
+impl LoopInterval {
+    pub fn new(every_ms: u64) -> Result<Self, DiagnosableError> {
+        if every_ms == 0 {
             return Err(DiagnosableError::new(
                 ErrorPhase::ScriptValidation,
-                "repeat interval must have positive min and max with min <= max",
+                "loop repeat every_ms must be a positive integer",
             ));
         }
-        Ok(Self { min_ms, max_ms })
+        Ok(Self { every_ms })
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RepeatDefinition {
-    pub while_held: MotionTrigger,
-    pub interval: RepeatInterval,
+pub struct LoopRepeat {
+    pub interval: LoopInterval,
     pub macro_definition: MacroDefinition,
 }
 
-impl RepeatDefinition {
-    pub fn new(
-        while_held: MotionTrigger,
-        interval: RepeatInterval,
-        macro_definition: MacroDefinition,
-    ) -> Self {
+impl LoopRepeat {
+    pub fn new(interval: LoopInterval, macro_definition: MacroDefinition) -> Self {
         Self {
-            while_held,
             interval,
             macro_definition,
         }
@@ -156,11 +203,50 @@ impl RepeatDefinition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoopBody {
+    Once(MacroDefinition),
+    Repeat(LoopRepeat),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopDefinition {
+    pub while_held: MotionTrigger,
+    pub before: Option<MacroDefinition>,
+    pub body: LoopBody,
+    pub after: Option<MacroDefinition>,
+}
+
+impl LoopDefinition {
+    pub fn new(
+        while_held: MotionTrigger,
+        before: Option<MacroDefinition>,
+        body: LoopBody,
+        after: Option<MacroDefinition>,
+    ) -> Self {
+        Self {
+            while_held,
+            before,
+            body,
+            after,
+        }
+    }
+
+    pub fn repeat(&self) -> Option<&LoopRepeat> {
+        match &self.body {
+            LoopBody::Once(_) => None,
+            LoopBody::Repeat(repeat) => Some(repeat),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MotionDefinition {
+    pub requires_held: HeldCondition,
     pub trigger: MotionTrigger,
     pub mode: crate::BindingMode,
     pub macro_definition: Option<MacroDefinition>,
-    pub repeat: Option<RepeatDefinition>,
+    pub loop_definition: Option<LoopDefinition>,
+    pub within_ms: u64,
     pub inter_action_delay_ms: u64,
 }
 
@@ -169,30 +255,102 @@ impl MotionDefinition {
         trigger: MotionTrigger,
         mode: crate::BindingMode,
         macro_definition: Option<MacroDefinition>,
-        repeat: Option<RepeatDefinition>,
+        loop_definition: Option<LoopDefinition>,
+        within_ms: u64,
         inter_action_delay_ms: u64,
     ) -> Result<Self, DiagnosableError> {
-        if macro_definition.is_none() && repeat.is_none() {
-            return Err(DiagnosableError::new(
-                ErrorPhase::ScriptValidation,
-                "motion must define macro or repeat",
-            ));
-        }
-        Ok(Self {
+        Self::with_requires_held(
+            HeldCondition::new(Vec::new())?,
             trigger,
             mode,
             macro_definition,
-            repeat,
+            loop_definition,
+            within_ms,
+            inter_action_delay_ms,
+        )
+    }
+
+    pub fn with_requires_held(
+        requires_held: HeldCondition,
+        trigger: MotionTrigger,
+        mode: crate::BindingMode,
+        macro_definition: Option<MacroDefinition>,
+        loop_definition: Option<LoopDefinition>,
+        within_ms: u64,
+        inter_action_delay_ms: u64,
+    ) -> Result<Self, DiagnosableError> {
+        if within_ms == 0 {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                "motion within_ms must be a positive integer",
+            ));
+        }
+        if macro_definition.is_none() && loop_definition.is_none() {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                "motion must define macro or loop",
+            ));
+        }
+        Ok(Self {
+            requires_held,
+            trigger,
+            mode,
+            macro_definition,
+            loop_definition,
+            within_ms,
             inter_action_delay_ms,
         })
     }
 
     pub fn requires_pointer_observation(&self) -> bool {
-        self.trigger.requires_pointer_observation()
+        self.requires_held.requires_pointer_observation()
+            || self.trigger.requires_pointer_observation()
             || self
-                .repeat
+                .loop_definition
                 .as_ref()
-                .is_some_and(|repeat| repeat.while_held.requires_pointer_observation())
+                .is_some_and(|loop_definition| {
+                    loop_definition.while_held.requires_pointer_observation()
+                })
+    }
+
+    fn requires_held_satisfied(&self, held: &BTreeSet<MotionToken>) -> bool {
+        self.requires_held.is_satisfied_by(held)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PressDefinition {
+    pub requires_held: HeldCondition,
+    pub trigger: MotionToken,
+    pub mode: crate::BindingMode,
+    pub macro_definition: MacroDefinition,
+    pub inter_action_delay_ms: u64,
+}
+
+impl PressDefinition {
+    pub fn new(
+        requires_held: HeldCondition,
+        trigger: MotionToken,
+        mode: crate::BindingMode,
+        macro_definition: MacroDefinition,
+        inter_action_delay_ms: u64,
+    ) -> Self {
+        Self {
+            requires_held,
+            trigger,
+            mode,
+            macro_definition,
+            inter_action_delay_ms,
+        }
+    }
+
+    pub fn guard_is_satisfied_by(&self, held: &BTreeSet<MotionToken>) -> bool {
+        self.requires_held.is_satisfied_by(held)
+    }
+
+    pub fn requires_pointer_observation(&self) -> bool {
+        self.requires_held.requires_pointer_observation()
+            || self.trigger.requires_pointer_observation()
     }
 }
 
@@ -228,9 +386,9 @@ impl MotionInputEvent {
 pub enum MotionRuntimeEvent {
     Triggered {
         trigger: MotionTrigger,
-        starts_repeat: bool,
+        starts_loop: bool,
     },
-    RepeatCancelled {
+    LoopCancelled {
         trigger: MotionTrigger,
     },
     MotionDiscarded {
@@ -242,6 +400,7 @@ pub enum MotionRuntimeEvent {
 pub enum MotionDiscardReason {
     Timeout,
     UnrelatedPress,
+    PreconditionReleased,
 }
 
 #[derive(Debug, Clone)]
@@ -249,8 +408,7 @@ pub struct MotionRuntime {
     motions: BTreeMap<MotionTrigger, MotionDefinition>,
     active_attempt: Option<MotionAttempt>,
     held: BTreeSet<MotionToken>,
-    active_repeats: BTreeSet<MotionTrigger>,
-    motion_duration: Duration,
+    active_loops: BTreeSet<MotionTrigger>,
 }
 
 #[derive(Debug, Clone)]
@@ -270,8 +428,7 @@ impl MotionRuntime {
             motions,
             active_attempt: None,
             held: BTreeSet::new(),
-            active_repeats: BTreeSet::new(),
-            motion_duration: DEFAULT_MOTION_DURATION,
+            active_loops: BTreeSet::new(),
         }
     }
 
@@ -294,13 +451,13 @@ impl MotionRuntime {
         }
     }
 
-    pub fn repeat_is_active(&self, trigger: &MotionTrigger) -> bool {
-        self.active_repeats.contains(trigger)
+    pub fn loop_is_active(&self, trigger: &MotionTrigger) -> bool {
+        self.active_loops.contains(trigger)
     }
 
-    pub fn cancel_active_repeats(&mut self) -> Vec<MotionTrigger> {
-        let cancelled = self.active_repeats.iter().cloned().collect::<Vec<_>>();
-        self.active_repeats.clear();
+    pub fn cancel_active_loops(&mut self) -> Vec<MotionTrigger> {
+        let cancelled = self.active_loops.iter().cloned().collect::<Vec<_>>();
+        self.active_loops.clear();
         cancelled
     }
 
@@ -312,9 +469,7 @@ impl MotionRuntime {
         self.held.insert(token.clone());
         let mut events = Vec::new();
 
-        if self.active_attempt.as_ref().is_some_and(|attempt| {
-            event_time.saturating_sub(attempt.started_at) > self.motion_duration
-        }) {
+        if self.active_attempt_expired(event_time) {
             self.active_attempt = None;
             events.push(MotionRuntimeEvent::MotionDiscarded {
                 reason: MotionDiscardReason::Timeout,
@@ -323,10 +478,17 @@ impl MotionRuntime {
 
         if let Some(attempt) = &mut self.active_attempt {
             let next_progress = attempt.progress + 1;
+            let elapsed = event_time.saturating_sub(attempt.started_at);
             let candidates = attempt
                 .candidates
                 .iter()
                 .filter(|trigger| trigger.tokens().get(attempt.progress) == Some(&token))
+                .filter(|trigger| {
+                    self.motions.get(*trigger).is_some_and(|motion| {
+                        elapsed <= Duration::from_millis(motion.within_ms)
+                            && motion.requires_held_satisfied(&self.held)
+                    })
+                })
                 .cloned()
                 .collect::<BTreeSet<_>>();
             if candidates.is_empty() {
@@ -354,8 +516,12 @@ impl MotionRuntime {
 
         let candidates = self
             .motions
-            .keys()
-            .filter(|trigger| trigger.tokens().first() == Some(&token))
+            .iter()
+            .filter(|(trigger, motion)| {
+                trigger.tokens().first() == Some(&token)
+                    && motion.requires_held_satisfied(&self.held)
+            })
+            .map(|(trigger, _)| trigger)
             .cloned()
             .collect::<BTreeSet<_>>();
         if candidates.is_empty() {
@@ -381,39 +547,72 @@ impl MotionRuntime {
 
     fn trigger_event(&mut self, trigger: MotionTrigger) -> Option<MotionRuntimeEvent> {
         let motion = self.motions.get(&trigger)?;
-        let starts_repeat = motion
-            .repeat
+        let starts_loop = motion
+            .loop_definition
             .as_ref()
-            .is_some_and(|repeat| self.while_held_satisfied(&repeat.while_held));
-        if starts_repeat {
-            self.active_repeats.insert(trigger.clone());
+            .is_some_and(|loop_definition| self.while_held_satisfied(&loop_definition.while_held));
+        if starts_loop {
+            self.active_loops.insert(trigger.clone());
         }
         Some(MotionRuntimeEvent::Triggered {
             trigger,
-            starts_repeat,
+            starts_loop,
         })
     }
 
     fn handle_release(&mut self, token: MotionToken) -> Vec<MotionRuntimeEvent> {
         self.held.remove(&token);
+        let mut events = Vec::new();
+        if self.active_attempt.as_ref().is_some_and(|attempt| {
+            attempt.candidates.iter().any(|trigger| {
+                self.motions
+                    .get(trigger)
+                    .is_some_and(|motion| motion.requires_held.contains(&token))
+            })
+        }) {
+            self.active_attempt = None;
+            events.push(MotionRuntimeEvent::MotionDiscarded {
+                reason: MotionDiscardReason::PreconditionReleased,
+            });
+        }
         let cancelled = self
-            .active_repeats
+            .active_loops
             .iter()
             .filter(|trigger| {
                 self.motions
                     .get(*trigger)
-                    .and_then(|motion| motion.repeat.as_ref())
-                    .is_some_and(|repeat| !self.while_held_satisfied(&repeat.while_held))
+                    .and_then(|motion| motion.loop_definition.as_ref())
+                    .is_some_and(|loop_definition| {
+                        !self.while_held_satisfied(&loop_definition.while_held)
+                    })
+                    || self
+                        .motions
+                        .get(*trigger)
+                        .is_some_and(|motion| !motion.requires_held_satisfied(&self.held))
             })
             .cloned()
             .collect::<Vec<_>>();
         for trigger in &cancelled {
-            self.active_repeats.remove(trigger);
+            self.active_loops.remove(trigger);
         }
-        cancelled
-            .into_iter()
-            .map(|trigger| MotionRuntimeEvent::RepeatCancelled { trigger })
-            .collect()
+        events.extend(
+            cancelled
+                .into_iter()
+                .map(|trigger| MotionRuntimeEvent::LoopCancelled { trigger }),
+        );
+        events
+    }
+
+    fn active_attempt_expired(&self, event_time: Duration) -> bool {
+        let Some(attempt) = &self.active_attempt else {
+            return false;
+        };
+        let elapsed = event_time.saturating_sub(attempt.started_at);
+        attempt.candidates.iter().all(|trigger| {
+            self.motions
+                .get(trigger)
+                .is_none_or(|motion| elapsed > Duration::from_millis(motion.within_ms))
+        })
     }
 
     fn while_held_satisfied(&self, trigger: &MotionTrigger) -> bool {
@@ -421,6 +620,10 @@ impl MotionRuntime {
             .tokens()
             .iter()
             .all(|token| self.held.contains(token))
+    }
+
+    pub fn held_satisfies(&self, condition: &HeldCondition) -> bool {
+        condition.is_satisfied_by(&self.held)
     }
 }
 
@@ -441,6 +644,7 @@ mod tests {
             BindingMode::Consume,
             Some(macro_def()),
             None,
+            DEFAULT_MOTION_DURATION.as_millis() as u64,
             0,
         )
         .unwrap();
@@ -458,7 +662,7 @@ mod tests {
             events,
             vec![MotionRuntimeEvent::Triggered {
                 trigger,
-                starts_repeat: false,
+                starts_loop: false,
             }]
         );
     }
@@ -471,6 +675,7 @@ mod tests {
             BindingMode::Consume,
             Some(macro_def()),
             None,
+            DEFAULT_MOTION_DURATION.as_millis() as u64,
             0,
         )
         .unwrap();
@@ -497,7 +702,7 @@ mod tests {
             events,
             vec![MotionRuntimeEvent::Triggered {
                 trigger: trigger.clone(),
-                starts_repeat: false,
+                starts_loop: false,
             }]
         );
 
@@ -531,6 +736,7 @@ mod tests {
             BindingMode::Consume,
             Some(macro_def()),
             None,
+            DEFAULT_MOTION_DURATION.as_millis() as u64,
             0,
         )
         .unwrap();
@@ -565,7 +771,7 @@ mod tests {
             triggered,
             vec![MotionRuntimeEvent::Triggered {
                 trigger,
-                starts_repeat: false,
+                starts_loop: false,
             }]
         );
     }
@@ -609,11 +815,13 @@ mod tests {
             trigger.clone(),
             BindingMode::Passthrough,
             None,
-            Some(RepeatDefinition::new(
+            Some(LoopDefinition::new(
                 MotionTrigger::parse(["<Leader>", "<LClick>"]).unwrap(),
-                RepeatInterval::new(50, 80).unwrap(),
-                macro_def(),
+                None,
+                LoopBody::Repeat(LoopRepeat::new(LoopInterval::new(50).unwrap(), macro_def())),
+                None,
             )),
+            DEFAULT_MOTION_DURATION.as_millis() as u64,
             0,
         )
         .unwrap();
@@ -634,20 +842,20 @@ mod tests {
             events,
             vec![MotionRuntimeEvent::Triggered {
                 trigger: trigger.clone(),
-                starts_repeat: true,
+                starts_loop: true,
             }]
         );
-        assert!(runtime.repeat_is_active(&trigger));
+        assert!(runtime.loop_is_active(&trigger));
 
         let cancelled = runtime.handle_input(MotionInputEvent::released(MotionToken::Leader));
 
         assert_eq!(
             cancelled,
-            vec![MotionRuntimeEvent::RepeatCancelled {
+            vec![MotionRuntimeEvent::LoopCancelled {
                 trigger: trigger.clone(),
             }]
         );
-        assert!(!runtime.repeat_is_active(&trigger));
+        assert!(!runtime.loop_is_active(&trigger));
     }
 
     #[test]
@@ -657,11 +865,13 @@ mod tests {
             trigger.clone(),
             BindingMode::Passthrough,
             None,
-            Some(RepeatDefinition::new(
+            Some(LoopDefinition::new(
                 MotionTrigger::parse(["<Leader>", "<LClick>"]).unwrap(),
-                RepeatInterval::new(50, 80).unwrap(),
-                macro_def(),
+                None,
+                LoopBody::Repeat(LoopRepeat::new(LoopInterval::new(50).unwrap(), macro_def())),
+                None,
             )),
+            DEFAULT_MOTION_DURATION.as_millis() as u64,
             0,
         )
         .unwrap();
@@ -678,7 +888,7 @@ mod tests {
             MouseButton::Left,
         )));
 
-        assert!(runtime.repeat_is_active(&trigger));
+        assert!(runtime.loop_is_active(&trigger));
         assert_eq!(
             runtime
                 .handle_input(MotionInputEvent::released(MotionToken::MouseButton(
@@ -692,6 +902,112 @@ mod tests {
                 MouseButton::Left,
             )))
             .is_empty());
-        assert!(!runtime.repeat_is_active(&trigger));
+        assert!(!runtime.loop_is_active(&trigger));
+    }
+
+    #[test]
+    fn guarded_motion_requires_hold_before_first_press() {
+        let trigger = MotionTrigger::parse(["<LClick>", "<LClick>"]).unwrap();
+        let motion = MotionDefinition::with_requires_held(
+            HeldCondition::parse(["<Leader>"]).unwrap(),
+            trigger,
+            BindingMode::Consume,
+            Some(macro_def()),
+            None,
+            DEFAULT_MOTION_DURATION.as_millis() as u64,
+            0,
+        )
+        .unwrap();
+        let mut runtime = MotionRuntime::new([motion]);
+
+        assert!(runtime
+            .handle_input(MotionInputEvent::pressed(MotionToken::MouseButton(
+                MouseButton::Left,
+            )))
+            .is_empty());
+        assert!(runtime
+            .handle_input(MotionInputEvent::pressed(MotionToken::Leader))
+            .is_empty());
+        assert!(runtime
+            .handle_input(MotionInputEvent::pressed(MotionToken::MouseButton(
+                MouseButton::Left,
+            )))
+            .is_empty());
+    }
+
+    #[test]
+    fn releasing_guard_discards_active_motion_attempt() {
+        let trigger = MotionTrigger::parse(["<LClick>", "<LClick>"]).unwrap();
+        let motion = MotionDefinition::with_requires_held(
+            HeldCondition::parse(["<Leader>"]).unwrap(),
+            trigger,
+            BindingMode::Consume,
+            Some(macro_def()),
+            None,
+            DEFAULT_MOTION_DURATION.as_millis() as u64,
+            0,
+        )
+        .unwrap();
+        let mut runtime = MotionRuntime::new([motion]);
+
+        runtime.handle_input(MotionInputEvent::pressed(MotionToken::Leader));
+        runtime.handle_input(MotionInputEvent::pressed(MotionToken::MouseButton(
+            MouseButton::Left,
+        )));
+        let discarded = runtime.handle_input(MotionInputEvent::released(MotionToken::Leader));
+        runtime.handle_input(MotionInputEvent::pressed(MotionToken::Leader));
+        let second_click = runtime.handle_input(MotionInputEvent::pressed(
+            MotionToken::MouseButton(MouseButton::Left),
+        ));
+
+        assert_eq!(
+            discarded,
+            vec![MotionRuntimeEvent::MotionDiscarded {
+                reason: MotionDiscardReason::PreconditionReleased,
+            }]
+        );
+        assert!(second_click.is_empty());
+    }
+
+    #[test]
+    fn guard_release_cancels_active_loop() {
+        let trigger = MotionTrigger::parse(["<LClick>", "<LClick>"]).unwrap();
+        let motion = MotionDefinition::with_requires_held(
+            HeldCondition::parse(["<Leader>"]).unwrap(),
+            trigger.clone(),
+            BindingMode::Passthrough,
+            None,
+            Some(LoopDefinition::new(
+                MotionTrigger::parse(["<LClick>"]).unwrap(),
+                None,
+                LoopBody::Repeat(LoopRepeat::new(LoopInterval::new(50).unwrap(), macro_def())),
+                Some(macro_def()),
+            )),
+            DEFAULT_MOTION_DURATION.as_millis() as u64,
+            0,
+        )
+        .unwrap();
+        let mut runtime = MotionRuntime::new([motion]);
+
+        runtime.handle_input(MotionInputEvent::pressed(MotionToken::Leader));
+        runtime.handle_input(MotionInputEvent::pressed(MotionToken::MouseButton(
+            MouseButton::Left,
+        )));
+        let triggered = runtime.handle_input(MotionInputEvent::pressed(MotionToken::MouseButton(
+            MouseButton::Left,
+        )));
+        let cancelled = runtime.handle_input(MotionInputEvent::released(MotionToken::Leader));
+
+        assert_eq!(
+            triggered,
+            vec![MotionRuntimeEvent::Triggered {
+                trigger: trigger.clone(),
+                starts_loop: true,
+            }]
+        );
+        assert_eq!(
+            cancelled,
+            vec![MotionRuntimeEvent::LoopCancelled { trigger }]
+        );
     }
 }

@@ -135,14 +135,19 @@ fn motion_consume_requires_input_observation_consumption_and_synthesized_input()
         MotionTrigger::parse(["<Leader>", "<LClick>", "<LClick>"]).unwrap(),
         BindingMode::Consume,
         None,
-        Some(signal_auras_core::RepeatDefinition::new(
+        Some(signal_auras_core::LoopDefinition::new(
             MotionTrigger::parse(["<Leader>", "<LClick>"]).unwrap(),
-            signal_auras_core::RepeatInterval::new(50, 80).unwrap(),
-            MacroDefinition::new(vec![MacroAction::mouse_click(
-                signal_auras_core::MouseButton::Left,
-            )])
-            .unwrap(),
+            None,
+            signal_auras_core::LoopBody::Repeat(signal_auras_core::LoopRepeat::new(
+                signal_auras_core::LoopInterval::new(50).unwrap(),
+                MacroDefinition::new(vec![MacroAction::mouse_click(
+                    signal_auras_core::MouseButton::Left,
+                )])
+                .unwrap(),
+            )),
+            None,
         )),
+        signal_auras_core::DEFAULT_MOTION_DURATION.as_millis() as u64,
         0,
     )
     .unwrap();
@@ -153,6 +158,7 @@ fn motion_consume_requires_input_observation_consumption_and_synthesized_input()
         None,
         Vec::new(),
         vec![motion],
+        Vec::new(),
     )
     .unwrap();
 
@@ -170,6 +176,7 @@ fn motion_passthrough_does_not_require_input_consumption() {
         BindingMode::Passthrough,
         Some(MacroDefinition::new(vec![MacroAction::text("x").unwrap()]).unwrap()),
         None,
+        signal_auras_core::DEFAULT_MOTION_DURATION.as_millis() as u64,
         0,
     )
     .unwrap();
@@ -180,6 +187,7 @@ fn motion_passthrough_does_not_require_input_consumption() {
         None,
         Vec::new(),
         vec![motion],
+        Vec::new(),
     )
     .unwrap();
 
@@ -187,6 +195,33 @@ fn motion_passthrough_does_not_require_input_consumption() {
 
     assert!(required.contains(CapabilityKind::CompositePointerObservation));
     assert!(!required.contains(CapabilityKind::CompositePointerConsumption));
+}
+
+#[test]
+fn guarded_press_requires_observation_and_synthesized_input() {
+    let press = signal_auras_core::PressDefinition::new(
+        signal_auras_core::HeldCondition::parse(["<Leader>"]).unwrap(),
+        signal_auras_core::MotionToken::parse("<WheelUp>").unwrap(),
+        BindingMode::Passthrough,
+        MacroDefinition::new(vec![MacroAction::key("Left").unwrap()]).unwrap(),
+        0,
+    );
+    let config = LuaAutomationConfiguration::with_bindings_and_motions(
+        None,
+        None,
+        signal_auras_core::AutomationDefaults::default(),
+        None,
+        Vec::new(),
+        Vec::new(),
+        vec![press],
+    )
+    .unwrap();
+
+    let required = CapabilitySet::for_configuration(&config);
+
+    assert!(required.contains(CapabilityKind::CompositePointerObservation));
+    assert!(!required.contains(CapabilityKind::CompositePointerConsumption));
+    assert!(required.contains(CapabilityKind::SynthesizedInput));
 }
 
 #[test]

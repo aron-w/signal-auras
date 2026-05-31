@@ -96,7 +96,7 @@ fn lua_api_denies_compositor_metadata_and_raw_input_apis() {
 }
 
 #[test]
-fn lua_api_accepts_existing_repeat_motion_syntax_without_policy_migration() {
+fn lua_api_accepts_loop_repeat_motion_syntax() {
     let config = load_lua_source(
         r#"
         return {
@@ -104,11 +104,16 @@ fn lua_api_accepts_existing_repeat_motion_syntax_without_policy_migration() {
           motions = {
             {
               trigger = { "<Leader>", "<LClick>", "<LClick>" },
+              within_ms = 500,
               mode = "passthrough",
-              repeat = {
+              loop = {
                 while_held = { "<Leader>", "<LClick>" },
-                interval_ms = { min = 50, max = 80 },
-                macro = macro { mouse_click "left" },
+                before = macro { key_down "Ctrl" },
+                repeat = {
+                  every_ms = 65,
+                  macro = macro { mouse_click "left" },
+                },
+                after = macro { key_up "Ctrl" },
               },
             },
           },
@@ -118,7 +123,63 @@ fn lua_api_accepts_existing_repeat_motion_syntax_without_policy_migration() {
     .unwrap();
 
     assert_eq!(config.motions().len(), 1);
-    assert!(config.motions().values().next().unwrap().repeat.is_some());
+    assert!(config
+        .motions()
+        .values()
+        .next()
+        .unwrap()
+        .loop_definition
+        .as_ref()
+        .and_then(|loop_definition| loop_definition.repeat())
+        .is_some());
+}
+
+#[test]
+fn lua_api_accepts_held_preconditions_and_guarded_presses() {
+    let config = load_lua_source(
+        r#"
+        return {
+          leader = "F13",
+          motions = {
+            {
+              requires_held = { "<Leader>" },
+              trigger = { "<LClick>", "<LClick>" },
+              within_ms = 500,
+              mode = "passthrough",
+              loop = {
+                while_held = { "<LClick>" },
+                repeat = {
+                  every_ms = 65,
+                  macro = macro { mouse_click "left" },
+                },
+              },
+            },
+          },
+          presses = {
+            {
+              requires_held = { "<Leader>" },
+              trigger = "<WheelUp>",
+              mode = "passthrough",
+              macro = macro { key "Left" },
+            },
+          },
+        }
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(config.motions().len(), 1);
+    assert_eq!(config.presses().len(), 1);
+}
+
+#[test]
+fn lua_api_rejects_non_holdable_preconditions() {
+    assert!(
+        load_lua_source(
+            r#"return { leader = "F13", presses = { { requires_held = { "<WheelUp>" }, trigger = "<WheelDown>", macro = macro { key "Right" } } } }"#
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -163,10 +224,12 @@ fn lua_api_accepts_expanded_keyboard_keys_on_trigger_surfaces() {
           motions = {
             {
               trigger = { "<Leader>", "Return" },
-              repeat = {
+              loop = {
                 while_held = { "<Leader>", "Return" },
-                interval_ms = { min = 50, max = 80 },
-                macro = macro { key "Mute" },
+                repeat = {
+                  every_ms = 50,
+                  macro = macro { key "Mute" },
+                },
               },
             },
           },
