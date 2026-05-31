@@ -116,6 +116,8 @@ fn scoped_trigger_executes_only_for_matching_process() {
     .unwrap();
     assert_eq!(executor.actions, 1);
     assert_eq!(stats.scope_mismatch_count, 1);
+    assert_eq!(stats.total_triggers(), 1);
+    assert_eq!(stats.consumed_trigger_event_count, 1);
 }
 
 #[test]
@@ -150,6 +152,8 @@ fn stale_focus_metadata_denies_before_macro_emission() {
     assert_eq!(stats.denied_action_count, 1);
     assert_eq!(stats.metadata_unavailable_count, 1);
     assert_eq!(stats.scope_mismatch_count, 1);
+    assert_eq!(stats.total_triggers(), 0);
+    assert_eq!(stats.consumed_trigger_event_count, 0);
 }
 
 #[test]
@@ -192,6 +196,52 @@ fn focus_metadata_recovery_allows_next_matching_trigger() {
     assert_eq!(executor.actions, 1);
     assert_eq!(stats.denied_action_count, 1);
     assert_eq!(stats.active_process_match_count, 1);
+    assert_eq!(stats.total_triggers(), 1);
+}
+
+#[test]
+fn inactive_scoped_motion_does_not_record_consumption_or_macro_output() {
+    let lua_file = write_lua(
+        r#"
+        return {
+          scope = { processes = { "poe2.exe" } },
+          leader = "F13",
+          motions = {
+            {
+              trigger = { "<Leader>", "f", "f" },
+              macro = macro { text "/search" },
+            },
+          },
+        }
+        "#,
+    );
+    let mut prompt = Prompt::new(ConsentDecision::Cancel);
+    let mut registrar = Registrar::default();
+    let active = Active(Some(ProcessName::parse("konsole").unwrap()));
+    let mut executor = Executor::default();
+    let mut lifecycle = ScriptedLifecycle::new(vec![
+        RunnerEvent::MotionInput(MotionInputEvent::pressed(MotionToken::Leader)),
+        RunnerEvent::MotionInput(MotionInputEvent::pressed(MotionToken::Key("f".into()))),
+        RunnerEvent::MotionInput(MotionInputEvent::pressed(MotionToken::Key("f".into()))),
+        RunnerEvent::Shutdown(signal_auras_core::ShutdownReason::CtrlC),
+    ]);
+
+    let stats = start_runner_with_lifecycle(
+        &lua_file,
+        &mut prompt,
+        &mut registrar,
+        &active,
+        &mut executor,
+        &mut lifecycle,
+    )
+    .unwrap();
+
+    assert_eq!(executor.actions, 0);
+    assert_eq!(stats.total_triggers(), 0);
+    assert_eq!(stats.consumed_trigger_event_count, 0);
+    assert_eq!(stats.passthrough_trigger_event_count, 0);
+    assert_eq!(stats.denied_action_count, 1);
+    assert_eq!(stats.motion_input_event_count, 3);
 }
 
 #[test]

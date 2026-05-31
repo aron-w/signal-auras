@@ -36,8 +36,8 @@ pub use motion::{
 };
 pub use scope::{
     ActiveProcessConfidence, ActiveProcessContext, FocusFreshness, FocusFreshnessPolicy,
-    ProcessName, ScopeDecision, ScopeDenial, ScopeDenialKind, ScopeSelection, ScriptScope,
-    DEFAULT_FOCUS_STALE_THRESHOLD,
+    ProcessName, ScopeDecision, ScopeDenial, ScopeDenialKind, ScopeSelection, ScopedFocusReason,
+    ScopedFocusState, ScriptScope, DEFAULT_FOCUS_STALE_THRESHOLD,
 };
 pub use stats::{RuntimeStats, ShutdownReason};
 

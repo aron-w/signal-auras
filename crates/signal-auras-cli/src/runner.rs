@@ -6,7 +6,7 @@ use signal_auras_core::{
     InputProviderOutput, KeyToken, MacroDefinition, MacroExecutor, MacroRunId, MacroRunPoll,
     MacroRunState, MacroScheduler, MotionDefinition, MotionDiscardReason, MotionInputEvent,
     MotionInputState, MotionRuntime, MotionRuntimeEvent, MotionToken, MotionTrigger, RuntimeMotion,
-    RuntimeStats, ScopeDecision, ScopeSelection, ShutdownReason, SynthesizedInputRequest,
+    RuntimeStats, ScopeSelection, ShutdownReason, SynthesizedInputRequest,
 };
 use signal_auras_lua::load_lua_file;
 use signal_auras_wayland::{
@@ -132,6 +132,10 @@ impl RuntimeLog {
         if self.verbose {
             self.emit(tracing::Level::DEBUG, message.as_ref());
         }
+    }
+
+    fn info(self, message: impl AsRef<str>) {
+        self.emit(tracing::Level::INFO, message.as_ref());
     }
 
     fn warn(self, message: impl AsRef<str>) {
@@ -1233,6 +1237,7 @@ fn run_live_real_lifecycle(
 ) -> Result<ShutdownReason, DiagnosableError> {
     let timer_fd = RuntimeTimerFd::new()?;
     let mut macro_queue = LiveMacroQueue::default();
+    let mut focus_tracker = ScopedFocusTracker::default();
     let mut motion_runtime =
         MotionRuntime::new(motions.iter().map(|motion| motion.definition.clone()));
     let motion_time_base = Instant::now();
@@ -1250,7 +1255,14 @@ fn run_live_real_lifecycle(
     loop {
         stats.record_event_loop_wakeup();
         macro_queue.drive_ready(adapter, stats)?;
-        drain_live_shortcut_callbacks(bindings, adapter, &mut macro_queue, stats, log)?;
+        drain_live_shortcut_callbacks(
+            bindings,
+            adapter,
+            &mut macro_queue,
+            &mut focus_tracker,
+            stats,
+            log,
+        )?;
         let wait_timeout =
             next_live_wait_timeout(&repeat_ticks, &last_repeat_ticks, &motion_runtime)
                 .min(macro_queue.next_wait_timeout());
@@ -1266,6 +1278,7 @@ fn run_live_real_lifecycle(
                     adapter,
                     macro_queue: &mut macro_queue,
                     motion_runtime: &mut motion_runtime,
+                    focus_tracker: &mut focus_tracker,
                     stats,
                     log,
                     motion_time_base,
@@ -1288,7 +1301,14 @@ fn run_live_real_lifecycle(
                 if adapter.callback_wake_fd() == Some(fd) =>
             {
                 adapter.drain_callback_wake_fd()?;
-                drain_live_shortcut_callbacks(bindings, adapter, &mut macro_queue, stats, log)?;
+                drain_live_shortcut_callbacks(
+                    bindings,
+                    adapter,
+                    &mut macro_queue,
+                    &mut focus_tracker,
+                    stats,
+                    log,
+                )?;
             }
             signal_auras_wayland::evdev::EvdevInputWaitOutcome::RuntimeFd(_) => {}
             signal_auras_wayland::evdev::EvdevInputWaitOutcome::Timeout => {}
@@ -1299,6 +1319,7 @@ fn run_live_real_lifecycle(
                 adapter,
                 macro_queue: &mut macro_queue,
                 motion_runtime: &mut motion_runtime,
+                focus_tracker: &mut focus_tracker,
                 stats,
                 log,
                 motion_time_base,
@@ -1340,9 +1361,19 @@ fn run_live_real_lifecycle(
                         motion,
                         active_context,
                         &mut macro_queue,
+                        &mut focus_tracker,
                         stats,
                         log,
                     )?;
+                    if focus_tracker.take_deactivation() {
+                        for cancelled in motion_runtime.cancel_active_repeats() {
+                            stats.record_motion_repeat_cancel();
+                            log.debug(format!(
+                                "event=motion_repeat_cancelled trigger={} reason=scoped_focus_inactive",
+                                trigger_label_for_log(&cancelled)
+                            ));
+                        }
+                    }
                 }
                 last_repeat_ticks.insert(trigger.clone(), now);
             }
@@ -1355,6 +1386,7 @@ fn drain_live_shortcut_callbacks(
     bindings: &[HotkeyBinding],
     adapter: &mut RealWaylandAdapter,
     macro_queue: &mut LiveMacroQueue,
+    focus_tracker: &mut ScopedFocusTracker,
     stats: &mut RuntimeStats,
     log: RuntimeLog,
 ) -> Result<(), DiagnosableError> {
@@ -1390,7 +1422,14 @@ fn drain_live_shortcut_callbacks(
                 active_context.app_id.as_deref().unwrap_or("none"),
                 active_context.window_class.as_deref().unwrap_or("none")
             ));
-            schedule_live_binding(binding, active_context, macro_queue, stats)?;
+            schedule_live_binding(
+                binding,
+                active_context,
+                macro_queue,
+                focus_tracker,
+                stats,
+                log,
+            )?;
         } else {
             stats.record_shortcut_ignored();
             log.debug(format!(
@@ -1416,13 +1455,59 @@ struct LiveMacroQueue {
 
 struct LiveMacroRun {
     trigger_label: String,
+    scope: ScopeSelection,
     state: MacroRunState,
+}
+
+#[derive(Default)]
+struct ScopedFocusTracker {
+    active: Option<bool>,
+    deactivated: bool,
+}
+
+impl ScopedFocusTracker {
+    fn observe(
+        &mut self,
+        scope: &ScopeSelection,
+        active_context: &signal_auras_core::ActiveProcessContext,
+        policy: FocusFreshnessPolicy,
+        log: RuntimeLog,
+    ) -> bool {
+        if matches!(scope, ScopeSelection::ExplicitGlobal) {
+            return false;
+        }
+        let state = scope.scoped_focus_state_at_with_policy(active_context, Instant::now(), policy);
+        let previous = self.active.replace(state.is_active());
+        if previous == Some(state.is_active()) {
+            return false;
+        }
+        log.info(scoped_focus_transition_log_message(&state));
+        let deactivated = previous == Some(true) && !state.is_active();
+        if deactivated {
+            self.deactivated = true;
+        }
+        deactivated
+    }
+
+    fn take_deactivation(&mut self) -> bool {
+        let deactivated = self.deactivated;
+        self.deactivated = false;
+        deactivated
+    }
+}
+
+fn scoped_focus_transition_log_message(state: &signal_auras_core::ScopedFocusState) -> String {
+    format!(
+        "event=scoped_focus_transition {}",
+        state.transition_fields()
+    )
 }
 
 impl LiveMacroQueue {
     fn schedule(
         &mut self,
         trigger_label: String,
+        scope: ScopeSelection,
         definition: &MacroDefinition,
         inter_action_delay_ms: u64,
         stats: &mut RuntimeStats,
@@ -1435,6 +1520,7 @@ impl LiveMacroQueue {
         let id = MacroRunId::new(self.next_id);
         self.runs.push(LiveMacroRun {
             trigger_label,
+            scope,
             state: MacroRunState::new(id, definition, inter_action_delay_ms, Instant::now()),
         });
         stats.record_output_queue_depth(self.runs.len() as u64);
@@ -1463,6 +1549,18 @@ impl LiveMacroQueue {
         let mut cancelled = 0;
         for run in &mut self.runs {
             if run.trigger_label == trigger_label && !run.state.is_cancelled() {
+                run.state.cancel();
+                cancelled += 1;
+            }
+        }
+        cancelled
+    }
+
+    fn cancel_process_scoped(&mut self) -> usize {
+        let mut cancelled = 0;
+        for run in &mut self.runs {
+            if matches!(run.scope, ScopeSelection::ProcessList { .. }) && !run.state.is_cancelled()
+            {
                 run.state.cancel();
                 cancelled += 1;
             }
@@ -1564,6 +1662,7 @@ struct LiveMotionInputContext<'a> {
     adapter: &'a mut RealWaylandAdapter,
     macro_queue: &'a mut LiveMacroQueue,
     motion_runtime: &'a mut MotionRuntime,
+    focus_tracker: &'a mut ScopedFocusTracker,
     stats: &'a mut RuntimeStats,
     log: RuntimeLog,
     motion_time_base: Instant,
@@ -1598,14 +1697,12 @@ fn handle_observed_motion_input(
                 trigger,
                 starts_repeat,
             } => {
-                consumed = true;
                 context.log.debug(format!(
                     "event=motion_triggered trigger={} starts_repeat={starts_repeat}",
                     trigger_label_for_log(trigger)
                 ));
             }
             MotionRuntimeEvent::RepeatCancelled { trigger } => {
-                consumed = true;
                 context.log.debug(format!(
                     "event=motion_repeat_cancelled trigger={}",
                     trigger_label_for_log(trigger)
@@ -1632,13 +1729,24 @@ fn handle_observed_motion_input(
             active_context.app_id.as_deref().unwrap_or("none"),
             active_context.window_class.as_deref().unwrap_or("none")
         ));
-        schedule_live_motion_runtime_event(
+        consumed |= schedule_live_motion_runtime_event(
             event,
             context.motions,
             active_context,
             context.macro_queue,
+            context.focus_tracker,
             context.stats,
+            context.log,
         )?;
+        if context.focus_tracker.take_deactivation() {
+            for cancelled in context.motion_runtime.cancel_active_repeats() {
+                context.stats.record_motion_repeat_cancel();
+                context.log.debug(format!(
+                    "event=motion_repeat_cancelled trigger={} reason=scoped_focus_inactive",
+                    trigger_label_for_log(&cancelled)
+                ));
+            }
+        }
     }
     Ok(consumed)
 }
@@ -1749,27 +1857,45 @@ fn schedule_live_binding(
     binding: &HotkeyBinding,
     active_context: signal_auras_core::ActiveProcessContext,
     macro_queue: &mut LiveMacroQueue,
+    focus_tracker: &mut ScopedFocusTracker,
     stats: &mut RuntimeStats,
+    log: RuntimeLog,
 ) -> Result<(), DiagnosableError> {
     let trigger_label = binding.trigger_label();
-    stats.record_trigger(&trigger_label);
-    match binding.mode {
-        BindingMode::Consume => stats.record_consumed_trigger_event(),
-        BindingMode::Passthrough => stats.record_passthrough_trigger_event(),
+    if focus_tracker.observe(
+        &binding.scope,
+        &active_context,
+        FocusFreshnessPolicy::default(),
+        log,
+    ) {
+        let cancelled = macro_queue.cancel_process_scoped();
+        stats.record_cancelled_macro_runs(cancelled as u64);
     }
-    match binding.scope.decide_context(&active_context) {
-        ScopeDecision::Allowed => {
-            stats.record_active_process_match();
-            macro_queue.schedule(trigger_label, &binding.macro_definition, 0, stats);
-        }
-        ScopeDecision::Denied { reason, diagnostic } => {
+    let state = binding.scope.scoped_focus_state(&active_context);
+    if !state.is_active() {
+        if let Some(diagnostic) = state.diagnostic {
             record_scope_denial(stats, &diagnostic);
             println!(
-                "denied_trigger hotkey={} reason={reason} {}",
+                "denied_trigger hotkey={} reason={} {}",
                 trigger_label,
+                state.reason.as_str(),
                 diagnostic.render_fields()
             );
         }
+    } else {
+        stats.record_trigger(&trigger_label);
+        match binding.mode {
+            BindingMode::Consume => stats.record_consumed_trigger_event(),
+            BindingMode::Passthrough => stats.record_passthrough_trigger_event(),
+        }
+        stats.record_active_process_match();
+        macro_queue.schedule(
+            trigger_label,
+            binding.scope.clone(),
+            &binding.macro_definition,
+            0,
+            stats,
+        );
     }
     Ok(())
 }
@@ -1779,17 +1905,26 @@ fn schedule_live_motion_runtime_event(
     motions: &[RuntimeMotion],
     active_context: signal_auras_core::ActiveProcessContext,
     macro_queue: &mut LiveMacroQueue,
+    focus_tracker: &mut ScopedFocusTracker,
     stats: &mut RuntimeStats,
-) -> Result<(), DiagnosableError> {
+    log: RuntimeLog,
+) -> Result<bool, DiagnosableError> {
     match event {
         MotionRuntimeEvent::Triggered { trigger, .. } => {
             let Some(motion) = motions
                 .iter()
                 .find(|motion| motion.definition.trigger == trigger)
             else {
-                return Ok(());
+                return Ok(false);
             };
-            schedule_live_motion_trigger(motion, active_context, macro_queue, stats)
+            schedule_live_motion_trigger(
+                motion,
+                active_context,
+                macro_queue,
+                focus_tracker,
+                stats,
+                log,
+            )
         }
         MotionRuntimeEvent::RepeatCancelled { trigger } => {
             stats.record_motion_repeat_cancel();
@@ -1800,11 +1935,11 @@ fn schedule_live_motion_runtime_event(
                 "motion_repeat_cancelled trigger={} queued_macros_cancelled={cancelled}",
                 trigger.describe()
             );
-            Ok(())
+            Ok(true)
         }
         MotionRuntimeEvent::MotionDiscarded { .. } => {
             stats.record_motion_discard();
-            Ok(())
+            Ok(false)
         }
     }
 }
@@ -1813,42 +1948,61 @@ fn schedule_live_motion_trigger(
     motion: &RuntimeMotion,
     active_context: signal_auras_core::ActiveProcessContext,
     macro_queue: &mut LiveMacroQueue,
+    focus_tracker: &mut ScopedFocusTracker,
     stats: &mut RuntimeStats,
-) -> Result<(), DiagnosableError> {
+    log: RuntimeLog,
+) -> Result<bool, DiagnosableError> {
     let trigger_label = motion.definition.trigger.describe();
-    stats.record_trigger(&trigger_label);
-    match motion.definition.mode {
-        BindingMode::Consume => stats.record_consumed_trigger_event(),
-        BindingMode::Passthrough => stats.record_passthrough_trigger_event(),
+    if focus_tracker.observe(
+        &motion.scope,
+        &active_context,
+        FocusFreshnessPolicy::new(MOTION_FOCUS_STALE_THRESHOLD),
+        log,
+    ) {
+        let cancelled = macro_queue.cancel_process_scoped();
+        stats.record_cancelled_macro_runs(cancelled as u64);
     }
-    match decide_motion_scope(&motion.scope, &active_context) {
-        ScopeDecision::Allowed => {
-            stats.record_active_process_match();
-            if let Some(macro_definition) = &motion.definition.macro_definition {
-                macro_queue.schedule(
-                    trigger_label,
-                    macro_definition,
-                    motion.definition.inter_action_delay_ms,
-                    stats,
-                );
-            }
-        }
-        ScopeDecision::Denied { reason, diagnostic } => {
+    let state = motion.scope.scoped_focus_state_at_with_policy(
+        &active_context,
+        Instant::now(),
+        FocusFreshnessPolicy::new(MOTION_FOCUS_STALE_THRESHOLD),
+    );
+    if !state.is_active() {
+        if let Some(diagnostic) = state.diagnostic {
             record_scope_denial(stats, &diagnostic);
             println!(
-                "denied_motion trigger={} reason={reason} {}",
+                "denied_motion trigger={} reason={} {}",
                 trigger_label,
+                state.reason.as_str(),
                 diagnostic.render_fields()
             );
         }
+        Ok(false)
+    } else {
+        stats.record_trigger(&trigger_label);
+        match motion.definition.mode {
+            BindingMode::Consume => stats.record_consumed_trigger_event(),
+            BindingMode::Passthrough => stats.record_passthrough_trigger_event(),
+        }
+        stats.record_active_process_match();
+        if let Some(macro_definition) = &motion.definition.macro_definition {
+            macro_queue.schedule(
+                trigger_label,
+                motion.scope.clone(),
+                macro_definition,
+                motion.definition.inter_action_delay_ms,
+                stats,
+            );
+        }
+        Ok(true)
     }
-    Ok(())
 }
 
 fn schedule_live_motion_repeat_tick(
     motion: &RuntimeMotion,
     active_context: signal_auras_core::ActiveProcessContext,
     macro_queue: &mut LiveMacroQueue,
+    focus_tracker: &mut ScopedFocusTracker,
     stats: &mut RuntimeStats,
     log: RuntimeLog,
 ) -> Result<(), DiagnosableError> {
@@ -1866,29 +2020,44 @@ fn schedule_live_motion_repeat_tick(
         }
         return Ok(());
     }
-    match decide_motion_scope(&motion.scope, &active_context) {
-        ScopeDecision::Allowed => {
-            stats.record_active_process_match();
-            stats.record_motion_repeat_tick();
-            log.debug(format!(
-                "event=motion_repeat_tick_scheduled trigger={} disposition=executed",
-                trigger_label_for_log(&motion.definition.trigger)
-            ));
-            macro_queue.schedule(
-                trigger_label,
-                &repeat.macro_definition,
-                motion.definition.inter_action_delay_ms,
-                stats,
-            );
-        }
-        ScopeDecision::Denied { reason, diagnostic } => {
+    if focus_tracker.observe(
+        &motion.scope,
+        &active_context,
+        FocusFreshnessPolicy::new(MOTION_FOCUS_STALE_THRESHOLD),
+        log,
+    ) {
+        let cancelled = macro_queue.cancel_process_scoped();
+        stats.record_cancelled_macro_runs(cancelled as u64);
+    }
+    let state = motion.scope.scoped_focus_state_at_with_policy(
+        &active_context,
+        Instant::now(),
+        FocusFreshnessPolicy::new(MOTION_FOCUS_STALE_THRESHOLD),
+    );
+    if !state.is_active() {
+        if let Some(diagnostic) = state.diagnostic {
             record_scope_denial(stats, &diagnostic);
             println!(
-                "denied_motion_repeat trigger={} reason={reason} {}",
+                "denied_motion_repeat trigger={} reason={} {}",
                 trigger_label,
+                state.reason.as_str(),
                 diagnostic.render_fields()
             );
         }
+    } else {
+        stats.record_active_process_match();
+        stats.record_motion_repeat_tick();
+        log.debug(format!(
+            "event=motion_repeat_tick_scheduled trigger={} disposition=executed",
+            trigger_label_for_log(&motion.definition.trigger)
+        ));
+        macro_queue.schedule(
+            trigger_label,
+            motion.scope.clone(),
+            &repeat.macro_definition,
+            motion.definition.inter_action_delay_ms,
+            stats,
+        );
     }
     Ok(())
 }
@@ -1904,10 +2073,11 @@ fn repeat_overload_log_message(trigger_label: &str, skipped_for_binding: u64) ->
     )
 }
 
+#[cfg(test)]
 fn decide_motion_scope(
     scope: &ScopeSelection,
     active_context: &signal_auras_core::ActiveProcessContext,
-) -> ScopeDecision {
+) -> signal_auras_core::ScopeDecision {
     scope.decide_context_with_policy(
         active_context,
         FocusFreshnessPolicy::new(MOTION_FOCUS_STALE_THRESHOLD),
@@ -1940,38 +2110,39 @@ where
     E: MacroExecutor,
 {
     let trigger_label = binding.trigger_label();
+    let state = binding.scope.scoped_focus_state(&active_context);
+    if !state.is_active() {
+        if let Some(diagnostic) = state.diagnostic {
+            record_scope_denial(stats, &diagnostic);
+            println!(
+                "denied_trigger hotkey={} reason={} {}",
+                trigger_label,
+                state.reason.as_str(),
+                diagnostic.render_fields()
+            );
+        }
+        return Ok(());
+    }
     stats.record_trigger(&trigger_label);
     match binding.mode {
         BindingMode::Consume => stats.record_consumed_trigger_event(),
         BindingMode::Passthrough => stats.record_passthrough_trigger_event(),
     }
-    match binding.scope.decide_context(&active_context) {
-        ScopeDecision::Allowed => {
-            stats.record_active_process_match();
-            let guard = match scheduler.begin(&trigger_label) {
-                Ok(guard) => guard,
-                Err(_) => {
-                    record_non_repeat_collision_skip(stats);
-                    return Ok(());
-                }
-            };
-            let result = execute_macro_definition(&binding.macro_definition, 0, executor, stats);
-            scheduler.finish(guard);
-            match result {
-                Ok(()) => stats.macro_success_count += 1,
-                Err(error) => {
-                    stats.macro_failure_count += 1;
-                    return Err(error);
-                }
-            }
+    stats.record_active_process_match();
+    let guard = match scheduler.begin(&trigger_label) {
+        Ok(guard) => guard,
+        Err(_) => {
+            record_non_repeat_collision_skip(stats);
+            return Ok(());
         }
-        ScopeDecision::Denied { reason, diagnostic } => {
-            record_scope_denial(stats, &diagnostic);
-            println!(
-                "denied_trigger hotkey={} reason={reason} {}",
-                trigger_label,
-                diagnostic.render_fields()
-            );
+    };
+    let result = execute_macro_definition(&binding.macro_definition, 0, executor, stats);
+    scheduler.finish(guard);
+    match result {
+        Ok(()) => stats.macro_success_count += 1,
+        Err(error) => {
+            stats.macro_failure_count += 1;
+            return Err(error);
         }
     }
     Ok(())
@@ -2037,33 +2208,38 @@ where
     E: MacroExecutor,
 {
     let trigger_label = motion.definition.trigger.describe();
+    let state = motion.scope.scoped_focus_state_at_with_policy(
+        &active_context,
+        Instant::now(),
+        FocusFreshnessPolicy::new(MOTION_FOCUS_STALE_THRESHOLD),
+    );
+    if !state.is_active() {
+        if let Some(diagnostic) = state.diagnostic {
+            record_scope_denial(stats, &diagnostic);
+            println!(
+                "denied_motion trigger={} reason={} {}",
+                trigger_label,
+                state.reason.as_str(),
+                diagnostic.render_fields()
+            );
+        }
+        return Ok(());
+    }
     stats.record_trigger(&trigger_label);
     match motion.definition.mode {
         BindingMode::Consume => stats.record_consumed_trigger_event(),
         BindingMode::Passthrough => stats.record_passthrough_trigger_event(),
     }
-    match decide_motion_scope(&motion.scope, &active_context) {
-        ScopeDecision::Allowed => {
-            stats.record_active_process_match();
-            if let Some(macro_definition) = &motion.definition.macro_definition {
-                execute_motion_macro(
-                    &trigger_label,
-                    macro_definition,
-                    motion.definition.inter_action_delay_ms,
-                    executor,
-                    scheduler,
-                    stats,
-                )?;
-            }
-        }
-        ScopeDecision::Denied { reason, diagnostic } => {
-            record_scope_denial(stats, &diagnostic);
-            println!(
-                "denied_motion trigger={} reason={reason} {}",
-                trigger_label,
-                diagnostic.render_fields()
-            );
-        }
+    stats.record_active_process_match();
+    if let Some(macro_definition) = &motion.definition.macro_definition {
+        execute_motion_macro(
+            &trigger_label,
+            macro_definition,
+            motion.definition.inter_action_delay_ms,
+            executor,
+            scheduler,
+            stats,
+        )?;
     }
     Ok(())
 }
@@ -2100,28 +2276,33 @@ where
         return Ok(());
     };
     let trigger_label = format!("{} repeat", motion.definition.trigger.describe());
-    match decide_motion_scope(&motion.scope, &active_context) {
-        ScopeDecision::Allowed => {
-            stats.record_active_process_match();
-            stats.record_motion_repeat_tick();
-            execute_motion_macro(
-                &trigger_label,
-                &repeat.macro_definition,
-                motion.definition.inter_action_delay_ms,
-                executor,
-                scheduler,
-                stats,
-            )?;
-        }
-        ScopeDecision::Denied { reason, diagnostic } => {
+    let state = motion.scope.scoped_focus_state_at_with_policy(
+        &active_context,
+        Instant::now(),
+        FocusFreshnessPolicy::new(MOTION_FOCUS_STALE_THRESHOLD),
+    );
+    if !state.is_active() {
+        if let Some(diagnostic) = state.diagnostic {
             record_scope_denial(stats, &diagnostic);
             println!(
-                "denied_motion_repeat trigger={} reason={reason} {}",
+                "denied_motion_repeat trigger={} reason={} {}",
                 trigger_label,
+                state.reason.as_str(),
                 diagnostic.render_fields()
             );
         }
+        return Ok(());
     }
+    stats.record_active_process_match();
+    stats.record_motion_repeat_tick();
+    execute_motion_macro(
+        &trigger_label,
+        &repeat.macro_definition,
+        motion.definition.inter_action_delay_ms,
+        executor,
+        scheduler,
+        stats,
+    )?;
     Ok(())
 }
 
@@ -2259,18 +2440,18 @@ mod tests {
 
         assert!(matches!(
             scope.decide_context(&context),
-            ScopeDecision::Denied { .. }
+            signal_auras_core::ScopeDecision::Denied { .. }
         ));
         assert_eq!(
             decide_motion_scope(&scope, &context),
-            ScopeDecision::Allowed
+            signal_auras_core::ScopeDecision::Allowed
         );
 
         context.captured_at =
             Instant::now() - MOTION_FOCUS_STALE_THRESHOLD - Duration::from_millis(1);
 
         match decide_motion_scope(&scope, &context) {
-            ScopeDecision::Denied { diagnostic, .. } => {
+            signal_auras_core::ScopeDecision::Denied { diagnostic, .. } => {
                 assert_eq!(
                     diagnostic.kind,
                     signal_auras_core::ScopeDenialKind::StaleFocus
@@ -2280,7 +2461,9 @@ mod tests {
                     Some(MOTION_FOCUS_STALE_THRESHOLD)
                 );
             }
-            ScopeDecision::Allowed => panic!("stale motion focus should fail closed"),
+            signal_auras_core::ScopeDecision::Allowed => {
+                panic!("stale motion focus should fail closed")
+            }
         }
     }
 
@@ -2632,6 +2815,7 @@ mod tests {
         let motion = repeat_runtime_motion(MotionTrigger::parse(["<Leader>", "a"]).unwrap(), "x");
         let active_context = signal_auras_core::ActiveProcessContext::unavailable("not needed");
         let mut macro_queue = LiveMacroQueue::default();
+        let mut focus_tracker = ScopedFocusTracker::default();
         let mut stats = RuntimeStats::new();
 
         for _ in 0..=10_000 {
@@ -2639,6 +2823,7 @@ mod tests {
                 &motion,
                 active_context.clone(),
                 &mut macro_queue,
+                &mut focus_tracker,
                 &mut stats,
                 RuntimeLog::new(false),
             )
@@ -2658,16 +2843,27 @@ mod tests {
         let binding = runtime_hotkey_binding("F5", "x");
         let active_context = signal_auras_core::ActiveProcessContext::unavailable("not needed");
         let mut macro_queue = LiveMacroQueue::default();
+        let mut focus_tracker = ScopedFocusTracker::default();
         let mut stats = RuntimeStats::new();
 
         schedule_live_binding(
             &binding,
             active_context.clone(),
             &mut macro_queue,
+            &mut focus_tracker,
             &mut stats,
+            RuntimeLog::new(false),
         )
         .unwrap();
-        schedule_live_binding(&binding, active_context, &mut macro_queue, &mut stats).unwrap();
+        schedule_live_binding(
+            &binding,
+            active_context,
+            &mut macro_queue,
+            &mut focus_tracker,
+            &mut stats,
+            RuntimeLog::new(false),
+        )
+        .unwrap();
 
         assert_eq!(macro_queue.runs.len(), 1);
         assert_eq!(stats.max_output_queue_depth, 1);
@@ -2682,6 +2878,7 @@ mod tests {
         let trigger_label = binding.trigger_label();
         let active_context = signal_auras_core::ActiveProcessContext::unavailable("not needed");
         let mut macro_queue = LiveMacroQueue::default();
+        let mut focus_tracker = ScopedFocusTracker::default();
         let mut stats = RuntimeStats::new();
         let mut executor = QueueExecutor::default();
 
@@ -2689,7 +2886,9 @@ mod tests {
             &binding,
             active_context.clone(),
             &mut macro_queue,
+            &mut focus_tracker,
             &mut stats,
+            RuntimeLog::new(false),
         )
         .unwrap();
         assert!(macro_queue.trigger_is_pending_or_active(&trigger_label));
@@ -2701,7 +2900,9 @@ mod tests {
             &binding,
             active_context.clone(),
             &mut macro_queue,
+            &mut focus_tracker,
             &mut stats,
+            RuntimeLog::new(false),
         )
         .unwrap();
         let cancelled = macro_queue.cancel_trigger(&trigger_label);
@@ -2709,7 +2910,15 @@ mod tests {
         assert_eq!(cancelled, 1);
         assert!(!macro_queue.trigger_is_pending_or_active(&trigger_label));
 
-        schedule_live_binding(&binding, active_context, &mut macro_queue, &mut stats).unwrap();
+        schedule_live_binding(
+            &binding,
+            active_context,
+            &mut macro_queue,
+            &mut focus_tracker,
+            &mut stats,
+            RuntimeLog::new(false),
+        )
+        .unwrap();
         assert!(macro_queue.trigger_is_pending_or_active(&trigger_label));
         assert_eq!(stats.non_repeat_trigger_skipped_count, 0);
     }
@@ -2720,12 +2929,14 @@ mod tests {
         let second = repeat_runtime_motion(MotionTrigger::parse(["<Leader>", "b"]).unwrap(), "b");
         let active_context = signal_auras_core::ActiveProcessContext::unavailable("not needed");
         let mut macro_queue = LiveMacroQueue::default();
+        let mut focus_tracker = ScopedFocusTracker::default();
         let mut stats = RuntimeStats::new();
 
         schedule_live_motion_repeat_tick(
             &first,
             active_context.clone(),
             &mut macro_queue,
+            &mut focus_tracker,
             &mut stats,
             RuntimeLog::new(false),
         )
@@ -2734,6 +2945,7 @@ mod tests {
             &first,
             active_context.clone(),
             &mut macro_queue,
+            &mut focus_tracker,
             &mut stats,
             RuntimeLog::new(false),
         )
@@ -2742,6 +2954,7 @@ mod tests {
             &second,
             active_context,
             &mut macro_queue,
+            &mut focus_tracker,
             &mut stats,
             RuntimeLog::new(false),
         )
@@ -2762,12 +2975,14 @@ mod tests {
         let second = repeat_runtime_motion(MotionTrigger::parse(["<Leader>", "b"]).unwrap(), "b");
         let active_context = signal_auras_core::ActiveProcessContext::unavailable("not needed");
         let mut macro_queue = LiveMacroQueue::default();
+        let mut focus_tracker = ScopedFocusTracker::default();
         let mut stats = RuntimeStats::new();
 
         schedule_live_motion_repeat_tick(
             &first,
             active_context.clone(),
             &mut macro_queue,
+            &mut focus_tracker,
             &mut stats,
             RuntimeLog::new(false),
         )
@@ -2776,6 +2991,7 @@ mod tests {
             &second,
             active_context,
             &mut macro_queue,
+            &mut focus_tracker,
             &mut stats,
             RuntimeLog::new(false),
         )
@@ -2811,6 +3027,87 @@ mod tests {
         assert!(rendered.contains("trigger=<Leader>/then/a/repeat"));
         assert!(rendered.contains("skipped_for_binding=8"));
         assert!(!rendered.contains("secret macro payload"));
+    }
+
+    #[test]
+    fn scoped_focus_transition_log_message_is_info_safe() {
+        let scope =
+            ScopeSelection::process_list(vec![
+                signal_auras_core::ProcessName::parse("kate").unwrap()
+            ])
+            .unwrap();
+        let context = signal_auras_core::ActiveProcessContext::name_only(
+            signal_auras_core::ProcessName::parse("konsole").unwrap(),
+        )
+        .with_app_id("org.kde.konsole --secret")
+        .with_window_class("Private Title");
+        let state = scope.scoped_focus_state(&context);
+        let rendered = RuntimeLog::new(false)
+            .render_plain("INFO", &scoped_focus_transition_log_message(&state));
+
+        assert!(rendered.contains("INFO"));
+        assert!(rendered.contains("scoped_focus_transition"));
+        assert!(rendered.contains("state=inactive"));
+        assert!(rendered.contains("reason=process_mismatch"));
+        assert!(rendered.contains("configured_rule=processes:kate"));
+        assert!(!rendered.contains("--secret"));
+        assert!(!rendered.contains("Private Title"));
+    }
+
+    #[test]
+    fn scoped_focus_deactivation_cancels_process_scoped_queue() {
+        let binding = HotkeyBinding {
+            trigger: BindingTrigger::keyboard(HotkeyId::parse("F5").unwrap()),
+            mode: BindingMode::Consume,
+            scope: ScopeSelection::process_list(vec![signal_auras_core::ProcessName::parse(
+                "kate",
+            )
+            .unwrap()])
+            .unwrap(),
+            macro_definition: MacroDefinition::new(vec![signal_auras_core::MacroAction::text(
+                "queued",
+            )
+            .unwrap()])
+            .unwrap(),
+            registration_state: signal_auras_core::RegistrationState::Registered,
+        };
+        let matching = signal_auras_core::ActiveProcessContext::name_only(
+            signal_auras_core::ProcessName::parse("kate").unwrap(),
+        );
+        let non_matching = signal_auras_core::ActiveProcessContext::name_only(
+            signal_auras_core::ProcessName::parse("konsole").unwrap(),
+        );
+        let mut macro_queue = LiveMacroQueue::default();
+        let mut focus_tracker = ScopedFocusTracker::default();
+        let mut stats = RuntimeStats::new();
+
+        schedule_live_binding(
+            &binding,
+            matching,
+            &mut macro_queue,
+            &mut focus_tracker,
+            &mut stats,
+            RuntimeLog::new(false),
+        )
+        .unwrap();
+        assert_eq!(macro_queue.runs.len(), 1);
+
+        schedule_live_binding(
+            &binding,
+            non_matching,
+            &mut macro_queue,
+            &mut focus_tracker,
+            &mut stats,
+            RuntimeLog::new(false),
+        )
+        .unwrap();
+        macro_queue
+            .drive_ready(&mut QueueExecutor::default(), &mut stats)
+            .unwrap();
+
+        assert_eq!(stats.cancelled_macro_run_count, 1);
+        assert_eq!(macro_queue.runs.len(), 0);
+        assert_eq!(stats.denied_action_count, 1);
     }
 
     fn mouse_button_repeat_motion() -> MotionDefinition {

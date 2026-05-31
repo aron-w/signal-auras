@@ -298,6 +298,12 @@ impl MotionRuntime {
         self.active_repeats.contains(trigger)
     }
 
+    pub fn cancel_active_repeats(&mut self) -> Vec<MotionTrigger> {
+        let cancelled = self.active_repeats.iter().cloned().collect::<Vec<_>>();
+        self.active_repeats.clear();
+        cancelled
+    }
+
     fn handle_press(
         &mut self,
         token: MotionToken,

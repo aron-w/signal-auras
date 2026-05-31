@@ -12,4 +12,6 @@ For the repeat overload policy follow-up, also read
 `specs/010-repeat-overload-policy/plan.md`.
 For the full keyboard key coverage follow-up, also read
 `specs/014-full-key-coverage/plan.md`.
+For the scoped focus pass-through follow-up, also read
+`specs/015-scoped-focus-pass-through/plan.md`.
 <!-- SPECKIT END -->

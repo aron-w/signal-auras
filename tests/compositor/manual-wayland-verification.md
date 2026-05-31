@@ -343,6 +343,23 @@ checks with a selected keyboard path and confirm:
 - Macros can emit supported expanded keys through `/dev/uinput`; unsupported
   backend keys fail closed without substituting another key.
 
+### Follow-up: scoped focus pass-through
+
+After implementing scoped focus pass-through, repeat process-scoped KDE checks
+with a scoped hotkey, scoped motion, and scoped repeat:
+
+- Focus outside the configured process and confirm original physical input
+  reaches the focused application, no scoped macro output is emitted, and no
+  scoped consumed/prevented event is reported.
+- Focus the configured process and confirm subsequent scoped triggers work
+  normally under the existing consent and capability rules.
+- Move focus back outside the configured process while scoped repeat or delayed
+  output is pending and confirm scoped queued work is cancelled before further
+  output.
+- Confirm activation and deactivation emit one info-level
+  `scoped_focus_transition` log per state change without command-line
+  arguments, window titles, text payloads, or macro payloads.
+
 ## Composite Pointer Bindings
 
 Composite pointer bindings remain blocked on a real KDE provider for pointer

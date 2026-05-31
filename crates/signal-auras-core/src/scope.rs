@@ -55,6 +55,93 @@ pub enum ScopeDecision {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedFocusState {
+    pub active: bool,
+    pub reason: ScopedFocusReason,
+    pub diagnostic: Option<ScopeDenial>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedFocusReason {
+    Active,
+    ProcessMismatch,
+    StaleFocus,
+    FocusUnavailable,
+    FocusPermissionDenied,
+    AmbiguousFocus,
+    UntrustedFocusTimestamp,
+}
+
+impl ScopedFocusReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::ProcessMismatch => "process_mismatch",
+            Self::StaleFocus => "stale_focus",
+            Self::FocusUnavailable => "focus_unavailable",
+            Self::FocusPermissionDenied => "focus_permission_denied",
+            Self::AmbiguousFocus => "ambiguous_focus",
+            Self::UntrustedFocusTimestamp => "untrusted_focus_timestamp",
+        }
+    }
+}
+
+impl ScopedFocusState {
+    pub fn active() -> Self {
+        Self {
+            active: true,
+            reason: ScopedFocusReason::Active,
+            diagnostic: None,
+        }
+    }
+
+    pub fn inactive(diagnostic: ScopeDenial) -> Self {
+        Self {
+            active: false,
+            reason: ScopedFocusReason::from(diagnostic.kind),
+            diagnostic: Some(diagnostic),
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    pub fn transition_fields(&self) -> String {
+        match &self.diagnostic {
+            Some(diagnostic) => format!(
+                "state=inactive reason={} {}",
+                self.reason.as_str(),
+                diagnostic.render_fields()
+            ),
+            None => format!("state=active reason={}", self.reason.as_str()),
+        }
+    }
+}
+
+impl From<ScopeDenialKind> for ScopedFocusReason {
+    fn from(kind: ScopeDenialKind) -> Self {
+        match kind {
+            ScopeDenialKind::StaleFocus => Self::StaleFocus,
+            ScopeDenialKind::FocusUnavailable => Self::FocusUnavailable,
+            ScopeDenialKind::FocusPermissionDenied => Self::FocusPermissionDenied,
+            ScopeDenialKind::AmbiguousFocus => Self::AmbiguousFocus,
+            ScopeDenialKind::UntrustedFocusTimestamp => Self::UntrustedFocusTimestamp,
+            ScopeDenialKind::ProcessMismatch => Self::ProcessMismatch,
+        }
+    }
+}
+
+impl From<ScopeDecision> for ScopedFocusState {
+    fn from(decision: ScopeDecision) -> Self {
+        match decision {
+            ScopeDecision::Allowed => Self::active(),
+            ScopeDecision::Denied { diagnostic, .. } => Self::inactive(diagnostic),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FocusFreshnessPolicy {
     pub stale_threshold: Duration,
@@ -408,6 +495,24 @@ impl ScopeSelection {
         }
     }
 
+    pub fn scoped_focus_state_at_with_policy(
+        &self,
+        active_context: &ActiveProcessContext,
+        now: Instant,
+        policy: FocusFreshnessPolicy,
+    ) -> ScopedFocusState {
+        self.decide_context_at_with_policy(active_context, now, policy)
+            .into()
+    }
+
+    pub fn scoped_focus_state(&self, active_context: &ActiveProcessContext) -> ScopedFocusState {
+        self.scoped_focus_state_at_with_policy(
+            active_context,
+            Instant::now(),
+            FocusFreshnessPolicy::default(),
+        )
+    }
+
     pub fn describe(&self) -> String {
         match self {
             Self::ExplicitGlobal => "global (explicit current run)".to_string(),
@@ -484,5 +589,91 @@ mod tests {
         let scope =
             ScopeSelection::process_list(vec![ProcessName::parse("poe2.exe").unwrap()]).unwrap();
         assert!(matches!(scope.decide(None), ScopeDecision::Denied { .. }));
+    }
+
+    #[test]
+    fn scoped_focus_state_is_active_only_for_matching_trusted_focus() {
+        let scope =
+            ScopeSelection::process_list(vec![ProcessName::parse("kate").unwrap()]).unwrap();
+        let active = ActiveProcessContext::name_only(ProcessName::parse("kate").unwrap());
+
+        assert_eq!(
+            scope.scoped_focus_state(&active),
+            ScopedFocusState::active()
+        );
+
+        let inactive = scope.scoped_focus_state(&ActiveProcessContext::name_only(
+            ProcessName::parse("konsole").unwrap(),
+        ));
+
+        assert!(!inactive.is_active());
+        assert_eq!(inactive.reason, ScopedFocusReason::ProcessMismatch);
+        assert!(inactive
+            .transition_fields()
+            .contains("configured_rule=processes:kate"));
+    }
+
+    #[test]
+    fn scoped_focus_state_classifies_untrusted_metadata_as_inactive() {
+        let scope =
+            ScopeSelection::process_list(vec![ProcessName::parse("kate").unwrap()]).unwrap();
+        let now = Instant::now();
+        let cases = [
+            (
+                ActiveProcessContext::unavailable("kwin unavailable"),
+                ScopedFocusReason::FocusUnavailable,
+            ),
+            (
+                ActiveProcessContext::denied("permission denied"),
+                ScopedFocusReason::FocusPermissionDenied,
+            ),
+            (
+                ActiveProcessContext::ambiguous("two candidates"),
+                ScopedFocusReason::AmbiguousFocus,
+            ),
+        ];
+
+        for (context, reason) in cases {
+            let state = scope.scoped_focus_state_at_with_policy(
+                &context,
+                now,
+                FocusFreshnessPolicy::default(),
+            );
+            assert!(!state.is_active());
+            assert_eq!(state.reason, reason);
+        }
+
+        let mut stale = ActiveProcessContext::name_only(ProcessName::parse("kate").unwrap());
+        stale.captured_at = now - DEFAULT_FOCUS_STALE_THRESHOLD - Duration::from_millis(1);
+        let stale_state =
+            scope.scoped_focus_state_at_with_policy(&stale, now, FocusFreshnessPolicy::default());
+        assert_eq!(stale_state.reason, ScopedFocusReason::StaleFocus);
+
+        let mut future = ActiveProcessContext::name_only(ProcessName::parse("kate").unwrap());
+        future.captured_at = now + Duration::from_millis(1);
+        let future_state =
+            scope.scoped_focus_state_at_with_policy(&future, now, FocusFreshnessPolicy::default());
+        assert_eq!(
+            future_state.reason,
+            ScopedFocusReason::UntrustedFocusTimestamp
+        );
+    }
+
+    #[test]
+    fn scoped_focus_transition_fields_are_privacy_bounded() {
+        let scope =
+            ScopeSelection::process_list(vec![ProcessName::parse("kate").unwrap()]).unwrap();
+        let context = ActiveProcessContext::name_only(ProcessName::parse("konsole").unwrap())
+            .with_app_id("org.kde.konsole --private /secret")
+            .with_window_class("Secret Window Title");
+
+        let rendered = scope.scoped_focus_state(&context).transition_fields();
+
+        assert!(rendered.contains("state=inactive"));
+        assert!(rendered.contains("reason=process_mismatch"));
+        assert!(rendered.contains("configured_rule=processes:kate"));
+        assert!(!rendered.contains("--private"));
+        assert!(!rendered.contains("Secret Window Title"));
+        assert!(!rendered.contains("/secret"));
     }
 }
