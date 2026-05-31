@@ -45,6 +45,7 @@ pub struct RuntimeStats {
     pub motion_repeat_tick_count: u64,
     pub motion_repeat_skipped_count: u64,
     pub motion_repeat_cancel_count: u64,
+    pub motion_discard_count: u64,
     pub non_repeat_trigger_skipped_count: u64,
     pub max_motion_dispatch_latency_ms: u64,
     motion_dispatch_latency_total_ms: u64,
@@ -105,6 +106,7 @@ impl RuntimeStats {
             motion_repeat_tick_count: 0,
             motion_repeat_skipped_count: 0,
             motion_repeat_cancel_count: 0,
+            motion_discard_count: 0,
             non_repeat_trigger_skipped_count: 0,
             max_motion_dispatch_latency_ms: 0,
             motion_dispatch_latency_total_ms: 0,
@@ -360,6 +362,10 @@ impl RuntimeStats {
         self.motion_repeat_cancel_count += 1;
     }
 
+    pub fn record_motion_discard(&mut self) {
+        self.motion_discard_count += 1;
+    }
+
     pub fn record_non_repeat_trigger_skipped(&mut self) {
         self.non_repeat_trigger_skipped_count += 1;
     }
@@ -406,7 +412,7 @@ impl RuntimeStats {
 
     pub fn render_summary(&self, reason: ShutdownReason) -> String {
         format!(
-            "final_summary reason={reason:?} elapsed_ms={} triggers={} successes={} failures={} denials={} permission_failures={} scope_mismatches={} capability_probe_successes={} capability_probe_failures={} ignored_events={} callbacks_received={} callbacks_dispatched={} callbacks_dropped={} avg_callback_dispatch_latency_ms={} p95_callback_dispatch_latency_ms={} p99_callback_dispatch_latency_ms={} max_callback_dispatch_latency_ms={} active_process_matches={} active_process_non_matches={} metadata_unavailable={} input_emitted={} input_denied={} consumed_events={} passthrough_events={} motion_inputs={} repeat_ticks={} repeat_skipped_or_coalesced={} repeat_cancels={} non_repeat_skipped_or_denied={} avg_motion_dispatch_latency_ms={} p95_motion_dispatch_latency_ms={} p99_motion_dispatch_latency_ms={} max_motion_dispatch_latency_ms={} motion_event_age_samples={} motion_event_age_unavailable={} avg_motion_event_age_ms={} p95_motion_event_age_ms={} p99_motion_event_age_ms={} max_motion_event_age_ms={} event_loop_wakeups={} hotplug_adds={} hotplug_removes={} output_queue_failures={} cancelled_macro_runs={} max_output_queue_depth={} kde_bridge_setups={} kde_bridge_cleanups={} cleanup_successes={} cleanup_failures={}",
+            "final_summary reason={reason:?} elapsed_ms={} triggers={} successes={} failures={} denials={} permission_failures={} scope_mismatches={} capability_probe_successes={} capability_probe_failures={} ignored_events={} callbacks_received={} callbacks_dispatched={} callbacks_dropped={} avg_callback_dispatch_latency_ms={} p95_callback_dispatch_latency_ms={} p99_callback_dispatch_latency_ms={} max_callback_dispatch_latency_ms={} active_process_matches={} active_process_non_matches={} metadata_unavailable={} input_emitted={} input_denied={} consumed_events={} passthrough_events={} motion_inputs={} repeat_ticks={} repeat_skipped_or_coalesced={} repeat_cancels={} motion_discards={} non_repeat_skipped_or_denied={} avg_motion_dispatch_latency_ms={} p95_motion_dispatch_latency_ms={} p99_motion_dispatch_latency_ms={} max_motion_dispatch_latency_ms={} motion_event_age_samples={} motion_event_age_unavailable={} avg_motion_event_age_ms={} p95_motion_event_age_ms={} p99_motion_event_age_ms={} max_motion_event_age_ms={} event_loop_wakeups={} hotplug_adds={} hotplug_removes={} output_queue_failures={} cancelled_macro_runs={} max_output_queue_depth={} kde_bridge_setups={} kde_bridge_cleanups={} cleanup_successes={} cleanup_failures={}",
             self.elapsed_runtime().as_millis(),
             self.total_triggers(),
             self.macro_success_count,
@@ -435,6 +441,7 @@ impl RuntimeStats {
             self.motion_repeat_tick_count,
             self.motion_repeat_skipped_count,
             self.motion_repeat_cancel_count,
+            self.motion_discard_count,
             self.non_repeat_trigger_skipped_count,
             self.average_motion_dispatch_latency_ms(),
             self.motion_dispatch_latency_p95_ms(),

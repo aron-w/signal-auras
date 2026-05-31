@@ -1,5 +1,8 @@
 use crate::{DiagnosableError, ErrorPhase, KeyToken, MacroDefinition, MouseButton, WheelDirection};
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
+
+pub const DEFAULT_MOTION_DURATION: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutomationDefaults {
@@ -230,14 +233,31 @@ pub enum MotionRuntimeEvent {
     RepeatCancelled {
         trigger: MotionTrigger,
     },
+    MotionDiscarded {
+        reason: MotionDiscardReason,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MotionDiscardReason {
+    Timeout,
+    UnrelatedPress,
 }
 
 #[derive(Debug, Clone)]
 pub struct MotionRuntime {
     motions: BTreeMap<MotionTrigger, MotionDefinition>,
-    progress: BTreeMap<MotionTrigger, usize>,
+    active_attempt: Option<MotionAttempt>,
     held: BTreeSet<MotionToken>,
     active_repeats: BTreeSet<MotionTrigger>,
+    motion_duration: Duration,
+}
+
+#[derive(Debug, Clone)]
+struct MotionAttempt {
+    started_at: Duration,
+    progress: usize,
+    candidates: BTreeSet<MotionTrigger>,
 }
 
 impl MotionRuntime {
@@ -246,16 +266,12 @@ impl MotionRuntime {
             .into_iter()
             .map(|motion| (motion.trigger.clone(), motion))
             .collect::<BTreeMap<_, _>>();
-        let progress = motions
-            .keys()
-            .cloned()
-            .map(|trigger| (trigger, 0))
-            .collect();
         Self {
             motions,
-            progress,
+            active_attempt: None,
             held: BTreeSet::new(),
             active_repeats: BTreeSet::new(),
+            motion_duration: DEFAULT_MOTION_DURATION,
         }
     }
 
@@ -264,8 +280,16 @@ impl MotionRuntime {
     }
 
     pub fn handle_input(&mut self, event: MotionInputEvent) -> Vec<MotionRuntimeEvent> {
+        self.handle_input_at(event, Duration::ZERO)
+    }
+
+    pub fn handle_input_at(
+        &mut self,
+        event: MotionInputEvent,
+        event_time: Duration,
+    ) -> Vec<MotionRuntimeEvent> {
         match event.state {
-            MotionInputState::Pressed => self.handle_press(event.token),
+            MotionInputState::Pressed => self.handle_press(event.token, event_time),
             MotionInputState::Released => self.handle_release(event.token),
         }
     }
@@ -274,40 +298,94 @@ impl MotionRuntime {
         self.active_repeats.contains(trigger)
     }
 
-    fn handle_press(&mut self, token: MotionToken) -> Vec<MotionRuntimeEvent> {
+    fn handle_press(
+        &mut self,
+        token: MotionToken,
+        event_time: Duration,
+    ) -> Vec<MotionRuntimeEvent> {
         self.held.insert(token.clone());
         let mut events = Vec::new();
-        for (trigger, motion) in &self.motions {
-            let progress = self.progress.entry(trigger.clone()).or_default();
-            let expected = &trigger.tokens()[*progress];
-            if expected == &token {
-                *progress += 1;
-            } else if trigger.tokens().first() == Some(&token) {
-                *progress = 1;
-            } else if trigger.tokens().first() == Some(&MotionToken::Leader)
-                && self.held.contains(&MotionToken::Leader)
-                && trigger.tokens().get(1) == Some(&token)
-            {
-                *progress = 2;
-            } else {
-                *progress = 0;
-            }
-            if *progress == trigger.tokens().len() {
-                *progress = 0;
-                let starts_repeat = motion
-                    .repeat
-                    .as_ref()
-                    .is_some_and(|repeat| self.while_held_satisfied(&repeat.while_held));
-                if starts_repeat {
-                    self.active_repeats.insert(trigger.clone());
-                }
-                events.push(MotionRuntimeEvent::Triggered {
-                    trigger: trigger.clone(),
-                    starts_repeat,
+
+        if self.active_attempt.as_ref().is_some_and(|attempt| {
+            event_time.saturating_sub(attempt.started_at) > self.motion_duration
+        }) {
+            self.active_attempt = None;
+            events.push(MotionRuntimeEvent::MotionDiscarded {
+                reason: MotionDiscardReason::Timeout,
+            });
+        }
+
+        if let Some(attempt) = &mut self.active_attempt {
+            let next_progress = attempt.progress + 1;
+            let candidates = attempt
+                .candidates
+                .iter()
+                .filter(|trigger| trigger.tokens().get(attempt.progress) == Some(&token))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if candidates.is_empty() {
+                self.active_attempt = None;
+                events.push(MotionRuntimeEvent::MotionDiscarded {
+                    reason: MotionDiscardReason::UnrelatedPress,
                 });
+            } else {
+                attempt.progress = next_progress;
+                attempt.candidates = candidates;
+                let completed = attempt
+                    .candidates
+                    .iter()
+                    .find(|trigger| trigger.tokens().len() == attempt.progress)
+                    .cloned();
+                if let Some(trigger) = completed {
+                    self.active_attempt = None;
+                    if let Some(event) = self.trigger_event(trigger) {
+                        events.push(event);
+                    }
+                }
+                return events;
             }
         }
+
+        let candidates = self
+            .motions
+            .keys()
+            .filter(|trigger| trigger.tokens().first() == Some(&token))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if candidates.is_empty() {
+            return events;
+        }
+        if let Some(trigger) = candidates
+            .iter()
+            .find(|trigger| trigger.tokens().len() == 1)
+            .cloned()
+        {
+            if let Some(event) = self.trigger_event(trigger) {
+                events.push(event);
+            }
+            return events;
+        }
+        self.active_attempt = Some(MotionAttempt {
+            started_at: event_time,
+            progress: 1,
+            candidates,
+        });
         events
+    }
+
+    fn trigger_event(&mut self, trigger: MotionTrigger) -> Option<MotionRuntimeEvent> {
+        let motion = self.motions.get(&trigger)?;
+        let starts_repeat = motion
+            .repeat
+            .as_ref()
+            .is_some_and(|repeat| self.while_held_satisfied(&repeat.while_held));
+        if starts_repeat {
+            self.active_repeats.insert(trigger.clone());
+        }
+        Some(MotionRuntimeEvent::Triggered {
+            trigger,
+            starts_repeat,
+        })
     }
 
     fn handle_release(&mut self, token: MotionToken) -> Vec<MotionRuntimeEvent> {
@@ -372,6 +450,113 @@ mod tests {
 
         assert_eq!(
             events,
+            vec![MotionRuntimeEvent::Triggered {
+                trigger,
+                starts_repeat: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn motion_sequence_must_complete_within_duration_window() {
+        let trigger = MotionTrigger::parse(["<Leader>", "f", "f"]).unwrap();
+        let motion = MotionDefinition::new(
+            trigger.clone(),
+            BindingMode::Consume,
+            Some(macro_def()),
+            None,
+            0,
+        )
+        .unwrap();
+        let mut runtime = MotionRuntime::new([motion.clone()]);
+
+        assert!(runtime
+            .handle_input_at(
+                MotionInputEvent::pressed(MotionToken::Leader),
+                Duration::from_millis(100),
+            )
+            .is_empty());
+        assert!(runtime
+            .handle_input_at(
+                MotionInputEvent::pressed(MotionToken::Key("f".into())),
+                Duration::from_millis(400),
+            )
+            .is_empty());
+        let events = runtime.handle_input_at(
+            MotionInputEvent::pressed(MotionToken::Key("f".into())),
+            Duration::from_millis(600),
+        );
+
+        assert_eq!(
+            events,
+            vec![MotionRuntimeEvent::Triggered {
+                trigger: trigger.clone(),
+                starts_repeat: false,
+            }]
+        );
+
+        let mut runtime = MotionRuntime::new([motion]);
+        runtime.handle_input_at(
+            MotionInputEvent::pressed(MotionToken::Leader),
+            Duration::from_millis(100),
+        );
+        runtime.handle_input_at(
+            MotionInputEvent::pressed(MotionToken::Key("f".into())),
+            Duration::from_millis(400),
+        );
+        let events = runtime.handle_input_at(
+            MotionInputEvent::pressed(MotionToken::Key("f".into())),
+            Duration::from_millis(601),
+        );
+
+        assert_eq!(
+            events,
+            vec![MotionRuntimeEvent::MotionDiscarded {
+                reason: MotionDiscardReason::Timeout,
+            }]
+        );
+    }
+
+    #[test]
+    fn unrelated_press_discards_pending_motion_and_can_start_new_one() {
+        let trigger = MotionTrigger::parse(["<Leader>", "f"]).unwrap();
+        let motion = MotionDefinition::new(
+            trigger.clone(),
+            BindingMode::Consume,
+            Some(macro_def()),
+            None,
+            0,
+        )
+        .unwrap();
+        let mut runtime = MotionRuntime::new([motion]);
+
+        runtime.handle_input_at(
+            MotionInputEvent::pressed(MotionToken::Leader),
+            Duration::from_millis(0),
+        );
+        let discarded = runtime.handle_input_at(
+            MotionInputEvent::pressed(MotionToken::Key("x".into())),
+            Duration::from_millis(10),
+        );
+        assert_eq!(
+            discarded,
+            vec![MotionRuntimeEvent::MotionDiscarded {
+                reason: MotionDiscardReason::UnrelatedPress,
+            }]
+        );
+        assert!(runtime
+            .handle_input_at(
+                MotionInputEvent::pressed(MotionToken::Leader),
+                Duration::from_millis(20),
+            )
+            .is_empty());
+        let triggered = runtime.handle_input_at(
+            MotionInputEvent::pressed(MotionToken::Key("f".into())),
+            Duration::from_millis(30),
+        );
+
+        assert_eq!(
+            triggered,
             vec![MotionRuntimeEvent::Triggered {
                 trigger,
                 starts_repeat: false,

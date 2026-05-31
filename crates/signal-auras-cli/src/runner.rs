@@ -4,9 +4,9 @@ use signal_auras_core::{
     CapabilityKind, CapabilitySet, DiagnosableError, ErrorPhase, FocusFreshnessPolicy,
     HotkeyBinding, HotkeyId, HotkeyRegistrar, InputProviderConfig, InputProviderMode,
     InputProviderOutput, KeyToken, MacroDefinition, MacroExecutor, MacroRunId, MacroRunPoll,
-    MacroRunState, MacroScheduler, MotionDefinition, MotionInputEvent, MotionInputState,
-    MotionRuntime, MotionRuntimeEvent, MotionToken, MotionTrigger, RuntimeMotion, RuntimeStats,
-    ScopeDecision, ScopeSelection, ShutdownReason, SynthesizedInputRequest,
+    MacroRunState, MacroScheduler, MotionDefinition, MotionDiscardReason, MotionInputEvent,
+    MotionInputState, MotionRuntime, MotionRuntimeEvent, MotionToken, MotionTrigger, RuntimeMotion,
+    RuntimeStats, ScopeDecision, ScopeSelection, ShutdownReason, SynthesizedInputRequest,
 };
 use signal_auras_lua::load_lua_file;
 use signal_auras_wayland::{
@@ -1118,6 +1118,7 @@ where
     let mut scheduler = MacroScheduler::default();
     let mut motion_runtime =
         MotionRuntime::new(motions.iter().map(|motion| motion.definition.clone()));
+    let motion_time_base = Instant::now();
     loop {
         match lifecycle.next_event()? {
             RunnerEvent::Hotkey(hotkey) => {
@@ -1186,7 +1187,10 @@ where
                 observed_at,
             } => {
                 record_motion_latency_metrics(stats, observed_at, kernel_timestamp);
-                for event in motion_runtime.handle_input(event) {
+                for event in motion_runtime.handle_input_at(
+                    event,
+                    motion_runtime_event_time(kernel_timestamp, observed_at, motion_time_base),
+                ) {
                     handle_motion_runtime_event(
                         event,
                         motions,
@@ -1231,6 +1235,7 @@ fn run_live_real_lifecycle(
     let mut macro_queue = LiveMacroQueue::default();
     let mut motion_runtime =
         MotionRuntime::new(motions.iter().map(|motion| motion.definition.clone()));
+    let motion_time_base = Instant::now();
     let mut repeat_ticks = motions
         .iter()
         .filter_map(|motion| {
@@ -1256,15 +1261,16 @@ fn run_live_real_lifecycle(
         }
         match adapter.wait_next_input_or_runtime_fd(wait_timeout, &runtime_fds)? {
             signal_auras_wayland::evdev::EvdevInputWaitOutcome::Input(event) => {
-                handle_observed_input(
-                    event,
+                let mut context = LiveMotionInputContext {
                     motions,
                     adapter,
-                    &mut macro_queue,
-                    &mut motion_runtime,
+                    macro_queue: &mut macro_queue,
+                    motion_runtime: &mut motion_runtime,
                     stats,
                     log,
-                )?;
+                    motion_time_base,
+                };
+                handle_observed_input(event, &mut context)?;
             }
             signal_auras_wayland::evdev::EvdevInputWaitOutcome::RuntimeFd(fd)
                 if fd == signal_fd.as_raw_fd() =>
@@ -1288,15 +1294,16 @@ fn run_live_real_lifecycle(
             signal_auras_wayland::evdev::EvdevInputWaitOutcome::Timeout => {}
         }
         while let Some(event) = adapter.next_input_event()? {
-            handle_observed_input(
-                event,
+            let mut context = LiveMotionInputContext {
                 motions,
                 adapter,
-                &mut macro_queue,
-                &mut motion_runtime,
+                macro_queue: &mut macro_queue,
+                motion_runtime: &mut motion_runtime,
                 stats,
                 log,
-            )?;
+                motion_time_base,
+            };
+            handle_observed_input(event, &mut context)?;
         }
         macro_queue.drive_ready(adapter, stats)?;
         let now = Instant::now();
@@ -1552,40 +1559,69 @@ fn idle_wait_timeout() -> Duration {
     Duration::from_secs(300)
 }
 
+struct LiveMotionInputContext<'a> {
+    motions: &'a [RuntimeMotion],
+    adapter: &'a mut RealWaylandAdapter,
+    macro_queue: &'a mut LiveMacroQueue,
+    motion_runtime: &'a mut MotionRuntime,
+    stats: &'a mut RuntimeStats,
+    log: RuntimeLog,
+    motion_time_base: Instant,
+}
+
 fn handle_observed_motion_input(
     observed: signal_auras_wayland::evdev::ObservedMotionInputEvent,
-    motions: &[RuntimeMotion],
-    adapter: &mut RealWaylandAdapter,
-    macro_queue: &mut LiveMacroQueue,
-    motion_runtime: &mut MotionRuntime,
-    stats: &mut RuntimeStats,
-    log: RuntimeLog,
+    context: &mut LiveMotionInputContext<'_>,
 ) -> Result<bool, DiagnosableError> {
-    let (dispatch_after_read_latency_ms, event_age_ms) =
-        record_motion_latency_metrics(stats, observed.observed_at, observed.kernel_timestamp);
-    log.debug(motion_input_debug_message(
+    let (dispatch_after_read_latency_ms, event_age_ms) = record_motion_latency_metrics(
+        context.stats,
+        observed.observed_at,
+        observed.kernel_timestamp,
+    );
+    context.log.debug(motion_input_debug_message(
         &observed,
         dispatch_after_read_latency_ms,
         event_age_ms,
     ));
     let mut consumed = false;
-    for event in motion_runtime.handle_input(observed.event) {
-        consumed = true;
+    let event_time = motion_runtime_event_time(
+        observed.kernel_timestamp,
+        observed.observed_at,
+        context.motion_time_base,
+    );
+    for event in context
+        .motion_runtime
+        .handle_input_at(observed.event, event_time)
+    {
         match &event {
             MotionRuntimeEvent::Triggered {
                 trigger,
                 starts_repeat,
-            } => log.debug(format!(
-                "event=motion_triggered trigger={} starts_repeat={starts_repeat}",
-                trigger_label_for_log(trigger)
-            )),
-            MotionRuntimeEvent::RepeatCancelled { trigger } => log.debug(format!(
-                "event=motion_repeat_cancelled trigger={}",
-                trigger_label_for_log(trigger)
-            )),
+            } => {
+                consumed = true;
+                context.log.debug(format!(
+                    "event=motion_triggered trigger={} starts_repeat={starts_repeat}",
+                    trigger_label_for_log(trigger)
+                ));
+            }
+            MotionRuntimeEvent::RepeatCancelled { trigger } => {
+                consumed = true;
+                context.log.debug(format!(
+                    "event=motion_repeat_cancelled trigger={}",
+                    trigger_label_for_log(trigger)
+                ));
+            }
+            MotionRuntimeEvent::MotionDiscarded { reason } => {
+                context.log.debug(format!(
+                    "event=motion_discarded reason={}",
+                    motion_discard_reason_label(*reason)
+                ));
+                context.stats.record_motion_discard();
+                continue;
+            }
         }
-        let active_context = adapter.active_process_context()?;
-        log.debug(format!(
+        let active_context = context.adapter.active_process_context()?;
+        context.log.debug(format!(
             "event=active_process_context confidence={:?} visible_name={} app_id={} window_class={}",
             active_context.confidence,
             active_context
@@ -1596,28 +1632,29 @@ fn handle_observed_motion_input(
             active_context.app_id.as_deref().unwrap_or("none"),
             active_context.window_class.as_deref().unwrap_or("none")
         ));
-        schedule_live_motion_runtime_event(event, motions, active_context, macro_queue, stats)?;
+        schedule_live_motion_runtime_event(
+            event,
+            context.motions,
+            active_context,
+            context.macro_queue,
+            context.stats,
+        )?;
     }
     Ok(consumed)
 }
 
 fn handle_observed_input(
     observed: signal_auras_wayland::evdev::ObservedInputEvent,
-    motions: &[RuntimeMotion],
-    adapter: &mut RealWaylandAdapter,
-    macro_queue: &mut LiveMacroQueue,
-    motion_runtime: &mut MotionRuntime,
-    stats: &mut RuntimeStats,
-    log: RuntimeLog,
+    context: &mut LiveMotionInputContext<'_>,
 ) -> Result<(), DiagnosableError> {
     let Some(event) = observed.event.clone() else {
         if observed.grabbed {
-            adapter.passthrough_raw_input(&observed.raw)?;
+            context.adapter.passthrough_raw_input(&observed.raw)?;
         }
         return Ok(());
     };
     if event.token == MotionToken::Leader && event.state == MotionInputState::Pressed {
-        adapter.arm_input_grab()?;
+        context.adapter.arm_input_grab()?;
     }
     let consumed = handle_observed_motion_input(
         signal_auras_wayland::evdev::ObservedMotionInputEvent {
@@ -1626,26 +1663,41 @@ fn handle_observed_input(
             kernel_timestamp: observed.raw.kernel_timestamp,
             observed_at: observed.observed_at,
         },
-        motions,
-        adapter,
-        macro_queue,
-        motion_runtime,
-        stats,
-        log,
+        context,
     )?;
     if observed.grabbed && !consumed {
-        adapter.passthrough_raw_input(&observed.raw)?;
+        context.adapter.passthrough_raw_input(&observed.raw)?;
     }
     if event.token == MotionToken::Leader && event.state == MotionInputState::Released {
-        adapter.release_input_grab()?;
+        context.adapter.release_input_grab()?;
     }
     Ok(())
+}
+
+fn motion_runtime_event_time(
+    kernel_timestamp: KernelEventTimestamp,
+    observed_at: Instant,
+    motion_time_base: Instant,
+) -> Duration {
+    match kernel_timestamp {
+        KernelEventTimestamp::Monotonic(timestamp) => timestamp,
+        KernelEventTimestamp::Unavailable => observed_at
+            .checked_duration_since(motion_time_base)
+            .unwrap_or(Duration::ZERO),
+    }
 }
 
 fn motion_input_state_label(state: MotionInputState) -> &'static str {
     match state {
         MotionInputState::Pressed => "pressed",
         MotionInputState::Released => "released",
+    }
+}
+
+fn motion_discard_reason_label(reason: MotionDiscardReason) -> &'static str {
+    match reason {
+        MotionDiscardReason::Timeout => "timeout",
+        MotionDiscardReason::UnrelatedPress => "unrelated_press",
     }
 }
 
@@ -1748,6 +1800,10 @@ fn schedule_live_motion_runtime_event(
                 "motion_repeat_cancelled trigger={} queued_macros_cancelled={cancelled}",
                 trigger.describe()
             );
+            Ok(())
+        }
+        MotionRuntimeEvent::MotionDiscarded { .. } => {
+            stats.record_motion_discard();
             Ok(())
         }
     }
@@ -1946,6 +2002,10 @@ where
         MotionRuntimeEvent::RepeatCancelled { trigger } => {
             stats.record_motion_repeat_cancel();
             println!("motion_repeat_cancelled trigger={}", trigger.describe());
+            Ok(())
+        }
+        MotionRuntimeEvent::MotionDiscarded { .. } => {
+            stats.record_motion_discard();
             Ok(())
         }
     }

@@ -30,8 +30,9 @@ pub use macro_plan::{
     SynthesizedInputRequest, SynthesizedInputState,
 };
 pub use motion::{
-    AutomationDefaults, MotionDefinition, MotionInputEvent, MotionInputState, MotionRuntime,
-    MotionRuntimeEvent, MotionToken, MotionTrigger, RepeatDefinition, RepeatInterval,
+    AutomationDefaults, MotionDefinition, MotionDiscardReason, MotionInputEvent, MotionInputState,
+    MotionRuntime, MotionRuntimeEvent, MotionToken, MotionTrigger, RepeatDefinition,
+    RepeatInterval, DEFAULT_MOTION_DURATION,
 };
 pub use scope::{
     ActiveProcessConfidence, ActiveProcessContext, FocusFreshness, FocusFreshnessPolicy,

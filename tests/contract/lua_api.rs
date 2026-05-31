@@ -122,6 +122,30 @@ fn lua_api_accepts_existing_repeat_motion_syntax_without_policy_migration() {
 }
 
 #[test]
+fn lua_api_rejects_prefix_overlapping_motion_triggers() {
+    let error = load_lua_source(
+        r#"
+        return {
+          leader = "F13",
+          motions = {
+            {
+              trigger = { "<Leader>", "x" },
+              macro = macro { text "short" },
+            },
+            {
+              trigger = { "<Leader>", "x", "x" },
+              macro = macro { text "long" },
+            },
+          },
+        }
+        "#,
+    )
+    .unwrap_err();
+
+    assert!(error.message.contains("prefix-overlapping motion triggers"));
+}
+
+#[test]
 fn lua_api_accepts_expanded_keyboard_keys_on_trigger_surfaces() {
     let config = load_lua_source(
         r#"

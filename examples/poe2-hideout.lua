@@ -7,9 +7,10 @@ return {
     devices = {
       "/dev/input/by-signal-auras/keychron-k5-pro",
       "/dev/input/by-signal-auras/logitech-mouse",
+      "/dev/input/by-signal-auras/logitech-mouse-keyboard",
     },
   },
-  leader = "F9",
+  leader = "Ctrl",
   defaults = {
     inter_action_delay_ms = 200,
   },
@@ -39,7 +40,7 @@ return {
       },
     },
     {
-      trigger = { "<Leader>", "<LClick>" },
+      trigger = { "<Leader>", "<LClick>", "<LClick>" },
       mode = "passthrough",
       repeat = {
         while_held = { "<LClick>" },

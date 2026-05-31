@@ -93,6 +93,7 @@ impl LuaAutomationConfiguration {
                 ));
             }
         }
+        reject_prefix_overlapping_motion_triggers(normalized_motions.keys())?;
 
         Ok(Self {
             scope,
@@ -146,6 +147,31 @@ impl LuaAutomationConfiguration {
             })
             .collect()
     }
+}
+
+fn reject_prefix_overlapping_motion_triggers<'a>(
+    triggers: impl IntoIterator<Item = &'a crate::MotionTrigger>,
+) -> Result<(), DiagnosableError> {
+    let triggers = triggers.into_iter().collect::<Vec<_>>();
+    for (index, left) in triggers.iter().enumerate() {
+        for right in triggers.iter().skip(index + 1) {
+            if trigger_is_prefix(left, right) || trigger_is_prefix(right, left) {
+                return Err(DiagnosableError::new(
+                    ErrorPhase::ScriptValidation,
+                    format!(
+                        "prefix-overlapping motion triggers are ambiguous: '{}' and '{}'",
+                        left.describe(),
+                        right.describe()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn trigger_is_prefix(left: &crate::MotionTrigger, right: &crate::MotionTrigger) -> bool {
+    left.tokens().len() < right.tokens().len() && right.tokens().starts_with(left.tokens())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
