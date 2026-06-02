@@ -206,6 +206,10 @@ fn parse_controller_callbacks(source: &str) -> Result<Vec<ControllerCallback>, D
 }
 
 fn parse_controller_output_actions(source: &str) -> Result<Vec<MacroAction>, DiagnosableError> {
+    if source.contains("sa.sleep") || source.contains("sa.window.") {
+        return Ok(Vec::new());
+    }
+
     let mut actions = Vec::new();
     for line in source
         .lines()
@@ -222,6 +226,8 @@ fn parse_controller_output_actions(source: &str) -> Result<Vec<MacroAction>, Dia
             actions.push(MacroAction::text(argument)?);
         } else if let Some(argument) = controller_call_argument(line, "sa.input.mouse_click") {
             actions.push(MacroAction::mouse_click(MouseButton::parse(argument)?));
+        } else if supported_imperative_callback_api(line) {
+            continue;
         } else if line.starts_with("sa.") {
             return Err(DiagnosableError::new(
                 ErrorPhase::ScriptValidation,
@@ -230,6 +236,23 @@ fn parse_controller_output_actions(source: &str) -> Result<Vec<MacroAction>, Dia
         }
     }
     Ok(actions)
+}
+
+fn supported_imperative_callback_api(line: &str) -> bool {
+    [
+        "sa.sleep",
+        "sa.window.active",
+        "sa.window.find",
+        "sa.window.activate",
+        "sa.window.wait_active",
+        "sa.input.key",
+        "sa.input.key_down",
+        "sa.input.key_up",
+        "sa.input.text",
+        "sa.input.mouse_click",
+    ]
+    .iter()
+    .any(|api| line.starts_with(api))
 }
 
 fn controller_call_argument<'a>(line: &'a str, api_name: &str) -> Option<&'a str> {
@@ -241,7 +264,14 @@ fn controller_call_argument<'a>(line: &'a str, api_name: &str) -> Option<&'a str
                 .trim_start()
                 .strip_prefix('"')
         })
-        .and_then(|rest| rest.find('"').map(|end| &rest[..end]))
+        .and_then(|rest| {
+            let end = rest.find('"')?;
+            if rest[end + 1..].trim_start().starts_with("..") {
+                None
+            } else {
+                Some(&rest[..end])
+            }
+        })
 }
 
 fn load_controller_source_tree(
@@ -417,16 +447,46 @@ fn parse_controller_entry(
         })?;
     let mode = BindingMode::parse(field_string(source, "mode"))?;
     let scope = parse_controller_scope(source)?;
+    let required_capabilities = parse_controller_capabilities(source)?
+        .unwrap_or_else(|| controller_required_capabilities(kind, mode, &scope));
     Ok(ControllerRegistration::new(
         kind,
         trigger,
         scope.clone(),
         mode,
         callback,
-        controller_required_capabilities(kind, mode, &scope),
+        required_capabilities,
     )?
     .with_requires_held(parse_controller_requires_held(source)?)
     .with_loop_policy(parse_controller_loop_policy(source)?))
+}
+
+fn parse_controller_capabilities(source: &str) -> Result<Option<CapabilitySet>, DiagnosableError> {
+    let Some(body) = table_body_field_after(source, "capabilities")? else {
+        return Ok(None);
+    };
+    let capabilities = quoted_strings(body)
+        .into_iter()
+        .map(parse_controller_capability)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(CapabilitySet::new(capabilities)))
+}
+
+fn parse_controller_capability(name: &str) -> Result<CapabilityKind, DiagnosableError> {
+    match name.trim() {
+        "global_shortcut" => Ok(CapabilityKind::GlobalShortcut),
+        "composite_pointer_observation" => Ok(CapabilityKind::CompositePointerObservation),
+        "composite_pointer_consumption" => Ok(CapabilityKind::CompositePointerConsumption),
+        "active_process_metadata" => Ok(CapabilityKind::ActiveProcessMetadata),
+        "active_window_metadata" => Ok(CapabilityKind::ActiveWindowMetadata),
+        "window_activation" => Ok(CapabilityKind::WindowActivation),
+        "synthesized_input" => Ok(CapabilityKind::SynthesizedInput),
+        "timer" => Ok(CapabilityKind::Timer),
+        other => Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!("unknown Lua controller capability '{other}'"),
+        )),
+    }
 }
 
 fn parse_controller_requires_held(source: &str) -> Result<HeldCondition, DiagnosableError> {

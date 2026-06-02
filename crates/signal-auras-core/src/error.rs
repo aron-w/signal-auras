@@ -37,7 +37,10 @@ pub enum Capability {
     CompositePointerObservation,
     CompositePointerConsumption,
     ActiveProcess,
+    ActiveWindowMetadata,
+    WindowActivation,
     SynthesizedInput,
+    Timer,
 }
 
 impl fmt::Display for Capability {
@@ -47,7 +50,10 @@ impl fmt::Display for Capability {
             Self::CompositePointerObservation => "composite_pointer_observation",
             Self::CompositePointerConsumption => "composite_pointer_consumption",
             Self::ActiveProcess => "active_process",
+            Self::ActiveWindowMetadata => "active_window_metadata",
+            Self::WindowActivation => "window_activation",
             Self::SynthesizedInput => "synthesized_input",
+            Self::Timer => "timer",
         };
         f.write_str(value)
     }
@@ -59,7 +65,10 @@ pub enum CapabilityKind {
     CompositePointerObservation,
     CompositePointerConsumption,
     ActiveProcessMetadata,
+    ActiveWindowMetadata,
+    WindowActivation,
     SynthesizedInput,
+    Timer,
 }
 
 impl CapabilityKind {
@@ -69,7 +78,10 @@ impl CapabilityKind {
             Self::CompositePointerObservation => Capability::CompositePointerObservation,
             Self::CompositePointerConsumption => Capability::CompositePointerConsumption,
             Self::ActiveProcessMetadata => Capability::ActiveProcess,
+            Self::ActiveWindowMetadata => Capability::ActiveWindowMetadata,
+            Self::WindowActivation => Capability::WindowActivation,
             Self::SynthesizedInput => Capability::SynthesizedInput,
+            Self::Timer => Capability::Timer,
         }
     }
 }
@@ -81,7 +93,10 @@ impl fmt::Display for CapabilityKind {
             Self::CompositePointerObservation => "composite_pointer_observation",
             Self::CompositePointerConsumption => "composite_pointer_consumption",
             Self::ActiveProcessMetadata => "active_process_metadata",
+            Self::ActiveWindowMetadata => "active_window_metadata",
+            Self::WindowActivation => "window_activation",
             Self::SynthesizedInput => "synthesized_input",
+            Self::Timer => "timer",
         };
         f.write_str(value)
     }

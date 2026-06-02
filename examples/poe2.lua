@@ -18,6 +18,19 @@ sa.press({
   callback = "go_home",
 })
 
+sa.press({
+  requires_held = { "Ctrl" },
+  trigger = "S",
+  mode = "passthrough",
+  capabilities = {
+    "active_window_metadata",
+    "window_activation",
+    "synthesized_input",
+    "timer",
+  },
+  callback = "reload_filterblade",
+})
+
 sa.motion({
   requires_held = { "<Leader>" },
   trigger = "<LClick> <LClick>",
@@ -27,7 +40,7 @@ sa.motion({
     while_held = { "<LClick>" },
     before = "ctrl_down",
     repeat = {
-      every_ms = 65,
+      every_ms = 40,
       callback = "click_left",
     },
     after = "ctrl_up",
@@ -65,6 +78,50 @@ sa.press({
 sa.callback("go_home", function()
   sa.input.key("Enter")
   sa.input.text("/hideout")
+  sa.input.key("Enter")
+end)
+
+sa.callback("reload_filterblade", function()
+  sa.sleep(100)
+
+  local active = sa.window.active({ title = true })
+  sa.log("filterblade active_title=" .. tostring(active.title))
+  local filter = active.title and active.title:match("^FilterBlade%s+%-%s+(.-)%s+%-%s+FilterBlade")
+  if filter == nil then
+    filter = active.title and active.title:match("^(.-)%s+%-%s+FilterBlade")
+  end
+  sa.log("filterblade parsed_filter=" .. tostring(filter))
+  if filter == nil or filter == "" then
+    sa.log_warn("filterblade no matching FilterBlade title")
+    return
+  end
+
+  sa.log("filterblade finding_poe processes=steam_app_2694490,PathOfExileSteam.exe")
+  local poe = sa.window.find({
+    processes = { "steam_app_2694490", "PathOfExileSteam.exe" },
+  })
+  sa.log("filterblade poe_handle=" .. tostring(poe))
+  if poe == nil then
+    sa.log_warn("filterblade poe window not found")
+    return
+  end
+
+  local activated = sa.window.activate(poe)
+  sa.log("filterblade activated=" .. tostring(activated))
+  if not activated then
+    return
+  end
+  local focused = sa.window.wait_active(poe, 500)
+  sa.log("filterblade focused=" .. tostring(focused))
+  if not focused then
+    return
+  end
+
+  sa.sleep(150)
+  local command = "/reloaditemfilter " .. filter
+  sa.log("filterblade command=" .. command)
+  sa.input.key("Enter")
+  sa.input.text(command)
   sa.input.key("Enter")
 end)
 

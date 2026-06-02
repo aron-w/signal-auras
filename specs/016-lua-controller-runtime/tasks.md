@@ -72,15 +72,19 @@
 
 ## Phase 8: Polish & Verification
 
+- [X] T024a Add embedded Lua coroutine runtime tests for sleep, window, logging, capability denial, and ordered input host requests in `tests/contract/lua_api.rs`.
+- [X] T024b Add live runner tests for imperative callback execution after verified focus in `tests/contract/cli_runner.rs`.
+- [X] T024c Add KDE/KWin window metadata, lookup, activation, and focus verification adapter support in `crates/signal-auras-wayland/src/kde_bridge.rs`.
+- [X] T024d Add PoE2 FilterBlade controller relay example and uinput text mapping regression coverage in `examples/poe2.lua` and `crates/signal-auras-wayland/src/uinput.rs`.
 - [X] T024 Run `cargo fmt` for edited Rust files.
 - [X] T025 Run `cargo fmt --check`.
 - [X] T026 Run `cargo test -p signal-auras-core controller`.
 - [X] T027 Run `cargo test -p signal-auras-lua controller`.
 - [X] T028 Run targeted controller CLI tests with `cargo test --test cli_runner controller_runner`.
-- [ ] T029 Run full `cargo test`.
+- [X] T029 Run full `cargo test`.
 - [X] T030 Run Nix verification commands where feasible.
 
-**Verification note**: The legacy PoE2 example was renamed to `examples/poe2-legacy.lua`, and the controller-style replacement is `examples/poe2.lua`. Feature-targeted controller tests pass. `cargo fmt --check`, `nix develop -c cargo fmt --check`, `nix develop -c cargo clippy --all-targets -- -D warnings`, and `nix flake check` pass.
+**Verification note**: `examples/poe2.lua` is now a controller-style script with an imperative FilterBlade reload callback. Feature-targeted controller tests pass. `cargo fmt --check`, `cargo test`, `cargo clippy --all-targets -- -D warnings`, and `XDG_CACHE_HOME=/tmp/nix-cache nix flake check` pass.
 
 ## Dependencies & Execution Order
 
@@ -97,4 +101,4 @@
 
 ## MVP Scope
 
-US1 is the MVP: validated multi-file Lua controller registration before runtime activation. This implementation also completes library contracts for US2 and US3 so later live runner integration can consume stable APIs.
+US1 was the MVP: validated multi-file Lua controller registration before runtime activation. This implementation also completes library contracts for US2 and US3, wires live runner activation for imperative Lua callbacks, and includes the PoE2 FilterBlade relay as a manual KDE Wayland proof point.

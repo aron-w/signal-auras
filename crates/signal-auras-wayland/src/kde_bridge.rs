@@ -7,9 +7,9 @@ use std::{
     fs,
     os::fd::RawFd,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 const CALLBACK_QUEUE_LIMIT: usize = 1024;
@@ -96,6 +96,7 @@ impl KdeBridgeState {
 pub struct KwinShortcutBridge {
     connection: zbus::blocking::Connection,
     queue: Arc<Mutex<KwinCallbackQueue>>,
+    window_results: Arc<(Mutex<VecDeque<KwinWindowResult>>, Condvar)>,
     callback_wake_fd: crate::event_loop::RuntimeWakeFd,
     actions: BTreeMap<String, HotkeyId>,
     active_process: ActiveProcessContext,
@@ -121,15 +122,18 @@ impl KwinShortcutBridge {
         let callback_wake_fd = crate::event_loop::RuntimeWakeFd::new()?;
         let wake_sender = callback_wake_fd.sender()?;
         let queue = Arc::new(Mutex::new(KwinCallbackQueue::new(CALLBACK_QUEUE_LIMIT)));
+        let window_results = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
         spawn_kwin_callback_listener(
             &callback_bus_name,
             &callback_object_path,
             Arc::clone(&queue),
+            Arc::clone(&window_results),
             wake_sender,
         )?;
         Ok(Self {
             connection,
             queue,
+            window_results,
             callback_wake_fd,
             actions: BTreeMap::new(),
             active_process: ActiveProcessContext::unavailable(
@@ -273,6 +277,108 @@ impl KwinShortcutBridge {
         cached_active_process_context(&self.active_process)
     }
 
+    pub fn active_window_title(&mut self) -> Result<Option<String>, DiagnosableError> {
+        self.run_window_script(kwin_active_window_title_script)
+            .map(|result| result.found.then_some(result.value))
+    }
+
+    pub fn find_window_by_processes(
+        &mut self,
+        processes: &[String],
+    ) -> Result<Option<String>, DiagnosableError> {
+        let processes = processes.to_vec();
+        self.run_window_script(|request_id, bus, path| {
+            kwin_find_window_script(request_id, bus, path, &processes)
+        })
+        .map(|result| result.found.then_some(result.value))
+    }
+
+    pub fn activate_window(&mut self, handle: &str) -> Result<bool, DiagnosableError> {
+        let handle = handle.to_string();
+        self.run_window_script(|request_id, bus, path| {
+            kwin_activate_window_script(request_id, bus, path, &handle)
+        })
+        .map(|result| result.found)
+    }
+
+    pub fn active_window_matches(&mut self, handle: &str) -> Result<bool, DiagnosableError> {
+        let handle = handle.to_string();
+        self.run_window_script(|request_id, bus, path| {
+            kwin_active_window_matches_script(request_id, bus, path, &handle)
+        })
+        .map(|result| result.found)
+    }
+
+    fn run_window_script(
+        &mut self,
+        build_script: impl FnOnce(&str, &str, &str) -> String,
+    ) -> Result<KwinWindowResult, DiagnosableError> {
+        self.next_index += 1;
+        let request_id = format!(
+            "signal-auras-window-request-{}-{}",
+            std::process::id(),
+            self.next_index
+        );
+        let script_id = request_id.clone();
+        let script_path = std::env::temp_dir().join(format!("{script_id}.js"));
+        let script = build_script(
+            &request_id,
+            &self.callback_bus_name,
+            &self.callback_object_path,
+        );
+        fs::write(&script_path, script).map_err(bridge_error)?;
+
+        let proxy = kwin_scripting_proxy(&self.connection)?;
+        let loaded_id: i32 = proxy
+            .call(
+                "loadScript",
+                &(script_path.to_string_lossy().as_ref(), script_id.as_str()),
+            )
+            .map_err(bridge_error)?;
+        if loaded_id < 0 {
+            let _ = fs::remove_file(&script_path);
+            return Err(bridge_diagnostic(
+                "KWin refused to load the current-run window operation script",
+            ));
+        }
+        proxy.call::<_, _, ()>("start", &()).map_err(bridge_error)?;
+        let result = self.take_window_result(&request_id, Duration::from_millis(500));
+        let _ = proxy.call::<_, _, bool>("unloadScript", &script_id.as_str());
+        let _ = fs::remove_file(script_path);
+        result
+    }
+
+    fn take_window_result(
+        &self,
+        request_id: &str,
+        timeout: Duration,
+    ) -> Result<KwinWindowResult, DiagnosableError> {
+        let deadline = Instant::now() + timeout;
+        let (lock, condvar) = &*self.window_results;
+        let mut results = lock
+            .lock()
+            .map_err(|_| bridge_diagnostic("KWin window operation result queue is unavailable"))?;
+        loop {
+            if let Some(index) = results
+                .iter()
+                .position(|result| result.request_id == request_id)
+            {
+                return Ok(results.remove(index).expect("position was found"));
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(bridge_diagnostic(
+                    "KWin window operation did not return a result",
+                ));
+            }
+            let remaining = deadline.duration_since(now);
+            let (guard, _) = condvar.wait_timeout(results, remaining).map_err(|_| {
+                bridge_diagnostic("KWin window operation result queue is unavailable")
+            })?;
+            results = guard;
+        }
+    }
+
     pub fn unload(&mut self) -> Result<CleanupReport, DiagnosableError> {
         let attempted = self.scripts.len();
         let attempted = attempted + usize::from(self.active_process_monitor.is_some());
@@ -324,6 +430,13 @@ struct KwinBridgeEvent {
     received_at: Instant,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KwinWindowResult {
+    request_id: String,
+    found: bool,
+    value: String,
+}
+
 #[derive(Debug)]
 struct KwinCallbackQueue {
     capacity: usize,
@@ -364,6 +477,7 @@ fn spawn_kwin_callback_listener(
     bus_name: &str,
     object_path: &str,
     queue: Arc<Mutex<KwinCallbackQueue>>,
+    window_results: Arc<(Mutex<VecDeque<KwinWindowResult>>, Condvar)>,
     wake_sender: crate::event_loop::RuntimeWakeSender,
 ) -> Result<(), DiagnosableError> {
     let connection = zbus::blocking::Connection::session().map_err(bridge_error)?;
@@ -377,10 +491,29 @@ fn spawn_kwin_callback_listener(
             };
             let header = message.header();
             if header.message_type() != zbus::message::Type::MethodCall
-                || header.member().map(|m| m.as_str()) != Some("triggered")
                 || header.interface().map(|i| i.as_str()) != Some("org.signalAuras.KWinBridge")
                 || header.path().map(|p| p.as_str()) != Some(object_path.as_str())
             {
+                continue;
+            }
+            if header.member().map(|m| m.as_str()) == Some("windowResult") {
+                if let Ok((request_id, found, value)) =
+                    message.body().deserialize::<(String, bool, String)>()
+                {
+                    let (lock, condvar) = &*window_results;
+                    if let Ok(mut results) = lock.lock() {
+                        results.push_back(KwinWindowResult {
+                            request_id,
+                            found,
+                            value,
+                        });
+                        condvar.notify_all();
+                    }
+                }
+                let _ = connection.reply(&header, &());
+                continue;
+            }
+            if header.member().map(|m| m.as_str()) != Some("triggered") {
                 continue;
             }
             let Ok((action_name, visible_name, app_id, window_class, pid)) = message
@@ -557,6 +690,106 @@ fn kwin_active_process_script(action_name: &str, bus_name: &str, object_path: &s
     )
 }
 
+fn kwin_window_helpers() -> &'static str {
+    "function signalAurasValue(value) { return value === undefined || value === null ? \"\" : value.toString(); }\n\
+     function signalAurasWindows() { return workspace.windowList ? workspace.windowList() : workspace.windows; }\n\
+     function signalAurasWindowHandle(window) { return signalAurasValue(window.resourceClass || window.windowClass || window.desktopFileName || window.resourceName); }\n\
+     function signalAurasWindowCaption(window) { return signalAurasValue(window.caption || window.captionNormal); }\n\
+     function signalAurasWindowMatches(window, handles) {\n\
+         var candidates = [window.resourceClass, window.windowClass, window.desktopFileName, window.resourceName];\n\
+         for (var i = 0; i < candidates.length; i++) {\n\
+             var candidate = signalAurasValue(candidates[i]);\n\
+             for (var j = 0; j < handles.length; j++) {\n\
+                 if (candidate === handles[j]) { return true; }\n\
+             }\n\
+         }\n\
+         return false;\n\
+     }\n"
+}
+
+fn kwin_active_window_title_script(request_id: &str, bus_name: &str, object_path: &str) -> String {
+    format!(
+        "{}\
+         var window = workspace.activeWindow;\n\
+         var title = window ? signalAurasWindowCaption(window) : \"\";\n\
+         callDBus({bus:?}, {path:?}, \"org.signalAuras.KWinBridge\", \"windowResult\", {request:?}, title !== \"\", title);\n",
+        kwin_window_helpers(),
+        bus = bus_name,
+        path = object_path,
+        request = request_id,
+    )
+}
+
+fn kwin_find_window_script(
+    request_id: &str,
+    bus_name: &str,
+    object_path: &str,
+    processes: &[String],
+) -> String {
+    format!(
+        "{}\
+         var handles = {processes:?};\n\
+         var windows = signalAurasWindows();\n\
+         var found = \"\";\n\
+         for (var i = 0; i < windows.length; i++) {{\n\
+             var window = windows[i];\n\
+             if (signalAurasWindowMatches(window, handles)) {{ found = signalAurasWindowHandle(window); break; }}\n\
+         }}\n\
+         callDBus({bus:?}, {path:?}, \"org.signalAuras.KWinBridge\", \"windowResult\", {request:?}, found !== \"\", found);\n",
+        kwin_window_helpers(),
+        processes = processes,
+        bus = bus_name,
+        path = object_path,
+        request = request_id,
+    )
+}
+
+fn kwin_activate_window_script(
+    request_id: &str,
+    bus_name: &str,
+    object_path: &str,
+    handle: &str,
+) -> String {
+    format!(
+        "{}\
+         var handle = {handle:?};\n\
+         var windows = signalAurasWindows();\n\
+         var activated = false;\n\
+         for (var i = 0; i < windows.length; i++) {{\n\
+             var window = windows[i];\n\
+             if (signalAurasWindowMatches(window, [handle])) {{\n\
+                 try {{ if (window.activate) {{ window.activate(); }} else {{ workspace.activeWindow = window; }} activated = true; }} catch (error) {{ activated = false; }}\n\
+                 break;\n\
+             }}\n\
+         }}\n\
+         callDBus({bus:?}, {path:?}, \"org.signalAuras.KWinBridge\", \"windowResult\", {request:?}, activated, \"\");\n",
+        kwin_window_helpers(),
+        handle = handle,
+        bus = bus_name,
+        path = object_path,
+        request = request_id,
+    )
+}
+
+fn kwin_active_window_matches_script(
+    request_id: &str,
+    bus_name: &str,
+    object_path: &str,
+    handle: &str,
+) -> String {
+    format!(
+        "{}\
+         var window = workspace.activeWindow;\n\
+         var matched = window ? signalAurasWindowMatches(window, [{handle:?}]) : false;\n\
+         callDBus({bus:?}, {path:?}, \"org.signalAuras.KWinBridge\", \"windowResult\", {request:?}, matched, \"\");\n",
+        kwin_window_helpers(),
+        handle = handle,
+        bus = bus_name,
+        path = object_path,
+        request = request_id,
+    )
+}
+
 fn bridge_error(error: impl std::fmt::Display) -> DiagnosableError {
     bridge_diagnostic(format!("{error}"))
 }
@@ -658,6 +891,48 @@ mod tests {
             "signalAurasActiveProcessHeartbeat.timeout.connect(signalAurasReportActiveWindow);"
         ));
         assert!(script.contains("signalAurasActiveProcessHeartbeat.start();"));
+    }
+
+    #[test]
+    fn window_operation_scripts_report_results_without_logging_titles() {
+        let active = kwin_active_window_title_script(
+            "request-1",
+            "org.signalAuras.Runner123",
+            "/org/signalAuras/Runner",
+        );
+        assert!(active.contains("workspace.activeWindow"));
+        assert!(active.contains("\"windowResult\""));
+        assert!(active.contains("title !== \"\", title"));
+
+        let find = kwin_find_window_script(
+            "request-2",
+            "org.signalAuras.Runner123",
+            "/org/signalAuras/Runner",
+            &[
+                "steam_app_2694490".to_string(),
+                "PathOfExileSteam.exe".to_string(),
+            ],
+        );
+        assert!(find.contains("signalAurasWindowMatches(window, handles)"));
+        assert!(find.contains("steam_app_2694490"));
+
+        let activate = kwin_activate_window_script(
+            "request-3",
+            "org.signalAuras.Runner123",
+            "/org/signalAuras/Runner",
+            "steam_app_2694490",
+        );
+        assert!(activate.contains("window.activate"));
+        assert!(activate.contains("workspace.activeWindow = window"));
+
+        let wait = kwin_active_window_matches_script(
+            "request-4",
+            "org.signalAuras.Runner123",
+            "/org/signalAuras/Runner",
+            "steam_app_2694490",
+        );
+        assert!(wait.contains("workspace.activeWindow"));
+        assert!(wait.contains("signalAurasWindowMatches"));
     }
 
     fn event(action_name: &str) -> KwinBridgeEvent {

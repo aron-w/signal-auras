@@ -208,9 +208,16 @@ pub fn kde_capability_report(
         CapabilityKind::ActiveProcessMetadata if environment.services.kwin => {
             CapabilityStatus::available(kind, "kwin")
         }
+        CapabilityKind::ActiveWindowMetadata if environment.services.kwin => {
+            CapabilityStatus::available(kind, "kwin")
+        }
+        CapabilityKind::WindowActivation if environment.services.kwin => {
+            CapabilityStatus::available(kind, "kwin")
+        }
         CapabilityKind::SynthesizedInput if environment.services.portal => {
             CapabilityStatus::available(kind, "xdg-desktop-portal-kde")
         }
+        CapabilityKind::Timer => CapabilityStatus::available(kind, "runtime-scheduler"),
         CapabilityKind::GlobalShortcut => unavailable_kind(
             kind,
             "KDE global shortcut service KGlobalAccel is unavailable",
@@ -219,6 +226,16 @@ pub fn kde_capability_report(
         CapabilityKind::ActiveProcessMetadata => unavailable_kind(
             kind,
             "KDE active-process metadata service KWin is unavailable",
+            "kwin",
+        ),
+        CapabilityKind::ActiveWindowMetadata => unavailable_kind(
+            kind,
+            "KDE active-window metadata service KWin is unavailable",
+            "kwin",
+        ),
+        CapabilityKind::WindowActivation => unavailable_kind(
+            kind,
+            "KDE window activation service KWin is unavailable",
             "kwin",
         ),
         CapabilityKind::SynthesizedInput => unavailable_kind(

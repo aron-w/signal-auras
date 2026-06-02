@@ -504,7 +504,10 @@ fn capability_to_kind(capability: Capability) -> CapabilityKind {
         Capability::CompositePointerObservation => CapabilityKind::CompositePointerObservation,
         Capability::CompositePointerConsumption => CapabilityKind::CompositePointerConsumption,
         Capability::ActiveProcess => CapabilityKind::ActiveProcessMetadata,
+        Capability::ActiveWindowMetadata => CapabilityKind::ActiveWindowMetadata,
+        Capability::WindowActivation => CapabilityKind::WindowActivation,
         Capability::SynthesizedInput => CapabilityKind::SynthesizedInput,
+        Capability::Timer => CapabilityKind::Timer,
     }
 }
 

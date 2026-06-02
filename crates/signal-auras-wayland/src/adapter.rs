@@ -138,6 +138,61 @@ impl RealWaylandAdapter {
             .ensure_active_process_monitor()
     }
 
+    pub fn active_window_title(&mut self) -> Result<Option<String>, DiagnosableError> {
+        if self.environment.is_some() {
+            return Ok(None);
+        }
+        if self.shortcut_bridge.is_none() {
+            self.shortcut_bridge = Some(crate::kde_bridge::KwinShortcutBridge::connect()?);
+        }
+        self.shortcut_bridge
+            .as_mut()
+            .expect("shortcut bridge was initialized")
+            .active_window_title()
+    }
+
+    pub fn find_window_by_processes(
+        &mut self,
+        processes: &[String],
+    ) -> Result<Option<String>, DiagnosableError> {
+        if self.environment.is_some() {
+            return Ok(None);
+        }
+        if self.shortcut_bridge.is_none() {
+            self.shortcut_bridge = Some(crate::kde_bridge::KwinShortcutBridge::connect()?);
+        }
+        self.shortcut_bridge
+            .as_mut()
+            .expect("shortcut bridge was initialized")
+            .find_window_by_processes(processes)
+    }
+
+    pub fn activate_window(&mut self, handle: &str) -> Result<bool, DiagnosableError> {
+        if self.environment.is_some() {
+            return Ok(false);
+        }
+        if self.shortcut_bridge.is_none() {
+            self.shortcut_bridge = Some(crate::kde_bridge::KwinShortcutBridge::connect()?);
+        }
+        self.shortcut_bridge
+            .as_mut()
+            .expect("shortcut bridge was initialized")
+            .activate_window(handle)
+    }
+
+    pub fn active_window_matches(&mut self, handle: &str) -> Result<bool, DiagnosableError> {
+        if self.environment.is_some() {
+            return Ok(false);
+        }
+        if self.shortcut_bridge.is_none() {
+            self.shortcut_bridge = Some(crate::kde_bridge::KwinShortcutBridge::connect()?);
+        }
+        self.shortcut_bridge
+            .as_mut()
+            .expect("shortcut bridge was initialized")
+            .active_window_matches(handle)
+    }
+
     pub fn configure_input_provider(
         &mut self,
         provider: Option<&InputProviderConfig>,

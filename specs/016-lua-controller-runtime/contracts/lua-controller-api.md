@@ -36,7 +36,7 @@ sa.shutdown({ callback = "cleanup" })
 ```
 
 Runtime activation uses `sa.callback(name, function() ... end)` definitions to
-bind registered callback names to Rust-backed output requests:
+bind registered callback names to Rust-backed host requests:
 
 ```lua
 sa.callback("hideout", function()
@@ -46,9 +46,20 @@ sa.callback("hideout", function()
 end)
 ```
 
-Supported callback output APIs are `sa.input.key`, `sa.input.key_down`,
-`sa.input.key_up`, `sa.input.text`, and `sa.input.mouse_click`. These APIs queue
-Rust operation requests; Lua does not receive direct OS handles.
+Supported callback APIs are:
+
+- `sa.sleep(ms)`: Yield to a Rust timer continuation.
+- `sa.log(message)`, `sa.log_debug(message)`, and `sa.log_warn(message)`: Emit explicit script diagnostics.
+- `sa.window.active({ title = true })`: Return fresh active-window metadata when the callback has active-window metadata capability.
+- `sa.window.find({ processes = {...} })`: Return an opaque window handle for a matching process when the callback has window activation capability.
+- `sa.window.activate(handle)`: Request compositor activation of an opaque window handle.
+- `sa.window.wait_active(handle, timeout_ms)`: Verify fresh focus before output.
+- `sa.input.key`, `sa.input.key_down`, `sa.input.key_up`, `sa.input.text`, and `sa.input.mouse_click`: Queue ordered Rust synthesized-input requests.
+
+These APIs yield to Rust and do not receive direct OS handles. Sensitive host
+requests are capability-gated per callback registration. Diagnostics must avoid
+ambient title/process disclosure unless the script explicitly logs data it has
+already requested through a declared capability.
 
 ## Compatibility
 

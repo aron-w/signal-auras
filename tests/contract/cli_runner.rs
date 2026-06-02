@@ -2,7 +2,7 @@ use signal_auras_cli::prompt::{ScopePrompt, TerminalPrompt};
 use signal_auras_cli::runner::{
     parse_doctor_args, parse_run_args, start_controller_runner_with_lifecycle,
     start_real_controller_runner_with_lifecycle, start_real_runner_with_lifecycle, start_runner,
-    start_runner_with_lifecycle, DoctorCommand, RunnerEvent, RunnerLifecycle,
+    start_runner_with_lifecycle, ControllerHost, DoctorCommand, RunnerEvent, RunnerLifecycle,
 };
 use signal_auras_core::{
     available_capability_report, ActiveProcessProvider, CapabilityKind, CapabilitySet,
@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use signal_auras_lua::ActiveWindowMetadata;
 use signal_auras_wayland::RealWaylandAdapter;
 
 #[test]
@@ -587,6 +588,101 @@ fn controller_runner_validates_registers_and_executes_callback_outputs() {
 }
 
 #[test]
+fn controller_runner_executes_filterblade_reload_after_verified_focus() {
+    let lua_file = write_lua(
+        r#"
+        sa.hotkey({
+          trigger = "Ctrl+S",
+          mode = "passthrough",
+          capabilities = {
+            "global_shortcut",
+            "active_window_metadata",
+            "window_activation",
+            "synthesized_input",
+            "timer",
+          },
+          callback = "reload_filterblade",
+        })
+
+        sa.callback("reload_filterblade", function()
+          sa.sleep(100)
+
+          local active = sa.window.active({ title = true })
+          local filter = active.title and active.title:match("^FilterBlade%s+%-%s+(.-)%s+%-%s+FilterBlade")
+          if filter == nil then
+            filter = active.title and active.title:match("^(.-)%s+%-%s+FilterBlade")
+          end
+          if filter == nil or filter == "" then
+            return
+          end
+
+          local poe = sa.window.find({
+            processes = { "steam_app_2694490", "PathOfExileSteam.exe" },
+          })
+          if poe == nil then
+            return
+          end
+
+          if not sa.window.activate(poe) then
+            return
+          end
+          if not sa.window.wait_active(poe, 500) then
+            return
+          end
+
+          sa.input.key("Enter")
+          sa.input.text("/reloaditemfilter " .. filter)
+          sa.input.key("Enter")
+        end)
+        "#,
+    );
+    let mut registrar = RecordingRegistrar::default();
+    let active = StaticActive(None);
+    let mut executor = CountingExecutor {
+        active_title: Some("FilterBlade - v0.5_IuseNixOSBtw - FilterBlade - PoE1&2 Filter Customizer - Finetuned for NeverSink's Filter".to_string()),
+        found_window: Some("steam_app_2694490".to_string()),
+        activated: true,
+        active_match: true,
+        ..CountingExecutor::default()
+    };
+    let mut lifecycle = ScriptedLifecycle::new(vec![
+        RunnerEvent::Callback {
+            hotkey: signal_auras_core::HotkeyId::parse("Ctrl+s").unwrap(),
+            received_at: Instant::now(),
+        },
+        RunnerEvent::Shutdown(ShutdownReason::CtrlC),
+    ]);
+    let required = CapabilitySet::new([
+        CapabilityKind::GlobalShortcut,
+        CapabilityKind::ActiveWindowMetadata,
+        CapabilityKind::WindowActivation,
+        CapabilityKind::SynthesizedInput,
+        CapabilityKind::Timer,
+    ]);
+
+    let stats = start_controller_runner_with_lifecycle(
+        &lua_file,
+        &mut registrar,
+        &active,
+        &mut executor,
+        &mut lifecycle,
+        available_capability_report(&required, "test"),
+    )
+    .unwrap();
+
+    assert_eq!(executor.actions, 3);
+    assert_eq!(
+        executor.emitted,
+        vec![
+            MacroAction::key("Enter").unwrap(),
+            MacroAction::text("/reloaditemfilter v0.5_IuseNixOSBtw").unwrap(),
+            MacroAction::key("Enter").unwrap(),
+        ]
+    );
+    assert_eq!(stats.synthesized_input_emitted_count, 3);
+}
+
+#[test]
 fn controller_runner_fails_before_registration_when_output_capability_denied() {
     let lua_file = write_lua(
         r#"
@@ -696,6 +792,11 @@ impl ActiveProcessProvider for StaticActive {
 #[derive(Default)]
 struct CountingExecutor {
     actions: usize,
+    emitted: Vec<MacroAction>,
+    active_title: Option<String>,
+    found_window: Option<String>,
+    activated: bool,
+    active_match: bool,
 }
 
 struct ScriptedLifecycle {
@@ -738,9 +839,41 @@ impl HotkeyRegistrar for FailingRegistrar {
 }
 
 impl MacroExecutor for CountingExecutor {
-    fn execute_action(&mut self, _action: &MacroAction) -> Result<(), DiagnosableError> {
+    fn execute_action(&mut self, action: &MacroAction) -> Result<(), DiagnosableError> {
         self.actions += 1;
+        self.emitted.push(action.clone());
         Ok(())
+    }
+}
+
+impl ControllerHost for CountingExecutor {
+    fn sleep(&mut self, _duration: Duration) -> Result<(), DiagnosableError> {
+        Ok(())
+    }
+
+    fn active_window(
+        &mut self,
+        include_title: bool,
+    ) -> Result<ActiveWindowMetadata, DiagnosableError> {
+        Ok(ActiveWindowMetadata {
+            title: include_title.then(|| self.active_title.clone()).flatten(),
+        })
+    }
+
+    fn find_window(&mut self, _processes: &[String]) -> Result<Option<String>, DiagnosableError> {
+        Ok(self.found_window.clone())
+    }
+
+    fn activate_window(&mut self, _handle: &str) -> Result<bool, DiagnosableError> {
+        Ok(self.activated)
+    }
+
+    fn wait_active_window(
+        &mut self,
+        _handle: &str,
+        _timeout: Duration,
+    ) -> Result<bool, DiagnosableError> {
+        Ok(self.active_match)
     }
 }
 

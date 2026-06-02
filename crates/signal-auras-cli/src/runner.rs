@@ -11,7 +11,10 @@ use signal_auras_core::{
     MotionToken, MotionTrigger, RegistrationState, RuntimeMotion, RuntimePress, RuntimeStats,
     RustOperationBatch, ScopeSelection, ShutdownReason, SynthesizedInputRequest,
 };
-use signal_auras_lua::{load_lua_controller_program_file, load_lua_file};
+use signal_auras_lua::{
+    load_lua_controller_program_file, load_lua_file, ActiveWindowMetadata, ImperativeLuaController,
+    LuaCallbackStep, LuaHostRequest, LuaHostResponse, LuaLogLevel,
+};
 use signal_auras_wayland::{
     evdev::{EvdevInputWaitOutcome, EvdevObservationProvider, KernelEventTimestamp},
     event_loop::{RuntimeSignalFd, RuntimeTimerFd},
@@ -30,6 +33,61 @@ use std::{
 
 const MOTION_FOCUS_STALE_THRESHOLD: Duration = Duration::from_secs(30);
 
+pub trait ControllerHost: MacroExecutor {
+    fn sleep(&mut self, duration: Duration) -> Result<(), DiagnosableError> {
+        thread::sleep(duration);
+        Ok(())
+    }
+
+    fn active_window(
+        &mut self,
+        _include_title: bool,
+    ) -> Result<ActiveWindowMetadata, DiagnosableError> {
+        Err(DiagnosableError::new(
+            ErrorPhase::MacroExecution,
+            "active window metadata provider is unsupported",
+        )
+        .with_capability(signal_auras_core::Capability::ActiveWindowMetadata))
+    }
+
+    fn find_window(&mut self, _processes: &[String]) -> Result<Option<String>, DiagnosableError> {
+        Err(DiagnosableError::new(
+            ErrorPhase::MacroExecution,
+            "window lookup provider is unsupported",
+        )
+        .with_capability(signal_auras_core::Capability::WindowActivation))
+    }
+
+    fn activate_window(&mut self, _handle: &str) -> Result<bool, DiagnosableError> {
+        Err(DiagnosableError::new(
+            ErrorPhase::MacroExecution,
+            "window activation provider is unsupported",
+        )
+        .with_capability(signal_auras_core::Capability::WindowActivation))
+    }
+
+    fn wait_active_window(
+        &mut self,
+        handle: &str,
+        timeout: Duration,
+    ) -> Result<bool, DiagnosableError> {
+        let started = Instant::now();
+        loop {
+            if self
+                .active_window(false)
+                .map(|metadata| metadata.title.as_deref() == Some(handle))
+                .unwrap_or(false)
+            {
+                return Ok(true);
+            }
+            if started.elapsed() >= timeout {
+                return Ok(false);
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+}
+
 pub struct StdioPrompt;
 
 impl ScopePrompt for StdioPrompt {
@@ -40,6 +98,46 @@ impl ScopePrompt for StdioPrompt {
         let stdout = io::stdout();
         let mut prompt = TerminalPrompt::new(stdin.lock(), stdout.lock(), stdin_is_interactive());
         prompt.resolve_missing_scope()
+    }
+}
+
+impl ControllerHost for RealWaylandAdapter {
+    fn active_window(
+        &mut self,
+        include_title: bool,
+    ) -> Result<ActiveWindowMetadata, DiagnosableError> {
+        Ok(ActiveWindowMetadata {
+            title: if include_title {
+                self.active_window_title()?
+            } else {
+                None
+            },
+        })
+    }
+
+    fn find_window(&mut self, processes: &[String]) -> Result<Option<String>, DiagnosableError> {
+        self.find_window_by_processes(processes)
+    }
+
+    fn activate_window(&mut self, handle: &str) -> Result<bool, DiagnosableError> {
+        RealWaylandAdapter::activate_window(self, handle)
+    }
+
+    fn wait_active_window(
+        &mut self,
+        handle: &str,
+        timeout: Duration,
+    ) -> Result<bool, DiagnosableError> {
+        let started = Instant::now();
+        loop {
+            if self.active_window_matches(handle)? {
+                return Ok(true);
+            }
+            if started.elapsed() >= timeout {
+                return Ok(false);
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
     }
 }
 
@@ -815,11 +913,12 @@ pub fn start_controller_runner_with_lifecycle<R, P, E, L>(
 where
     R: HotkeyRegistrar,
     P: ActiveProcessProvider,
-    E: MacroExecutor,
+    E: ControllerHost,
     L: RunnerLifecycle,
 {
     println!("startup controller_script_path={}", lua_file.display());
     let program = load_lua_controller_program_file(lua_file)?;
+    let runtime = load_imperative_controller_runtime(lua_file)?;
     println!(
         "controller_registration result=ok registrations={} callbacks={}",
         program.registrations().registrations().len(),
@@ -852,6 +951,7 @@ where
 
     let shutdown_reason = match run_controller_lifecycle(
         &program,
+        runtime.as_ref(),
         active_process_provider,
         executor,
         lifecycle,
@@ -967,6 +1067,7 @@ where
 {
     println!("startup controller_script_path={}", lua_file.display());
     let program = load_lua_controller_program_file(lua_file)?;
+    let runtime = load_imperative_controller_runtime(lua_file)?;
     println!(
         "controller_registration result=ok registrations={} callbacks={}",
         program.registrations().registrations().len(),
@@ -1014,6 +1115,7 @@ where
     let active_adapter = RealWaylandAdapter::new();
     let shutdown_reason = match run_controller_lifecycle(
         &program,
+        runtime.as_ref(),
         &active_adapter,
         adapter,
         lifecycle,
@@ -1051,6 +1153,7 @@ pub fn start_live_real_controller_runner_with_options(
     init_runtime_logging(log);
     println!("startup controller_script_path={}", lua_file.display());
     let program = load_lua_controller_program_file(lua_file)?;
+    let runtime = load_imperative_controller_runtime(lua_file)?;
     println!(
         "controller_registration result=ok registrations={} callbacks={}",
         program.registrations().registrations().len(),
@@ -1112,7 +1215,13 @@ pub fn start_live_real_controller_runner_with_options(
     }
 
     let shutdown_reason = match run_live_real_controller_lifecycle(
-        &program, adapter, &report, &mut stats, log, signal_fd,
+        &program,
+        runtime.as_ref(),
+        adapter,
+        &report,
+        &mut stats,
+        log,
+        signal_fd,
     ) {
         Ok(reason) => reason,
         Err(error) => {
@@ -1549,6 +1658,7 @@ fn controller_hotkey_binding(
 
 fn run_controller_lifecycle<P, E, L>(
     program: &ControllerProgram,
+    runtime: Option<&ImperativeLuaController>,
     active_process_provider: &P,
     executor: &mut E,
     lifecycle: &mut L,
@@ -1557,7 +1667,7 @@ fn run_controller_lifecycle<P, E, L>(
 ) -> Result<ShutdownReason, DiagnosableError>
 where
     P: ActiveProcessProvider,
-    E: MacroExecutor,
+    E: ControllerHost,
     L: RunnerLifecycle,
 {
     let mut scheduler = LuaCallbackScheduler::new(64, Duration::from_millis(50))?;
@@ -1621,7 +1731,14 @@ where
             | RunnerEvent::ObservedMotionInput { .. }
             | RunnerEvent::MotionRepeatTick(_) => {}
         }
-        drain_controller_callbacks(program, &mut scheduler, capabilities, executor, stats)?;
+        drain_controller_callbacks(
+            program,
+            runtime,
+            &mut scheduler,
+            capabilities,
+            executor,
+            stats,
+        )?;
     }
 }
 
@@ -1635,7 +1752,7 @@ fn controller_registration_for_hotkey<'a>(
         .iter()
         .find(|registration| {
             registration.kind == ControllerRegistrationKind::Hotkey
-                && registration.trigger == hotkey.as_str()
+                && HotkeyId::parse(&registration.trigger).is_ok_and(|trigger| trigger == *hotkey)
         })
 }
 
@@ -1726,17 +1843,19 @@ where
 
 fn drain_controller_callbacks<E>(
     program: &ControllerProgram,
+    runtime: Option<&ImperativeLuaController>,
     scheduler: &mut LuaCallbackScheduler,
     capabilities: &CapabilityReport,
     executor: &mut E,
     stats: &mut RuntimeStats,
 ) -> Result<(), DiagnosableError>
 where
-    E: MacroExecutor,
+    E: ControllerHost,
 {
     while let Some(task) = scheduler.pop_next() {
         let started_at = Instant::now();
-        let result = execute_controller_task(program, &task, capabilities, executor, stats);
+        let result =
+            execute_controller_task(program, runtime, &task, capabilities, executor, stats);
         let disposition = scheduler.finish(task, started_at.elapsed());
         if disposition == CallbackDisposition::Slow {
             println!("controller_callback_slow disposition=slow");
@@ -1748,13 +1867,14 @@ where
 
 fn execute_controller_task<E>(
     program: &ControllerProgram,
+    runtime: Option<&ImperativeLuaController>,
     task: &signal_auras_core::LuaCallbackTask,
     capabilities: &CapabilityReport,
     executor: &mut E,
     stats: &mut RuntimeStats,
 ) -> Result<(), DiagnosableError>
 where
-    E: MacroExecutor,
+    E: ControllerHost,
 {
     let callback = program.callback(&task.callback).ok_or_else(|| {
         DiagnosableError::new(
@@ -1762,6 +1882,17 @@ where
             format!("controller callback '{}' is unavailable", task.callback),
         )
     })?;
+    if callback.actions.is_empty() {
+        if let Some(runtime) = runtime {
+            return execute_imperative_controller_task(
+                runtime,
+                &task.callback,
+                capabilities,
+                executor,
+                stats,
+            );
+        }
+    }
     let mut batch = RustOperationBatch::new(256)?;
     queue_controller_callback_outputs(callback, capabilities, &mut batch)?;
     stats.record_output_queue_depth(batch.len() as u64);
@@ -1791,6 +1922,118 @@ where
     }
     stats.macro_success_count += 1;
     Ok(())
+}
+
+fn execute_imperative_controller_task<E>(
+    runtime: &ImperativeLuaController,
+    callback_name: &str,
+    capabilities: &CapabilityReport,
+    executor: &mut E,
+    stats: &mut RuntimeStats,
+) -> Result<(), DiagnosableError>
+where
+    E: ControllerHost,
+{
+    let coroutine = runtime.start_callback(callback_name)?;
+    let declared = runtime.registrations().required_capabilities();
+    let mut response = LuaHostResponse::Unit;
+    loop {
+        match runtime.resume_callback(&coroutine, response, declared)? {
+            LuaCallbackStep::Complete => {
+                stats.macro_success_count += 1;
+                return Ok(());
+            }
+            LuaCallbackStep::Yielded(request) => {
+                if let Some(required) = request.required_capability() {
+                    let required = CapabilitySet::new([required]);
+                    if let Some(error) = capabilities.first_blocking_error(&required) {
+                        stats.record_permission_failure();
+                        stats.denied_action_count += 1;
+                        return Err(error);
+                    }
+                }
+                response = execute_lua_host_request(request, executor, stats)?;
+            }
+        }
+    }
+}
+
+fn execute_lua_host_request<E>(
+    request: LuaHostRequest,
+    executor: &mut E,
+    stats: &mut RuntimeStats,
+) -> Result<LuaHostResponse, DiagnosableError>
+where
+    E: ControllerHost,
+{
+    match request {
+        LuaHostRequest::Sleep { duration_ms } => {
+            executor.sleep(Duration::from_millis(duration_ms))?;
+            Ok(LuaHostResponse::Unit)
+        }
+        LuaHostRequest::Log { level, message } => {
+            match level {
+                LuaLogLevel::Debug => tracing::debug!(event = "lua_log", message = %message),
+                LuaLogLevel::Info => tracing::info!(event = "lua_log", message = %message),
+                LuaLogLevel::Warn => tracing::warn!(event = "lua_log", message = %message),
+            }
+            Ok(LuaHostResponse::Unit)
+        }
+        LuaHostRequest::ActiveWindow { include_title } => executor
+            .active_window(include_title)
+            .map(LuaHostResponse::ActiveWindow),
+        LuaHostRequest::FindWindow { processes } => executor
+            .find_window(&processes)
+            .map(LuaHostResponse::WindowHandle),
+        LuaHostRequest::ActivateWindow { handle } => {
+            executor.activate_window(&handle).map(LuaHostResponse::Bool)
+        }
+        LuaHostRequest::WaitActive { handle, timeout_ms } => executor
+            .wait_active_window(&handle, Duration::from_millis(timeout_ms))
+            .map(LuaHostResponse::Bool),
+        LuaHostRequest::Input { action } => {
+            let request = SynthesizedInputRequest::new(action, 0);
+            match executor.execute_input_request(request)? {
+                signal_auras_core::InputEmission::Emitted => {
+                    stats.record_synthesized_input_emitted();
+                    Ok(LuaHostResponse::Unit)
+                }
+                signal_auras_core::InputEmission::Denied => {
+                    stats.record_synthesized_input_denied();
+                    Err(DiagnosableError::new(
+                        ErrorPhase::MacroExecution,
+                        "controller synthesized input was denied",
+                    ))
+                }
+                signal_auras_core::InputEmission::Failed => Err(DiagnosableError::new(
+                    ErrorPhase::MacroExecution,
+                    "controller synthesized input failed",
+                )),
+                signal_auras_core::InputEmission::Cancelled => Err(DiagnosableError::new(
+                    ErrorPhase::Shutdown,
+                    "controller synthesized input was cancelled",
+                )),
+            }
+        }
+    }
+}
+
+fn load_imperative_controller_runtime(
+    lua_file: &Path,
+) -> Result<Option<ImperativeLuaController>, DiagnosableError> {
+    let source = fs::read_to_string(lua_file).map_err(|error| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptLoad,
+            format!(
+                "cannot read Lua controller file '{}': {error}",
+                lua_file.display()
+            ),
+        )
+    })?;
+    if !(source.contains("sa.sleep") || source.contains("sa.window.")) {
+        return Ok(None);
+    }
+    ImperativeLuaController::load_source(&source).map(Some)
 }
 
 fn run_live_real_lifecycle(
@@ -1973,6 +2216,7 @@ fn run_live_real_lifecycle(
 
 fn run_live_real_controller_lifecycle(
     program: &ControllerProgram,
+    runtime: Option<&ImperativeLuaController>,
     adapter: &mut RealWaylandAdapter,
     capabilities: &CapabilityReport,
     stats: &mut RuntimeStats,
@@ -1995,7 +2239,14 @@ fn run_live_real_controller_lifecycle(
             stats,
             log,
         )?;
-        drain_controller_callbacks(program, &mut scheduler, capabilities, adapter, stats)?;
+        drain_controller_callbacks(
+            program,
+            runtime,
+            &mut scheduler,
+            capabilities,
+            adapter,
+            stats,
+        )?;
         let wait_timeout =
             next_live_wait_timeout(&repeat_ticks, &last_repeat_ticks, &motion_runtime);
         timer_fd.arm_after(wait_timeout)?;
@@ -2062,7 +2313,14 @@ fn run_live_real_controller_lifecycle(
             };
             handle_live_controller_observed_input(event, &mut context)?;
         }
-        drain_controller_callbacks(program, &mut scheduler, capabilities, adapter, stats)?;
+        drain_controller_callbacks(
+            program,
+            runtime,
+            &mut scheduler,
+            capabilities,
+            adapter,
+            stats,
+        )?;
         let now = Instant::now();
         for (trigger, interval_ms) in &mut repeat_ticks {
             if !motion_runtime.loop_is_active(trigger) {
@@ -2092,7 +2350,14 @@ fn run_live_real_controller_lifecycle(
                 last_repeat_ticks.insert(trigger.clone(), now);
             }
         }
-        drain_controller_callbacks(program, &mut scheduler, capabilities, adapter, stats)?;
+        drain_controller_callbacks(
+            program,
+            runtime,
+            &mut scheduler,
+            capabilities,
+            adapter,
+            stats,
+        )?;
     }
 }
 

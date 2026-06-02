@@ -5,6 +5,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+mlua = { version = "0.10.5", features = ["lua54", "vendored"] }
 signal-auras-core = { path = "../signal-auras-core" }
 
 [lib]

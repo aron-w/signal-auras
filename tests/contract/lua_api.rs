@@ -1,5 +1,9 @@
-use signal_auras_lua::{load_lua_controller_program_file, load_lua_file, load_lua_source};
-use std::path::Path;
+use signal_auras_core::{CapabilityKind, CapabilitySet, MacroAction};
+use signal_auras_lua::{
+    load_lua_controller_program_file, load_lua_file, load_lua_source, ActiveWindowMetadata,
+    ImperativeLuaController, LuaCallbackStep, LuaHostRequest, LuaHostResponse, LuaLogLevel,
+};
+use std::{fs, path::Path};
 
 #[test]
 fn lua_api_accepts_v1_sample() {
@@ -34,7 +38,7 @@ fn lua_api_accepts_poe2_legacy_example() {
 fn lua_api_accepts_poe2_controller_example() {
     let program = load_lua_controller_program_file(Path::new("examples/poe2.lua")).unwrap();
 
-    assert_eq!(program.registrations().registrations().len(), 6);
+    assert_eq!(program.registrations().registrations().len(), 7);
     assert!(program.input_provider.is_some());
     assert!(program.leader.is_some());
     assert!(!program
@@ -43,7 +47,19 @@ fn lua_api_accepts_poe2_controller_example() {
     assert!(program
         .required_capabilities()
         .contains(signal_auras_core::CapabilityKind::CompositePointerObservation));
+    assert!(program
+        .required_capabilities()
+        .contains(signal_auras_core::CapabilityKind::ActiveWindowMetadata));
+    assert!(program
+        .required_capabilities()
+        .contains(signal_auras_core::CapabilityKind::WindowActivation));
+    assert!(program
+        .required_capabilities()
+        .contains(signal_auras_core::CapabilityKind::Timer));
     assert!(program.callback("go_home").is_some());
+    assert!(program
+        .callback("reload_filterblade")
+        .is_some_and(|callback| callback.actions.is_empty()));
     let loop_motion = program
         .registrations()
         .registrations()
@@ -54,6 +70,18 @@ fn lua_api_accepts_poe2_controller_example() {
     assert_eq!(loop_motion.repeat_every_ms, 65);
     assert_eq!(loop_motion.repeat_callback, "click_left");
     assert!(program.callback("ctrl_click").is_some());
+}
+
+#[test]
+fn imperative_lua_accepts_poe2_controller_example_keyword_fields() {
+    let source = fs::read_to_string("examples/poe2.lua").unwrap();
+    let runtime = ImperativeLuaController::load_source(&source).unwrap();
+
+    assert!(runtime
+        .registrations()
+        .required_capabilities()
+        .contains(CapabilityKind::WindowActivation));
+    assert!(runtime.start_callback("reload_filterblade").is_ok());
 }
 
 #[test]
@@ -297,4 +325,305 @@ fn lua_api_rejects_alias_equivalent_duplicate_keys() {
     .unwrap_err();
 
     assert!(error.message.contains("duplicate binding trigger"));
+}
+
+#[test]
+fn imperative_lua_filterblade_relay_yields_ordered_host_requests() {
+    let runtime = ImperativeLuaController::load_source(
+        r#"
+        sa.press({
+          requires_held = { "Ctrl" },
+          trigger = "S",
+          mode = "passthrough",
+          capabilities = {
+            "active_window_metadata",
+            "window_activation",
+            "synthesized_input",
+            "timer",
+          },
+          callback = "reload_filterblade",
+        })
+
+        sa.callback("reload_filterblade", function()
+          sa.sleep(100)
+
+          local active = sa.window.active({ title = true })
+          local filter = active.title and active.title:match("^FilterBlade%s+%-%s+(.-)%s+%-%s+FilterBlade")
+          if filter == nil then
+            filter = active.title and active.title:match("^(.-)%s+%-%s+FilterBlade")
+          end
+          if filter == nil or filter == "" then
+            return
+          end
+
+          local poe = sa.window.find({
+            processes = { "steam_app_2694490", "PathOfExileSteam.exe" },
+          })
+          if poe == nil then
+            return
+          end
+
+          if not sa.window.activate(poe) then
+            return
+          end
+          if not sa.window.wait_active(poe, 500) then
+            return
+          end
+
+          sa.input.key("Enter")
+          sa.input.text("/reloaditemfilter " .. filter)
+          sa.input.key("Enter")
+        end)
+        "#,
+    )
+    .unwrap();
+    let capabilities = CapabilitySet::new([
+        CapabilityKind::ActiveWindowMetadata,
+        CapabilityKind::WindowActivation,
+        CapabilityKind::SynthesizedInput,
+        CapabilityKind::Timer,
+    ]);
+    let run = runtime.start_callback("reload_filterblade").unwrap();
+
+    assert_eq!(
+        runtime
+            .resume_callback(&run, LuaHostResponse::Unit, &capabilities)
+            .unwrap(),
+        LuaCallbackStep::Yielded(LuaHostRequest::Sleep { duration_ms: 100 })
+    );
+    assert_eq!(
+        runtime
+            .resume_callback(&run, LuaHostResponse::Unit, &capabilities)
+            .unwrap(),
+        LuaCallbackStep::Yielded(LuaHostRequest::ActiveWindow {
+            include_title: true
+        })
+    );
+    assert_eq!(
+        runtime
+            .resume_callback(
+                &run,
+                LuaHostResponse::ActiveWindow(ActiveWindowMetadata {
+                    title: Some(
+                        "FilterBlade - v0.5_IuseNixOSBtw - FilterBlade - PoE1&2 Filter Customizer"
+                            .to_string()
+                    )
+                }),
+                &capabilities
+            )
+            .unwrap(),
+        LuaCallbackStep::Yielded(LuaHostRequest::FindWindow {
+            processes: vec![
+                "steam_app_2694490".to_string(),
+                "PathOfExileSteam.exe".to_string()
+            ]
+        })
+    );
+    assert_eq!(
+        runtime
+            .resume_callback(
+                &run,
+                LuaHostResponse::WindowHandle(Some("poe-window-1".to_string())),
+                &capabilities
+            )
+            .unwrap(),
+        LuaCallbackStep::Yielded(LuaHostRequest::ActivateWindow {
+            handle: "poe-window-1".to_string()
+        })
+    );
+    assert_eq!(
+        runtime
+            .resume_callback(&run, LuaHostResponse::Bool(true), &capabilities)
+            .unwrap(),
+        LuaCallbackStep::Yielded(LuaHostRequest::WaitActive {
+            handle: "poe-window-1".to_string(),
+            timeout_ms: 500
+        })
+    );
+    assert_eq!(
+        runtime
+            .resume_callback(&run, LuaHostResponse::Bool(true), &capabilities)
+            .unwrap(),
+        LuaCallbackStep::Yielded(LuaHostRequest::Input {
+            action: MacroAction::key("Enter").unwrap()
+        })
+    );
+    assert_eq!(
+        runtime
+            .resume_callback(&run, LuaHostResponse::Unit, &capabilities)
+            .unwrap(),
+        LuaCallbackStep::Yielded(LuaHostRequest::Input {
+            action: MacroAction::text("/reloaditemfilter v0.5_IuseNixOSBtw").unwrap()
+        })
+    );
+    assert_eq!(
+        runtime
+            .resume_callback(&run, LuaHostResponse::Unit, &capabilities)
+            .unwrap(),
+        LuaCallbackStep::Yielded(LuaHostRequest::Input {
+            action: MacroAction::key("Enter").unwrap()
+        })
+    );
+    assert_eq!(
+        runtime
+            .resume_callback(&run, LuaHostResponse::Unit, &capabilities)
+            .unwrap(),
+        LuaCallbackStep::Complete
+    );
+}
+
+#[test]
+fn imperative_lua_filterblade_relay_emits_nothing_without_matching_title() {
+    let runtime = ImperativeLuaController::load_source(
+        r#"
+        sa.press({
+          trigger = "S",
+          mode = "passthrough",
+          capabilities = { "active_window_metadata", "timer" },
+          callback = "reload_filterblade",
+        })
+
+        sa.callback("reload_filterblade", function()
+          sa.sleep(100)
+          local active = sa.window.active({ title = true })
+          local filter = active.title and active.title:match("^(.-)%s+%- FilterBlade")
+          if filter == nil or filter == "" then
+            return
+          end
+          sa.input.text(filter)
+        end)
+        "#,
+    )
+    .unwrap();
+    let capabilities =
+        CapabilitySet::new([CapabilityKind::ActiveWindowMetadata, CapabilityKind::Timer]);
+    let run = runtime.start_callback("reload_filterblade").unwrap();
+
+    assert!(matches!(
+        runtime
+            .resume_callback(&run, LuaHostResponse::Unit, &capabilities)
+            .unwrap(),
+        LuaCallbackStep::Yielded(LuaHostRequest::Sleep { .. })
+    ));
+    assert!(matches!(
+        runtime
+            .resume_callback(&run, LuaHostResponse::Unit, &capabilities)
+            .unwrap(),
+        LuaCallbackStep::Yielded(LuaHostRequest::ActiveWindow { .. })
+    ));
+    assert_eq!(
+        runtime
+            .resume_callback(
+                &run,
+                LuaHostResponse::ActiveWindow(ActiveWindowMetadata {
+                    title: Some("Downloads".to_string())
+                }),
+                &capabilities
+            )
+            .unwrap(),
+        LuaCallbackStep::Complete
+    );
+}
+
+#[test]
+fn imperative_lua_logs_without_sensitive_capability() {
+    let runtime = ImperativeLuaController::load_source(
+        r#"
+        sa.press({
+          trigger = "S",
+          mode = "passthrough",
+          capabilities = {},
+          callback = "probe",
+        })
+
+        sa.callback("probe", function()
+          sa.log("checking filterblade")
+        end)
+        "#,
+    )
+    .unwrap();
+    let capabilities = CapabilitySet::new([]);
+    let run = runtime.start_callback("probe").unwrap();
+
+    assert_eq!(
+        runtime
+            .resume_callback(&run, LuaHostResponse::Unit, &capabilities)
+            .unwrap(),
+        LuaCallbackStep::Yielded(LuaHostRequest::Log {
+            level: LuaLogLevel::Info,
+            message: "checking filterblade".to_string()
+        })
+    );
+    assert_eq!(
+        runtime
+            .resume_callback(&run, LuaHostResponse::Unit, &capabilities)
+            .unwrap(),
+        LuaCallbackStep::Complete
+    );
+}
+
+#[test]
+fn imperative_lua_denies_host_request_without_declared_capability() {
+    let runtime = ImperativeLuaController::load_source(
+        r#"
+        sa.press({
+          trigger = "S",
+          capabilities = { "timer" },
+          callback = "probe",
+        })
+
+        sa.callback("probe", function()
+          sa.window.active({ title = true })
+        end)
+        "#,
+    )
+    .unwrap();
+    let run = runtime.start_callback("probe").unwrap();
+    let error = runtime
+        .resume_callback(
+            &run,
+            LuaHostResponse::Unit,
+            &CapabilitySet::new([CapabilityKind::Timer]),
+        )
+        .unwrap_err();
+
+    assert_eq!(
+        error.capability,
+        Some(signal_auras_core::Capability::ActiveWindowMetadata)
+    );
+    assert!(error.message.contains("active_window_metadata"));
+}
+
+#[test]
+fn imperative_lua_denies_ambient_runtime_apis() {
+    for source in [
+        r#"os.getenv("HOME")"#,
+        r#"io.open("/etc/passwd")"#,
+        r#"require("socket")"#,
+        r#"load("return 1")"#,
+        r#"debug.traceback()"#,
+    ] {
+        assert!(
+            ImperativeLuaController::load_source(source).is_err(),
+            "source should be denied: {source}"
+        );
+    }
+}
+
+#[test]
+fn imperative_lua_requires_registered_callbacks_to_be_defined() {
+    let error = match ImperativeLuaController::load_source(
+        r#"
+        sa.press({
+          trigger = "S",
+          capabilities = { "timer" },
+          callback = "missing",
+        })
+        "#,
+    ) {
+        Ok(_) => panic!("missing callback should fail validation"),
+        Err(error) => error,
+    };
+
+    assert!(error.message.contains("registered but not defined"));
 }

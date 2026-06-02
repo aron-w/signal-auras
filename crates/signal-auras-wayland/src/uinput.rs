@@ -24,6 +24,7 @@ const REL_HWHEEL: u16 = 0x06;
 const REL_WHEEL: u16 = 0x08;
 const KEY_1: u16 = 2;
 const KEY_0: u16 = 11;
+const KEY_MINUS: u16 = 12;
 const KEY_Q: u16 = 16;
 #[cfg(test)]
 const KEY_ENTER: u16 = 28;
@@ -32,6 +33,7 @@ const KEY_A: u16 = 30;
 const KEY_LEFTSHIFT: u16 = 42;
 const KEY_Z: u16 = 44;
 const KEY_LEFTALT: u16 = 56;
+const KEY_DOT: u16 = 52;
 const KEY_SLASH: u16 = 53;
 const KEY_SPACE: u16 = 57;
 const KEY_LEFTMETA: u16 = 125;
@@ -256,16 +258,17 @@ struct KeyStroke {
 }
 
 fn character_to_key(character: char) -> Option<KeyStroke> {
-    let lower = character.to_ascii_lowercase();
-    let shift = character.is_ascii_uppercase();
-    let code = match lower {
-        'a'..='z' => letter_key_code(lower)?,
+    let code = match character.to_ascii_lowercase() {
+        'a'..='z' => letter_key_code(character.to_ascii_lowercase())?,
         '0' => KEY_0,
-        '1'..='9' => KEY_1 + (lower as u16 - '1' as u16),
+        '1'..='9' => KEY_1 + (character as u16 - '1' as u16),
         ' ' => KEY_SPACE,
+        '-' | '_' => KEY_MINUS,
+        '.' => KEY_DOT,
         '/' => KEY_SLASH,
         _ => return None,
     };
+    let shift = character.is_ascii_uppercase() || character == '_';
     Some(KeyStroke { code, shift })
 }
 
@@ -480,6 +483,37 @@ mod tests {
             Some(KeyStroke {
                 code: KEY_A,
                 shift: true
+            })
+        );
+    }
+
+    #[test]
+    fn maps_text_needed_by_filterblade_reload() {
+        for character in "/reloaditemfilter v0.5_IuseNixOSBtw".chars() {
+            assert!(
+                character_to_key(character).is_some(),
+                "missing uinput mapping for {character:?}"
+            );
+        }
+        assert_eq!(
+            character_to_key('.'),
+            Some(KeyStroke {
+                code: KEY_DOT,
+                shift: false
+            })
+        );
+        assert_eq!(
+            character_to_key('_'),
+            Some(KeyStroke {
+                code: KEY_MINUS,
+                shift: true
+            })
+        );
+        assert_eq!(
+            character_to_key('-'),
+            Some(KeyStroke {
+                code: KEY_MINUS,
+                shift: false
             })
         );
     }

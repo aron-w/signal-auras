@@ -4,7 +4,7 @@
 
 **Created**: 2026-06-02
 
-**Status**: Draft
+**Status**: Implemented
 
 **Input**: User description: "Lua as controller, Rust as library+, with focus on non-blocking efficient input / output mechanisms"
 
