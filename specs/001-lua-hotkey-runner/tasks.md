@@ -161,7 +161,7 @@
 **Purpose**: Validate reproducibility, formatting, security documentation, and manual Wayland gaps.
 
 - [X] T053 [P] Update `README.md` with v1 CLI usage, consent model, Lua sample, and unsupported Wayland behavior
-- [X] T054 [P] Add example scripts in `examples/poe2-hideout.lua` and `examples/prompt-scope.lua`
+- [X] T054 [P] Add example scripts in `examples/poe2-legacy.lua` and `examples/prompt-scope.lua`
 - [X] T055 [P] Review Lua sandbox hardening and add missing denied-capability regression tests in `tests/contract/lua_api.rs`
 - [X] T056 [P] Update `tests/compositor/manual-wayland-verification.md` with actual compositor/protocol support selected during implementation
 - [X] T057 Run `nix develop -c cargo fmt --check` against workspace `Cargo.toml` and `crates/*/src/`

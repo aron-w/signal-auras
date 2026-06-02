@@ -39,7 +39,7 @@ return {
 Run:
 
 ```bash
-nix develop -c cargo run -p signal-auras-cli -- run ./examples/poe2-hideout.lua
+nix develop -c cargo run -p signal-auras-cli -- run ./examples/poe2-legacy.lua
 ```
 
 Expected startup behavior:

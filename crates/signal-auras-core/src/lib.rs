@@ -1,5 +1,6 @@
 mod config;
 mod consent;
+mod controller;
 mod error;
 mod hotkey;
 mod key;
@@ -14,6 +15,12 @@ pub use config::{
     RuntimeMotion, RuntimePress,
 };
 pub use consent::ConsentDecision;
+pub use controller::{
+    available_capability_report, denied_capability_report, queue_controller_callback_outputs,
+    CallbackDisposition, CallbackOverloadPolicy, CallbackScheduleResult, ControllerCallback,
+    ControllerLoopPolicy, ControllerProgram, ControllerRegistration, ControllerRegistrationKind,
+    ControllerRegistrationSet, LuaCallbackScheduler, LuaCallbackTask, RustOperationBatch,
+};
 pub use error::{
     AdapterDiagnostic, Capability, CapabilityAvailability, CapabilityKind, CapabilityReport,
     CapabilitySet, CapabilityStatus, DiagnosableError, ErrorPhase,

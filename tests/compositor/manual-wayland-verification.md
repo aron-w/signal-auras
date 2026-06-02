@@ -32,7 +32,7 @@ Record before the run:
 
 1. Enter the development shell with `nix develop`.
 2. Start a KDE Plasma Wayland session.
-3. Run `cargo run -p signal-auras-cli -- run ./examples/poe2-hideout.lua` or a dedicated KDE test script.
+3. Run `cargo run -p signal-auras-cli -- run ./examples/poe2.lua` or a dedicated KDE test script.
 4. Confirm startup output shows the Lua file, validation, effective scope, KDE provider selection, required capability probe, bridge setup if needed, and per-hotkey registration result.
 5. Focus an application matching the configured process name.
 6. Press the shortcut and confirm one shortcut event is reported.
@@ -107,12 +107,12 @@ Record before the run:
 - KDE Plasma version: `plasmashell 6.6.5`
 - KWin session type: `kwin 6.6.5` on Wayland
 - xdg-desktop-portal-kde status: `org.freedesktop.portal.Desktop` and `org.freedesktop.impl.portal.desktop.kde` present on the user D-Bus; `xdg-desktop-portal.service` active
-- Signal Auras command: `timeout -s INT 5 cargo run -p signal-auras-cli -- run ./examples/poe2-hideout.lua`
+- Signal Auras command: `timeout -s INT 5 cargo run -p signal-auras-cli -- run ./examples/poe2.lua`
 
 Observed output:
 
 ```text
-startup script_path=./examples/poe2-hideout.lua
+startup script_path=./examples/poe2.lua
 script_validation result=ok
 effective_scope processes: poe2.exe
 provider selected=kde-plasma-wayland
@@ -135,14 +135,14 @@ final_summary reason=CtrlC elapsed_ms=4156 triggers=0 successes=0 failures=0 den
 
 ### Run 2026-05-26: current-run KWin shortcut bridge smoke test
 
-- Signal Auras command: `timeout -s INT 5 cargo run -p signal-auras-cli -- run ./examples/poe2-hideout.lua`
+- Signal Auras command: `timeout -s INT 5 cargo run -p signal-auras-cli -- run ./examples/poe2.lua`
 - Registered handle: `kde-kwin-script:signal-auras-3611656-1:F5`
 - KGlobalAccel cleanup check: `busctl --user call org.kde.kglobalaccel /component/kwin org.kde.kglobalaccel.Component allShortcutInfos | rg 'SignalAuras' || true`
 
 Observed output:
 
 ```text
-startup script_path=./examples/poe2-hideout.lua
+startup script_path=./examples/poe2.lua
 script_validation result=ok
 effective_scope processes: poe2.exe
 provider selected=kde-plasma-wayland
@@ -158,14 +158,14 @@ final_summary reason=CtrlC elapsed_ms=4038 triggers=0 successes=0 failures=0 den
 
 ### Run 2026-05-26: KWin callback event and active-process non-match
 
-- Signal Auras command: `cargo run -p signal-auras-cli -- run ./examples/poe2-hideout.lua`
+- Signal Auras command: `cargo run -p signal-auras-cli -- run ./examples/poe2.lua`
 - Trigger command: `busctl --user call org.kde.kglobalaccel /component/kwin org.kde.kglobalaccel.Component invokeShortcut s SignalAuras_4001005_1`
 - Cleanup check: `busctl --user call org.kde.kglobalaccel /component/kwin org.kde.kglobalaccel.Component allShortcutInfos | rg 'SignalAuras' || true`
 
 Observed output:
 
 ```text
-startup script_path=./examples/poe2-hideout.lua
+startup script_path=./examples/poe2.lua
 script_validation result=ok
 effective_scope processes: poe2.exe
 provider selected=kde-plasma-wayland

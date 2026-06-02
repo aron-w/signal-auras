@@ -1,12 +1,18 @@
 use signal_auras_core::{
-    AutomationDefaults, BindingDefinition, BindingMode, BindingTrigger, CompositeTrigger,
+    AutomationDefaults, BindingDefinition, BindingMode, BindingTrigger, CapabilityKind,
+    CapabilitySet, CompositeTrigger, ControllerCallback, ControllerLoopPolicy, ControllerProgram,
+    ControllerRegistration, ControllerRegistrationKind, ControllerRegistrationSet,
     DiagnosableError, ErrorPhase, HeldCondition, HotkeyId, InputProviderBackend,
     InputProviderConfig, InputProviderMode, InputProviderOutput, LoopBody, LoopDefinition,
     LoopInterval, LoopRepeat, LuaAutomationConfiguration, MacroAction, MacroDefinition,
     ModifierSet, MotionDefinition, MotionToken, MotionTrigger, MouseButton, MouseTrigger,
-    PressDefinition, ProcessName, ScriptScope, WheelDirection,
+    PressDefinition, ProcessName, ScopeSelection, ScriptScope, WheelDirection,
 };
-use std::{fs, path::Path};
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
 const DENIED_TOKENS: &[&str] = &[
     "io.", "os.", "require", "package", "debug", "dofile", "loadfile", "load(", "socket",
@@ -70,6 +76,440 @@ pub fn load_lua_source(source: &str) -> Result<LuaAutomationConfiguration, Diagn
         motions,
         presses,
     )
+}
+
+pub fn load_lua_controller_file(
+    path: &Path,
+) -> Result<ControllerRegistrationSet, DiagnosableError> {
+    let root = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut visited = BTreeSet::new();
+    let source = load_controller_source_tree(path, root, &mut visited)?;
+    load_lua_controller_source(&source)
+}
+
+pub fn load_lua_controller_program_file(
+    path: &Path,
+) -> Result<ControllerProgram, DiagnosableError> {
+    let root = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut visited = BTreeSet::new();
+    let source = load_controller_source_tree(path, root, &mut visited)?;
+    load_lua_controller_program_source(&source)
+}
+
+pub fn load_lua_controller_source(
+    source: &str,
+) -> Result<ControllerRegistrationSet, DiagnosableError> {
+    validate_controller_sandbox(source)?;
+    parse_controller_registration_set(source)
+}
+
+pub fn load_lua_controller_program_source(
+    source: &str,
+) -> Result<ControllerProgram, DiagnosableError> {
+    validate_controller_sandbox(source)?;
+    let registrations = parse_controller_registration_set(source)?;
+    Ok(
+        ControllerProgram::new(registrations, parse_controller_callbacks(source)?)?
+            .with_runtime_options(parse_input_provider(source)?, parse_leader(source)?),
+    )
+}
+
+fn validate_controller_sandbox(source: &str) -> Result<(), DiagnosableError> {
+    for token in DENIED_TOKENS {
+        if contains_denied_token(source, token) {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                format!("Lua controller sandbox denies ambient API token '{token}'"),
+            ));
+        }
+    }
+    if source.contains("require(") || source.contains("package.") {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "Lua controller imports must use sa.import rooted at the main script directory",
+        ));
+    }
+    Ok(())
+}
+
+fn parse_controller_registration_set(
+    source: &str,
+) -> Result<ControllerRegistrationSet, DiagnosableError> {
+    let mut registrations = Vec::new();
+    registrations.extend(parse_controller_entries(
+        source,
+        "sa.hotkey",
+        ControllerRegistrationKind::Hotkey,
+    )?);
+    registrations.extend(parse_controller_entries(
+        source,
+        "sa.motion",
+        ControllerRegistrationKind::Motion,
+    )?);
+    registrations.extend(parse_controller_entries(
+        source,
+        "sa.press",
+        ControllerRegistrationKind::Press,
+    )?);
+    registrations.extend(parse_controller_entries(
+        source,
+        "sa.timer",
+        ControllerRegistrationKind::Timer,
+    )?);
+    registrations.extend(parse_controller_entries(
+        source,
+        "sa.shutdown",
+        ControllerRegistrationKind::Shutdown,
+    )?);
+    ControllerRegistrationSet::new(registrations)
+}
+
+fn parse_controller_callbacks(source: &str) -> Result<Vec<ControllerCallback>, DiagnosableError> {
+    let mut callbacks = Vec::new();
+    let mut cursor = source;
+    while let Some(start) = cursor.find("sa.callback") {
+        cursor = &cursor[start + "sa.callback".len()..];
+        let Some(paren) = cursor.find('(') else {
+            break;
+        };
+        cursor = &cursor[paren + 1..];
+        let name = first_quoted(cursor).ok_or_else(|| {
+            DiagnosableError::new(ErrorPhase::ScriptValidation, "sa.callback requires a name")
+        })?;
+        let Some(function_start) = cursor.find("function") else {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                "sa.callback requires a function body",
+            ));
+        };
+        let after_function = &cursor[function_start + "function".len()..];
+        let Some(args_end) = after_function.find(')') else {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                "sa.callback function arguments are not closed",
+            ));
+        };
+        let body = &after_function[args_end + 1..];
+        let Some(body_end) = body.find("\nend").or_else(|| body.find(" end")) else {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                "sa.callback function body is not closed",
+            ));
+        };
+        callbacks.push(ControllerCallback::new(
+            name,
+            parse_controller_output_actions(&body[..body_end])?,
+        )?);
+        cursor = &body[body_end + "end".len()..];
+    }
+    Ok(callbacks)
+}
+
+fn parse_controller_output_actions(source: &str) -> Result<Vec<MacroAction>, DiagnosableError> {
+    let mut actions = Vec::new();
+    for line in source
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("--"))
+    {
+        if let Some(argument) = controller_call_argument(line, "sa.input.key") {
+            actions.push(MacroAction::key(argument)?);
+        } else if let Some(argument) = controller_call_argument(line, "sa.input.key_down") {
+            actions.push(MacroAction::key_down(argument)?);
+        } else if let Some(argument) = controller_call_argument(line, "sa.input.key_up") {
+            actions.push(MacroAction::key_up(argument)?);
+        } else if let Some(argument) = controller_call_argument(line, "sa.input.text") {
+            actions.push(MacroAction::text(argument)?);
+        } else if let Some(argument) = controller_call_argument(line, "sa.input.mouse_click") {
+            actions.push(MacroAction::mouse_click(MouseButton::parse(argument)?));
+        } else if line.starts_with("sa.") {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                format!("unsupported Lua controller callback API '{line}'"),
+            ));
+        }
+    }
+    Ok(actions)
+}
+
+fn controller_call_argument<'a>(line: &'a str, api_name: &str) -> Option<&'a str> {
+    line.strip_prefix(api_name)
+        .and_then(|rest| {
+            let rest = rest.trim_start();
+            rest.strip_prefix('(')
+                .unwrap_or(rest)
+                .trim_start()
+                .strip_prefix('"')
+        })
+        .and_then(|rest| rest.find('"').map(|end| &rest[..end]))
+}
+
+fn load_controller_source_tree(
+    path: &Path,
+    root: &Path,
+    visited: &mut BTreeSet<PathBuf>,
+) -> Result<String, DiagnosableError> {
+    let canonical_root = root.canonicalize().map_err(|error| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptLoad,
+            format!(
+                "cannot resolve Lua controller root '{}': {error}",
+                root.display()
+            ),
+        )
+    })?;
+    let canonical_path = path.canonicalize().map_err(|error| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptLoad,
+            format!(
+                "cannot resolve Lua controller file '{}': {error}",
+                path.display()
+            ),
+        )
+    })?;
+    if !canonical_path.starts_with(&canonical_root) {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!(
+                "Lua controller import '{}' is outside script root '{}'",
+                canonical_path.display(),
+                canonical_root.display()
+            ),
+        ));
+    }
+    if !visited.insert(canonical_path.clone()) {
+        return Ok(String::new());
+    }
+    let source = fs::read_to_string(&canonical_path).map_err(|error| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptLoad,
+            format!(
+                "cannot read Lua controller file '{}': {error}",
+                canonical_path.display()
+            ),
+        )
+    })?;
+    let mut combined = String::new();
+    for import in controller_imports(&source) {
+        let import_path = resolve_controller_import(&canonical_root, import)?;
+        combined.push_str(&load_controller_source_tree(
+            &import_path,
+            &canonical_root,
+            visited,
+        )?);
+        combined.push('\n');
+    }
+    combined.push_str(&source);
+    Ok(combined)
+}
+
+fn controller_imports(source: &str) -> Vec<&str> {
+    let mut imports = Vec::new();
+    let mut cursor = source;
+    while let Some(start) = cursor.find("sa.import") {
+        cursor = &cursor[start + "sa.import".len()..];
+        let Some(paren) = cursor.find('(') else {
+            break;
+        };
+        cursor = &cursor[paren + 1..];
+        let Some(quote) = cursor.find('"') else {
+            break;
+        };
+        cursor = &cursor[quote + 1..];
+        let Some(end_quote) = cursor.find('"') else {
+            break;
+        };
+        imports.push(&cursor[..end_quote]);
+        cursor = &cursor[end_quote + 1..];
+    }
+    imports
+}
+
+fn resolve_controller_import(root: &Path, import: &str) -> Result<PathBuf, DiagnosableError> {
+    if import.contains("..") || import.starts_with('/') || import.chars().any(char::is_control) {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "Lua controller import must be a local module path inside the script root",
+        ));
+    }
+    let mut path = root.join(import.replace('.', "/"));
+    if path.extension().is_none() {
+        path.set_extension("lua");
+    }
+    Ok(path)
+}
+
+fn parse_controller_entries(
+    source: &str,
+    api_name: &str,
+    kind: ControllerRegistrationKind,
+) -> Result<Vec<ControllerRegistration>, DiagnosableError> {
+    let mut entries = Vec::new();
+    let mut cursor = source;
+    while let Some(start) = cursor.find(api_name) {
+        cursor = &cursor[start + api_name.len()..];
+        let Some(paren) = cursor.find('(') else {
+            break;
+        };
+        cursor = &cursor[paren + 1..];
+        let Some(block_start) = cursor.find('{') else {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                format!("{api_name} requires a table argument"),
+            ));
+        };
+        let block = &cursor[block_start..];
+        let Some(block_end) = matching_table_end(block) else {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                format!("{api_name} registration table is not closed"),
+            ));
+        };
+        let entry = &block[1..block_end];
+        entries.push(parse_controller_entry(entry, kind)?);
+        cursor = &block[block_end + 1..];
+    }
+    Ok(entries)
+}
+
+fn matching_table_end(source: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, ch) in source.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_controller_entry(
+    source: &str,
+    kind: ControllerRegistrationKind,
+) -> Result<ControllerRegistration, DiagnosableError> {
+    let trigger = field_string(source, "trigger")
+        .or_else(|| {
+            if kind == ControllerRegistrationKind::Shutdown {
+                Some("shutdown")
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                "controller trigger is required",
+            )
+        })?;
+    let callback = field_string(source, "callback")
+        .or_else(|| field_string(source, "handler"))
+        .ok_or_else(|| {
+            DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                "controller callback is required",
+            )
+        })?;
+    let mode = BindingMode::parse(field_string(source, "mode"))?;
+    let scope = parse_controller_scope(source)?;
+    Ok(ControllerRegistration::new(
+        kind,
+        trigger,
+        scope.clone(),
+        mode,
+        callback,
+        controller_required_capabilities(kind, mode, &scope),
+    )?
+    .with_requires_held(parse_controller_requires_held(source)?)
+    .with_loop_policy(parse_controller_loop_policy(source)?))
+}
+
+fn parse_controller_requires_held(source: &str) -> Result<HeldCondition, DiagnosableError> {
+    let Some(body) = table_body_field_after(source, "requires_held")? else {
+        return HeldCondition::new(Vec::new());
+    };
+    HeldCondition::parse(quoted_strings(body))
+}
+
+fn parse_controller_loop_policy(
+    source: &str,
+) -> Result<Option<ControllerLoopPolicy>, DiagnosableError> {
+    let Some(loop_body) = table_body_field_after(source, "loop")? else {
+        return Ok(None);
+    };
+    let while_held_body = table_body_field_after(loop_body, "while_held")?.ok_or_else(|| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "controller loop requires while_held",
+        )
+    })?;
+    let repeat_body = table_body_field_after(loop_body, "repeat")?.ok_or_else(|| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "controller loop requires repeat",
+        )
+    })?;
+    let every_ms = field_u64(repeat_body, "every_ms")?.ok_or_else(|| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "controller loop repeat requires every_ms",
+        )
+    })?;
+    let repeat_callback = field_string(repeat_body, "callback").ok_or_else(|| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "controller loop repeat requires callback",
+        )
+    })?;
+    ControllerLoopPolicy::new(
+        MotionTrigger::parse(quoted_strings(while_held_body))?,
+        field_string(loop_body, "before"),
+        every_ms,
+        repeat_callback,
+        field_string(loop_body, "after"),
+    )
+    .map(Some)
+}
+
+fn parse_controller_scope(source: &str) -> Result<ScopeSelection, DiagnosableError> {
+    let Some(scope_body) = table_body_after(source, "scope")? else {
+        return Ok(ScopeSelection::ExplicitGlobal);
+    };
+    if scope_body.contains("global") {
+        return Ok(ScopeSelection::ExplicitGlobal);
+    }
+    let processes = quoted_strings(scope_body)
+        .into_iter()
+        .map(ProcessName::parse)
+        .collect::<Result<Vec<_>, _>>()?;
+    ScopeSelection::process_list(processes)
+}
+
+fn controller_required_capabilities(
+    kind: ControllerRegistrationKind,
+    mode: BindingMode,
+    scope: &ScopeSelection,
+) -> CapabilitySet {
+    let mut required = Vec::new();
+    match kind {
+        ControllerRegistrationKind::Hotkey => required.push(CapabilityKind::GlobalShortcut),
+        ControllerRegistrationKind::Motion | ControllerRegistrationKind::Press => {
+            required.push(CapabilityKind::CompositePointerObservation);
+            if mode == BindingMode::Consume {
+                required.push(CapabilityKind::CompositePointerConsumption);
+            }
+        }
+        ControllerRegistrationKind::Timer | ControllerRegistrationKind::Shutdown => {}
+    }
+    if matches!(scope, ScopeSelection::ProcessList { .. }) {
+        required.push(CapabilityKind::ActiveProcessMetadata);
+    }
+    CapabilitySet::new(required)
 }
 
 fn contains_denied_token(source: &str, token: &str) -> bool {
@@ -513,7 +953,7 @@ fn parse_actions(source: &str) -> Result<Vec<MacroAction>, DiagnosableError> {
     for line in source
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
+        .filter(|line| !line.is_empty() && !line.starts_with("--"))
     {
         if let Some(rest) = line.strip_prefix("key ") {
             actions.push(MacroAction::key(first_quoted(rest).ok_or_else(|| {
@@ -768,6 +1208,146 @@ fn matching_brace(source: &str, start: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn parses_controller_registrations_without_runtime_activation() {
+        let controller = load_lua_controller_source(
+            r#"
+            sa.hotkey({
+              trigger = "F5",
+              scope = { processes = { "poe2.exe" } },
+              callback = "hideout",
+            })
+            sa.motion({
+              trigger = "<Leader> x",
+              mode = "passthrough",
+              callback = "motion",
+            })
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(controller.registrations().len(), 2);
+        assert!(controller
+            .required_capabilities()
+            .contains(CapabilityKind::GlobalShortcut));
+        assert!(controller
+            .required_capabilities()
+            .contains(CapabilityKind::ActiveProcessMetadata));
+        assert!(controller
+            .required_capabilities()
+            .contains(CapabilityKind::CompositePointerObservation));
+        assert!(!controller
+            .required_capabilities()
+            .contains(CapabilityKind::CompositePointerConsumption));
+    }
+
+    #[test]
+    fn rejects_duplicate_controller_triggers() {
+        let error = load_lua_controller_source(
+            r#"
+            sa.hotkey({ trigger = "Return", callback = "first" })
+            sa.hotkey({ trigger = "Return", callback = "second" })
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("duplicate controller trigger"));
+    }
+
+    #[test]
+    fn controller_loader_denies_ambient_apis() {
+        for source in [
+            r#"sa.hotkey({ trigger = "F5", callback = "ok" }); os.execute("id")"#,
+            r#"sa.hotkey({ trigger = "F5", callback = "ok" }); require("socket")"#,
+            r#"sa.hotkey({ trigger = "F5", callback = "ok" }); debug.traceback()"#,
+        ] {
+            assert!(
+                load_lua_controller_source(source).is_err(),
+                "source should be denied: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn controller_loader_imports_local_modules_from_script_root() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("signal-auras-controller-{unique}"));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(
+            root.join("helper.lua"),
+            r#"sa.motion({ trigger = "<Leader> x", callback = "helper_motion" })"#,
+        )
+        .unwrap();
+        let main = root.join("main.lua");
+        std::fs::write(
+            &main,
+            r#"
+            sa.import("helper")
+            sa.hotkey({ trigger = "F5", callback = "main_hotkey" })
+            "#,
+        )
+        .unwrap();
+
+        let controller = load_lua_controller_file(&main).unwrap();
+
+        assert_eq!(controller.registrations().len(), 2);
+        std::fs::remove_file(root.join("helper.lua")).unwrap();
+        std::fs::remove_file(main).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn controller_program_parses_callback_output_apis() {
+        let program = load_lua_controller_program_source(
+            r#"
+            sa.hotkey({ trigger = "F5", callback = "hideout" })
+            sa.callback("hideout", function()
+              sa.input.key("Enter")
+              sa.input.text("/hideout")
+              sa.input.key("Enter")
+            end)
+            "#,
+        )
+        .unwrap();
+
+        let callback = program.callback("hideout").unwrap();
+        assert_eq!(callback.actions.len(), 3);
+        assert!(program
+            .required_capabilities()
+            .contains(CapabilityKind::SynthesizedInput));
+    }
+
+    #[test]
+    fn controller_program_requires_callback_definition() {
+        let error = load_lua_controller_program_source(
+            r#"sa.hotkey({ trigger = "F5", callback = "missing" })"#,
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("registered but not defined"));
+    }
+
+    #[test]
+    fn controller_program_rejects_unsupported_callback_api() {
+        let error = load_lua_controller_program_source(
+            r#"
+            sa.hotkey({ trigger = "F5", callback = "hideout" })
+            sa.callback("hideout", function()
+              sa.shell("nope")
+            end)
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(error
+            .message
+            .contains("unsupported Lua controller callback API"));
+    }
 
     #[test]
     fn parses_v1_sample() {

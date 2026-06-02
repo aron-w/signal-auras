@@ -20,7 +20,7 @@ A developer opens an existing Signal Auras Lua script in Neovim and expects edit
 
 **Acceptance Scenarios**:
 
-1. **Given** the repository is opened as a workspace, **When** `examples/poe2-hideout.lua` is checked by Lua editor tooling, **Then** the Signal Auras DSL globals are recognized and do not produce false undefined-global diagnostics.
+1. **Given** the repository is opened as a workspace, **When** `examples/poe2-legacy.lua` is checked by Lua editor tooling, **Then** the Signal Auras DSL globals are recognized and do not produce false undefined-global diagnostics.
 2. **Given** the repository is opened as a workspace, **When** `examples/prompt-scope.lua` is checked by Lua editor tooling, **Then** the Signal Auras DSL globals are recognized and do not produce false undefined-global diagnostics.
 3. **Given** a Lua script contains an unrelated syntax or type issue, **When** Lua editor tooling runs, **Then** the issue remains visible instead of diagnostics being globally disabled.
 

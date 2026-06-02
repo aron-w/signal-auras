@@ -36,12 +36,12 @@
 
 ### Verification for User Story 1
 
-- [x] T005 [P] [US1] Add workspace LuaLS verification notes for examples/poe2-hideout.lua and examples/prompt-scope.lua in specs/003-lua-editor-tooling/quickstart.md
+- [x] T005 [P] [US1] Add workspace LuaLS verification notes for examples/poe2-legacy.lua and examples/prompt-scope.lua in specs/003-lua-editor-tooling/quickstart.md
 
 ### Implementation for User Story 1
 
 - [x] T006 [US1] Add LuaLS workspace configuration in .luarc.json for Lua 5.4 and Signal Auras DSL globals
-- [x] T014 [US1] Normalize existing example scripts to valid Lua delay call syntax in examples/poe2-hideout.lua and examples/prompt-scope.lua
+- [x] T014 [US1] Normalize existing example scripts to valid Lua delay call syntax in examples/poe2-legacy.lua and examples/prompt-scope.lua
 
 **Checkpoint**: User Story 1 is independently verifiable with editor diagnostics.
 

@@ -13,7 +13,7 @@ This confirms the language server is available from the flake development shell.
 ## Manual Neovim/LuaLS Verification
 
 1. Open Neovim at the repository root.
-2. Open `examples/poe2-hideout.lua`.
+2. Open `examples/poe2-legacy.lua`.
 3. Confirm LuaLS does not report `macro`, `key`, `text`, or `delay` as undefined globals.
 4. Open `examples/prompt-scope.lua`.
 5. Confirm the same DSL globals do not produce false undefined-global diagnostics.

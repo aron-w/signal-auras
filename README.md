@@ -29,7 +29,7 @@ behavior.
 Run from the project development shell:
 
 ```bash
-nix develop -c cargo run -p signal-auras-cli -- run ./examples/poe2-hideout.lua
+nix develop -c cargo run -p signal-auras-cli -- run ./examples/poe2.lua
 ```
 
 The command shape is:
@@ -342,7 +342,8 @@ inter-action defaults and one millisecond for explicit `delay` actions.
 
 ## Examples
 
-- `examples/poe2-hideout.lua`: process-scoped `F5` macro for `/hideout`.
+- `examples/poe2.lua`: controller-style PoE2 bindings backed by Rust output APIs.
+- `examples/poe2-legacy.lua`: legacy declarative PoE2 bindings.
 - `examples/prompt-scope.lua`: scope-free script that exercises the terminal
   consent prompt.
 - `examples/composite-bindings.lua`: structured `Ctrl` plus wheel and left-click

@@ -10,7 +10,7 @@ return {
       "/dev/input/by-signal-auras/logitech-mouse-keyboard",
     },
   },
-  leader = "Ctrl",
+  leader = "F9",
   defaults = {
     inter_action_delay_ms = 200,
   },
@@ -21,7 +21,6 @@ return {
       macro = macro {
         key "Enter",
         text "/hideout",
-        delay(50),
         key "Enter",
       },
     },
@@ -61,6 +60,30 @@ return {
       mode = "passthrough",
       macro = macro {
         key "Right",
+      },
+    },
+    {
+      requires_held = { "<Leader>" },
+      trigger = "<RClick>",
+      mode = "consume",
+      macro = macro {
+        key_down "Alt",
+        -- delay(10),
+        mouse_click "left",
+        -- delay(10),
+        key_up "Alt",
+      },
+    },
+    {
+      requires_held = { "<Leader>" },
+      trigger = "<LClick>",
+      mode = "consume",
+      macro = macro {
+        key_down "Ctrl",
+        -- delay(10),
+        mouse_click "left",
+        -- delay(10),
+        key_up "Ctrl",
       },
     },
   },

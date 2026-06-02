@@ -1,12 +1,13 @@
 use signal_auras_cli::prompt::{ScopePrompt, TerminalPrompt};
 use signal_auras_cli::runner::{
-    parse_doctor_args, parse_run_args, start_real_runner_with_lifecycle, start_runner,
+    parse_doctor_args, parse_run_args, start_controller_runner_with_lifecycle,
+    start_real_controller_runner_with_lifecycle, start_real_runner_with_lifecycle, start_runner,
     start_runner_with_lifecycle, DoctorCommand, RunnerEvent, RunnerLifecycle,
 };
 use signal_auras_core::{
-    ActiveProcessProvider, ConsentDecision, DiagnosableError, ErrorPhase, HotkeyBinding,
-    HotkeyRegistrar, MacroAction, MacroExecutor, ProcessName, RegistrationId, ScopeDenialKind,
-    ScopeSelection, ShutdownReason,
+    available_capability_report, ActiveProcessProvider, CapabilityKind, CapabilitySet,
+    ConsentDecision, DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyRegistrar, MacroAction,
+    MacroExecutor, ProcessName, RegistrationId, ScopeDenialKind, ScopeSelection, ShutdownReason,
 };
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -26,15 +27,11 @@ fn cli_requires_run_and_one_path() {
 
 #[test]
 fn cli_accepts_doctor_keys_command_shape() {
-    let options = parse_doctor_args(&[
-        "doctor".into(),
-        "keys".into(),
-        "examples/poe2-hideout.lua".into(),
-    ])
-    .unwrap();
+    let options =
+        parse_doctor_args(&["doctor".into(), "keys".into(), "examples/poe2.lua".into()]).unwrap();
 
     assert_eq!(options.command, DoctorCommand::Keys);
-    assert_eq!(options.lua_file, PathBuf::from("examples/poe2-hideout.lua"));
+    assert_eq!(options.lua_file, PathBuf::from("examples/poe2.lua"));
 }
 
 #[test]
@@ -537,6 +534,125 @@ fn synthesized_input_denial_is_reported_before_macro_success() {
     assert_eq!(stats.synthesized_input_emitted_count, 0);
     assert_eq!(stats.synthesized_input_denied_count, 1);
     assert_eq!(stats.macro_success_count, 0);
+}
+
+#[test]
+fn controller_runner_validates_registers_and_executes_callback_outputs() {
+    let lua_file = write_lua(
+        r#"
+        sa.hotkey({
+          trigger = "F5",
+          scope = { processes = { "poe2.exe" } },
+          callback = "hideout",
+        })
+        sa.callback("hideout", function()
+          sa.input.key("Enter")
+          sa.input.text("/hideout")
+          sa.input.key("Enter")
+        end)
+        "#,
+    );
+    let mut registrar = RecordingRegistrar::default();
+    let active = StaticActive(Some(ProcessName::parse("poe2.exe").unwrap()));
+    let mut executor = CountingExecutor::default();
+    let mut lifecycle = ScriptedLifecycle::new(vec![
+        RunnerEvent::Callback {
+            hotkey: signal_auras_core::HotkeyId::parse("F5").unwrap(),
+            received_at: Instant::now(),
+        },
+        RunnerEvent::Shutdown(ShutdownReason::CtrlC),
+    ]);
+    let required = CapabilitySet::new([
+        CapabilityKind::GlobalShortcut,
+        CapabilityKind::ActiveProcessMetadata,
+        CapabilityKind::SynthesizedInput,
+    ]);
+
+    let stats = start_controller_runner_with_lifecycle(
+        &lua_file,
+        &mut registrar,
+        &active,
+        &mut executor,
+        &mut lifecycle,
+        available_capability_report(&required, "test"),
+    )
+    .unwrap();
+
+    assert_eq!(registrar.registered_scopes.len(), 1);
+    assert_eq!(registrar.unregister_calls, 1);
+    assert_eq!(executor.actions, 3);
+    assert_eq!(stats.registration_successes, 1);
+    assert_eq!(stats.callback_event_received_count, 1);
+    assert_eq!(stats.synthesized_input_emitted_count, 3);
+}
+
+#[test]
+fn controller_runner_fails_before_registration_when_output_capability_denied() {
+    let lua_file = write_lua(
+        r#"
+        sa.hotkey({ trigger = "F5", callback = "hideout" })
+        sa.callback("hideout", function()
+          sa.input.text("/hideout")
+        end)
+        "#,
+    );
+    let mut registrar = RecordingRegistrar::default();
+    let active = StaticActive(None);
+    let mut executor = CountingExecutor::default();
+    let mut lifecycle = ScriptedLifecycle::new(vec![RunnerEvent::Shutdown(ShutdownReason::CtrlC)]);
+    let report = available_capability_report(
+        &CapabilitySet::new([CapabilityKind::GlobalShortcut]),
+        "test",
+    );
+
+    let error = start_controller_runner_with_lifecycle(
+        &lua_file,
+        &mut registrar,
+        &active,
+        &mut executor,
+        &mut lifecycle,
+        report,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.phase, ErrorPhase::CapabilityProbe);
+    assert_eq!(registrar.registered_scopes.len(), 0);
+    assert_eq!(executor.actions, 0);
+}
+
+#[test]
+fn real_controller_runner_fails_before_registration_when_output_capability_unavailable() {
+    let lua_file = write_lua(
+        r#"
+        sa.hotkey({ trigger = "F5", callback = "hideout" })
+        sa.callback("hideout", function()
+          sa.input.text("/hideout")
+        end)
+        "#,
+    );
+    let mut adapter =
+        RealWaylandAdapter::from_environment(signal_auras_wayland::capability::KdeEnvironment {
+            wayland_display: Some("wayland-0".into()),
+            session_type: Some("wayland".into()),
+            current_desktop: Some("KDE".into()),
+            services: signal_auras_wayland::capability::KdeServiceAvailability {
+                kwin: true,
+                kglobalaccel: true,
+                portal: false,
+            },
+        });
+    let mut lifecycle = ScriptedLifecycle::new(vec![RunnerEvent::Shutdown(ShutdownReason::CtrlC)]);
+
+    let error =
+        start_real_controller_runner_with_lifecycle(&lua_file, &mut adapter, &mut lifecycle)
+            .unwrap_err();
+
+    assert_eq!(error.phase, ErrorPhase::CapabilityProbe);
+    assert_eq!(
+        error.capability,
+        Some(signal_auras_core::Capability::SynthesizedInput)
+    );
+    assert_eq!(adapter.cleanup_report().attempted, 0);
 }
 
 #[derive(Clone)]

@@ -58,17 +58,17 @@ story-tests:
     nix develop -c cargo test --test lua_api --test cli_runner --test runner_flow --test rust_library
 
 # Run the scoped sample. Press Ctrl-C to stop and print final stats.
-run file="examples/poe2-hideout.lua":
+run file="examples/poe2.lua":
     @printf '%s\n' '# running scoped Lua example; press Ctrl-C to stop'
     nix develop -c cargo run -p signal-auras-cli -- run {{file}}
 
 # Run the scoped sample with verbose event logs for provider/input debugging.
-run-verbose file="examples/poe2-hideout.lua":
+run-verbose file="examples/poe2.lua":
     @printf '%s\n' '# running scoped Lua example with verbose debug logs; press Ctrl-C to stop'
     nix develop -c cargo run -p signal-auras-cli -- run --verbose --color=always {{file}}
 
 # Check unsafe input permissions needed by a script without grabbing or emitting input.
-input-doctor file="examples/poe2-hideout.lua":
+input-doctor file="examples/poe2-legacy.lua":
     nix develop -c cargo run -p signal-auras-cli -- doctor input {{file}}
 
 # Temporarily grant the current user access to unsafe input devices for local testing.
@@ -88,14 +88,14 @@ run-prompt:
 # Send SIGINT to the scoped runner and confirm it prints final Ctrl-C stats.
 sigint-smoke seconds="2":
     @printf '%s\n' '# timeout sends SIGINT; exit 124 from timeout is expected after the runner prints final_summary'
-    -nix develop -c timeout -s INT {{seconds}}s cargo run -p signal-auras-cli -- run examples/poe2-hideout.lua
+    -nix develop -c timeout -s INT {{seconds}}s cargo run -p signal-auras-cli -- run examples/poe2.lua
 
 # Run quickstart failure scenarios that should exit before registration.
 failures:
     @printf '%s\n' '# zero args: expect argument_validation'
     -nix develop -c cargo run -p signal-auras-cli --
     @printf '\n%s\n' '# two paths: expect argument_validation'
-    -nix develop -c cargo run -p signal-auras-cli -- run examples/poe2-hideout.lua examples/prompt-scope.lua
+    -nix develop -c cargo run -p signal-auras-cli -- run examples/poe2.lua examples/prompt-scope.lua
     @printf '\n%s\n' '# invalid Lua shape: expect script_validation'
     @printf '%s' 'not lua' > /tmp/signal-auras-invalid.lua
     -nix develop -c cargo run -p signal-auras-cli -- run /tmp/signal-auras-invalid.lua

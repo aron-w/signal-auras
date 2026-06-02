@@ -1,4 +1,5 @@
-use signal_auras_lua::load_lua_source;
+use signal_auras_lua::{load_lua_controller_program_file, load_lua_file, load_lua_source};
+use std::path::Path;
 
 #[test]
 fn lua_api_accepts_v1_sample() {
@@ -19,6 +20,40 @@ fn lua_api_accepts_v1_sample() {
     .unwrap();
 
     assert_eq!(config.hotkeys().len(), 1);
+}
+
+#[test]
+fn lua_api_accepts_poe2_legacy_example() {
+    let config = load_lua_file(Path::new("examples/poe2-legacy.lua")).unwrap();
+
+    assert_eq!(config.motions().len(), 2);
+    assert_eq!(config.presses().len(), 4);
+}
+
+#[test]
+fn lua_api_accepts_poe2_controller_example() {
+    let program = load_lua_controller_program_file(Path::new("examples/poe2.lua")).unwrap();
+
+    assert_eq!(program.registrations().registrations().len(), 6);
+    assert!(program.input_provider.is_some());
+    assert!(program.leader.is_some());
+    assert!(!program
+        .required_capabilities()
+        .contains(signal_auras_core::CapabilityKind::GlobalShortcut));
+    assert!(program
+        .required_capabilities()
+        .contains(signal_auras_core::CapabilityKind::CompositePointerObservation));
+    assert!(program.callback("go_home").is_some());
+    let loop_motion = program
+        .registrations()
+        .registrations()
+        .iter()
+        .find(|registration| registration.trigger == "<LClick> <LClick>")
+        .and_then(|registration| registration.loop_policy.as_ref())
+        .unwrap();
+    assert_eq!(loop_motion.repeat_every_ms, 65);
+    assert_eq!(loop_motion.repeat_callback, "click_left");
+    assert!(program.callback("ctrl_click").is_some());
 }
 
 #[test]

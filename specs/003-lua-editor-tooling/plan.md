@@ -68,7 +68,7 @@ lua-types/
 └── signal-auras.lua        # Editor-only DSL metadata
 flake.nix                   # Reproducible dev-shell LuaLS package
 examples/
-├── poe2-hideout.lua
+├── poe2-legacy.lua
 └── prompt-scope.lua
 ```
 

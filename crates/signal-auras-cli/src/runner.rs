@@ -1,15 +1,17 @@
 use crate::prompt::{stdin_is_interactive, ScopePrompt, TerminalPrompt};
 use signal_auras_core::{
-    execute_plan_with_inter_action_delay, ActiveProcessProvider, BindingMode, BindingTrigger,
-    CapabilityKind, CapabilitySet, DiagnosableError, ErrorPhase, FocusFreshnessPolicy,
-    HotkeyBinding, HotkeyId, HotkeyRegistrar, InputProviderConfig, InputProviderMode,
-    InputProviderOutput, KeyToken, LoopBody, MacroDefinition, MacroExecutor, MacroRunId,
-    MacroRunPoll, MacroRunState, MacroScheduler, MotionDefinition, MotionDiscardReason,
-    MotionInputEvent, MotionInputState, MotionRuntime, MotionRuntimeEvent, MotionToken,
-    MotionTrigger, RuntimeMotion, RuntimePress, RuntimeStats, ScopeSelection, ShutdownReason,
-    SynthesizedInputRequest,
+    execute_plan_with_inter_action_delay, queue_controller_callback_outputs, ActiveProcessProvider,
+    BindingMode, BindingTrigger, CallbackDisposition, CapabilityKind, CapabilityReport,
+    CapabilitySet, ControllerProgram, ControllerRegistration, ControllerRegistrationKind,
+    DiagnosableError, ErrorPhase, FocusFreshnessPolicy, HotkeyBinding, HotkeyId, HotkeyRegistrar,
+    InputProviderConfig, InputProviderMode, InputProviderOutput, KeyToken, LoopBody,
+    LoopDefinition, LoopInterval, LoopRepeat, LuaCallbackScheduler, MacroAction, MacroDefinition,
+    MacroExecutor, MacroRunId, MacroRunPoll, MacroRunState, MacroScheduler, MotionDefinition,
+    MotionDiscardReason, MotionInputEvent, MotionInputState, MotionRuntime, MotionRuntimeEvent,
+    MotionToken, MotionTrigger, RegistrationState, RuntimeMotion, RuntimePress, RuntimeStats,
+    RustOperationBatch, ScopeSelection, ShutdownReason, SynthesizedInputRequest,
 };
-use signal_auras_lua::load_lua_file;
+use signal_auras_lua::{load_lua_controller_program_file, load_lua_file};
 use signal_auras_wayland::{
     evdev::{EvdevInputWaitOutcome, EvdevObservationProvider, KernelEventTimestamp},
     event_loop::{RuntimeSignalFd, RuntimeTimerFd},
@@ -68,8 +70,13 @@ pub fn run_cli(
     let options = parse_run_args(&args)?;
     init_runtime_logging(options.log);
     let mut adapter = RealWaylandAdapter::new();
-    start_live_real_runner_with_options(&options.lua_file, prompt, &mut adapter, options.log)
-        .map(|_| ())
+    if lua_file_looks_like_controller(&options.lua_file)? {
+        start_live_real_controller_runner_with_options(&options.lua_file, &mut adapter, options.log)
+            .map(|_| ())
+    } else {
+        start_live_real_runner_with_options(&options.lua_file, prompt, &mut adapter, options.log)
+            .map(|_| ())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,6 +275,21 @@ pub fn parse_doctor_args(args: &[String]) -> Result<DoctorOptions, DiagnosableEr
         command,
         lua_file: PathBuf::from(&args[2]),
     })
+}
+
+fn lua_file_looks_like_controller(lua_file: &Path) -> Result<bool, DiagnosableError> {
+    let source = fs::read_to_string(lua_file).map_err(|error| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptLoad,
+            format!("cannot read Lua file '{}': {error}", lua_file.display()),
+        )
+    })?;
+    Ok(source.contains("sa.hotkey")
+        || source.contains("sa.motion")
+        || source.contains("sa.press")
+        || source.contains("sa.timer")
+        || source.contains("sa.shutdown")
+        || source.contains("sa.callback"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -782,6 +804,73 @@ where
     Ok(stats)
 }
 
+pub fn start_controller_runner_with_lifecycle<R, P, E, L>(
+    lua_file: &Path,
+    registrar: &mut R,
+    active_process_provider: &P,
+    executor: &mut E,
+    lifecycle: &mut L,
+    capabilities: CapabilityReport,
+) -> Result<RuntimeStats, DiagnosableError>
+where
+    R: HotkeyRegistrar,
+    P: ActiveProcessProvider,
+    E: MacroExecutor,
+    L: RunnerLifecycle,
+{
+    println!("startup controller_script_path={}", lua_file.display());
+    let program = load_lua_controller_program_file(lua_file)?;
+    println!(
+        "controller_registration result=ok registrations={} callbacks={}",
+        program.registrations().registrations().len(),
+        program.callbacks().count()
+    );
+    program.validate_capabilities(&capabilities)?;
+    println!("capability_probe result=ok");
+
+    let mut stats = RuntimeStats::new();
+    let hotkey_bindings = controller_hotkey_bindings(&program)?;
+    for binding in &hotkey_bindings {
+        stats.record_registration_attempt();
+        match registrar.register(binding.clone()) {
+            Ok(id) => {
+                stats.record_registration_success();
+                println!(
+                    "controller_binding_registered trigger={} mode={} id={}",
+                    binding.trigger_label(),
+                    binding.mode.as_str(),
+                    id.as_str()
+                );
+            }
+            Err(error) => {
+                stats.record_registration_failure();
+                cleanup_after_error(registrar, ErrorPhase::Registration)?;
+                return Err(error);
+            }
+        }
+    }
+
+    let shutdown_reason = match run_controller_lifecycle(
+        &program,
+        active_process_provider,
+        executor,
+        lifecycle,
+        &capabilities,
+        &mut stats,
+    ) {
+        Ok(reason) => reason,
+        Err(error) => {
+            println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
+            cleanup_after_error(registrar, ErrorPhase::Shutdown)?;
+            return Err(error);
+        }
+    };
+
+    println!("{}", stats.render_summary(shutdown_reason));
+    registrar.unregister_all()?;
+    Ok(stats)
+}
+
 pub fn start_real_runner_with_lifecycle<L>(
     lua_file: &Path,
     prompt: &mut impl ScopePrompt,
@@ -868,12 +957,176 @@ where
     Ok(stats)
 }
 
+pub fn start_real_controller_runner_with_lifecycle<L>(
+    lua_file: &Path,
+    adapter: &mut RealWaylandAdapter,
+    lifecycle: &mut L,
+) -> Result<RuntimeStats, DiagnosableError>
+where
+    L: RunnerLifecycle,
+{
+    println!("startup controller_script_path={}", lua_file.display());
+    let program = load_lua_controller_program_file(lua_file)?;
+    println!(
+        "controller_registration result=ok registrations={} callbacks={}",
+        program.registrations().registrations().len(),
+        program.callbacks().count()
+    );
+    let required = program.required_capabilities().clone();
+    println!("provider selected=kde-plasma-wayland");
+    adapter.configure_input_provider(program.input_provider.as_ref(), program.leader.as_ref())?;
+    let report = adapter.probe_capabilities(&required);
+    let mut stats = RuntimeStats::new();
+    if let Some(error) = report.first_blocking_error(&required) {
+        stats.record_capability_probe_failure();
+        stats.record_permission_failure();
+        println!("capability_probe result=failed error={error}");
+        return Err(error);
+    }
+    stats.record_capability_probe_success();
+    println!("capability_probe result=ok");
+    if required.contains(CapabilityKind::ActiveProcessMetadata) {
+        adapter.ensure_active_process_provider()?;
+        stats.record_kde_bridge_setup();
+    }
+
+    let hotkey_bindings = controller_hotkey_bindings(&program)?;
+    for binding in &hotkey_bindings {
+        stats.record_registration_attempt();
+        match adapter.register(binding.clone()) {
+            Ok(id) => {
+                stats.record_registration_success();
+                println!(
+                    "controller_binding_registered trigger={} mode={} id={}",
+                    binding.trigger_label(),
+                    binding.mode.as_str(),
+                    id.as_str()
+                );
+            }
+            Err(error) => {
+                stats.record_registration_failure();
+                cleanup_after_error(adapter, ErrorPhase::Registration)?;
+                return Err(error);
+            }
+        }
+    }
+
+    let active_adapter = RealWaylandAdapter::new();
+    let shutdown_reason = match run_controller_lifecycle(
+        &program,
+        &active_adapter,
+        adapter,
+        lifecycle,
+        &report,
+        &mut stats,
+    ) {
+        Ok(reason) => reason,
+        Err(error) => {
+            println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
+            adapter.cancel_pending()?;
+            cleanup_after_error(adapter, ErrorPhase::Shutdown)?;
+            return Err(error);
+        }
+    };
+
+    println!("{}", stats.render_summary(shutdown_reason));
+    adapter.cancel_pending()?;
+    adapter.unregister_all()?;
+    Ok(stats)
+}
+
 pub fn start_live_real_runner(
     lua_file: &Path,
     prompt: &mut impl ScopePrompt,
     adapter: &mut RealWaylandAdapter,
 ) -> Result<RuntimeStats, DiagnosableError> {
     start_live_real_runner_with_options(lua_file, prompt, adapter, RuntimeLog::default())
+}
+
+pub fn start_live_real_controller_runner_with_options(
+    lua_file: &Path,
+    adapter: &mut RealWaylandAdapter,
+    log: RuntimeLog,
+) -> Result<RuntimeStats, DiagnosableError> {
+    init_runtime_logging(log);
+    println!("startup controller_script_path={}", lua_file.display());
+    let program = load_lua_controller_program_file(lua_file)?;
+    println!(
+        "controller_registration result=ok registrations={} callbacks={}",
+        program.registrations().registrations().len(),
+        program.callbacks().count()
+    );
+    let required = program.required_capabilities().clone();
+    let signal_fd = RuntimeSignalFd::shutdown()?;
+    println!("provider selected=kde-plasma-wayland");
+    adapter.configure_input_provider(program.input_provider.as_ref(), program.leader.as_ref())?;
+    if let Some(summary) = adapter.input_provider_summary() {
+        log.debug(format!("event=input_provider_configured {summary}"));
+    } else {
+        log.debug("event=input_provider_configured provider=none");
+    }
+    log.debug(format!(
+        "event=capability_probe_start required={}",
+        required
+            .iter()
+            .map(|kind| kind.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    ));
+    let report = adapter.probe_capabilities(&required);
+    let mut stats = RuntimeStats::new();
+    if let Some(error) = report.first_blocking_error(&required) {
+        stats.record_capability_probe_failure();
+        stats.record_permission_failure();
+        println!("capability_probe result=failed error={error}");
+        return Err(error);
+    }
+    stats.record_capability_probe_success();
+    println!("capability_probe result=ok");
+    if required.contains(CapabilityKind::ActiveProcessMetadata) {
+        log.debug("event=active_process_provider_start provider=kwin-script");
+        adapter.ensure_active_process_provider()?;
+        stats.record_kde_bridge_setup();
+        log.debug("event=active_process_provider_ready provider=kwin-script");
+    }
+
+    let hotkey_bindings = controller_hotkey_bindings(&program)?;
+    for binding in &hotkey_bindings {
+        stats.record_registration_attempt();
+        match adapter.register(binding.clone()) {
+            Ok(id) => {
+                stats.record_registration_success();
+                println!(
+                    "controller_binding_registered trigger={} mode={} id={}",
+                    binding.trigger_label(),
+                    binding.mode.as_str(),
+                    id.as_str()
+                );
+            }
+            Err(error) => {
+                stats.record_registration_failure();
+                cleanup_after_error(adapter, ErrorPhase::Registration)?;
+                return Err(error);
+            }
+        }
+    }
+
+    let shutdown_reason = match run_live_real_controller_lifecycle(
+        &program, adapter, &report, &mut stats, log, signal_fd,
+    ) {
+        Ok(reason) => reason,
+        Err(error) => {
+            println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
+            adapter.cancel_pending()?;
+            cleanup_after_error(adapter, ErrorPhase::Shutdown)?;
+            return Err(error);
+        }
+    };
+
+    println!("{}", stats.render_summary(shutdown_reason));
+    adapter.cancel_pending()?;
+    adapter.unregister_all()?;
+    Ok(stats)
 }
 
 pub fn start_live_real_runner_with_options(
@@ -1270,6 +1523,276 @@ where
     }
 }
 
+fn controller_hotkey_bindings(
+    program: &ControllerProgram,
+) -> Result<Vec<HotkeyBinding>, DiagnosableError> {
+    program
+        .registrations()
+        .registrations()
+        .iter()
+        .filter(|registration| registration.kind == ControllerRegistrationKind::Hotkey)
+        .map(controller_hotkey_binding)
+        .collect()
+}
+
+fn controller_hotkey_binding(
+    registration: &ControllerRegistration,
+) -> Result<HotkeyBinding, DiagnosableError> {
+    Ok(HotkeyBinding {
+        trigger: BindingTrigger::keyboard(HotkeyId::parse(&registration.trigger)?),
+        scope: registration.scope.clone(),
+        mode: registration.mode,
+        macro_definition: MacroDefinition::new(vec![MacroAction::delay(1)?])?,
+        registration_state: RegistrationState::Pending,
+    })
+}
+
+fn run_controller_lifecycle<P, E, L>(
+    program: &ControllerProgram,
+    active_process_provider: &P,
+    executor: &mut E,
+    lifecycle: &mut L,
+    capabilities: &CapabilityReport,
+    stats: &mut RuntimeStats,
+) -> Result<ShutdownReason, DiagnosableError>
+where
+    P: ActiveProcessProvider,
+    E: MacroExecutor,
+    L: RunnerLifecycle,
+{
+    let mut scheduler = LuaCallbackScheduler::new(64, Duration::from_millis(50))?;
+    loop {
+        match lifecycle.next_event()? {
+            RunnerEvent::Hotkey(hotkey) => {
+                if let Some(registration) = controller_registration_for_hotkey(program, &hotkey) {
+                    let _ = schedule_controller_callback(
+                        registration,
+                        active_process_provider,
+                        &mut scheduler,
+                        capabilities,
+                        stats,
+                        Instant::now(),
+                    )?;
+                }
+            }
+            RunnerEvent::Callback {
+                hotkey,
+                received_at,
+            } => {
+                stats.record_callback_received();
+                stats.record_callback_dispatched(received_at.elapsed().as_millis() as u64);
+                if let Some(registration) = controller_registration_for_hotkey(program, &hotkey) {
+                    let _ = schedule_controller_callback(
+                        registration,
+                        active_process_provider,
+                        &mut scheduler,
+                        capabilities,
+                        stats,
+                        received_at,
+                    )?;
+                } else {
+                    stats.record_shortcut_ignored();
+                }
+            }
+            RunnerEvent::Trigger(trigger) => {
+                if let BindingTrigger::Keyboard(hotkey) = trigger {
+                    if let Some(registration) = controller_registration_for_hotkey(program, &hotkey)
+                    {
+                        let _ = schedule_controller_callback(
+                            registration,
+                            active_process_provider,
+                            &mut scheduler,
+                            capabilities,
+                            stats,
+                            Instant::now(),
+                        )?;
+                    }
+                }
+            }
+            RunnerEvent::Shutdown(reason) => {
+                let cancelled = scheduler.cancel_all();
+                if cancelled > 0 {
+                    stats.record_cancelled_macro_runs(cancelled as u64);
+                }
+                return Ok(reason);
+            }
+            RunnerEvent::RuntimeError(error) => return Err(error),
+            RunnerEvent::MotionInput(_)
+            | RunnerEvent::ObservedMotionInput { .. }
+            | RunnerEvent::MotionRepeatTick(_) => {}
+        }
+        drain_controller_callbacks(program, &mut scheduler, capabilities, executor, stats)?;
+    }
+}
+
+fn controller_registration_for_hotkey<'a>(
+    program: &'a ControllerProgram,
+    hotkey: &HotkeyId,
+) -> Option<&'a ControllerRegistration> {
+    program
+        .registrations()
+        .registrations()
+        .iter()
+        .find(|registration| {
+            registration.kind == ControllerRegistrationKind::Hotkey
+                && registration.trigger == hotkey.as_str()
+        })
+}
+
+fn schedule_controller_callback<P>(
+    registration: &ControllerRegistration,
+    active_process_provider: &P,
+    scheduler: &mut LuaCallbackScheduler,
+    capabilities: &CapabilityReport,
+    stats: &mut RuntimeStats,
+    accepted_at: Instant,
+) -> Result<bool, DiagnosableError>
+where
+    P: ActiveProcessProvider,
+{
+    schedule_controller_callback_name(
+        registration,
+        &registration.callback,
+        active_process_provider,
+        scheduler,
+        capabilities,
+        stats,
+        accepted_at,
+    )
+}
+
+fn schedule_controller_callback_name<P>(
+    registration: &ControllerRegistration,
+    callback_name: &str,
+    active_process_provider: &P,
+    scheduler: &mut LuaCallbackScheduler,
+    capabilities: &CapabilityReport,
+    stats: &mut RuntimeStats,
+    accepted_at: Instant,
+) -> Result<bool, DiagnosableError>
+where
+    P: ActiveProcessProvider,
+{
+    let active_context = active_process_provider.active_process_context()?;
+    let state = registration.scope.scoped_focus_state(&active_context);
+    if !state.is_active() {
+        if let Some(diagnostic) = state.diagnostic {
+            record_scope_denial(stats, &diagnostic);
+            println!(
+                "denied_controller_callback trigger={} reason={} {}",
+                registration.trigger,
+                state.reason.as_str(),
+                diagnostic.render_fields()
+            );
+        }
+        return Ok(false);
+    }
+    stats.record_trigger(&registration.trigger);
+    match registration.mode {
+        BindingMode::Consume => stats.record_consumed_trigger_event(),
+        BindingMode::Passthrough => stats.record_passthrough_trigger_event(),
+    }
+    stats.record_active_process_match();
+    let scheduled = registration.clone().with_callback(callback_name)?;
+    let result = scheduler.schedule(&scheduled, capabilities, accepted_at);
+    match result.disposition {
+        CallbackDisposition::Accepted => {}
+        CallbackDisposition::Skipped | CallbackDisposition::Dropped => {
+            record_non_repeat_collision_skip(stats);
+            stats.record_callback_dropped(1);
+        }
+        CallbackDisposition::Denied => {
+            stats.denied_action_count += 1;
+            if result.diagnostic.is_some() {
+                stats.record_permission_failure();
+            }
+        }
+        CallbackDisposition::Completed
+        | CallbackDisposition::Slow
+        | CallbackDisposition::Failed
+        | CallbackDisposition::Cancelled => {}
+    }
+    println!(
+        "controller_callback_scheduled trigger={} callback={} disposition={:?} queue_depth={}",
+        registration.trigger,
+        callback_name,
+        result.disposition,
+        scheduler.pending_len()
+    );
+    stats.record_output_queue_depth(scheduler.pending_len() as u64);
+    Ok(result.disposition == CallbackDisposition::Accepted
+        && registration.mode == BindingMode::Consume)
+}
+
+fn drain_controller_callbacks<E>(
+    program: &ControllerProgram,
+    scheduler: &mut LuaCallbackScheduler,
+    capabilities: &CapabilityReport,
+    executor: &mut E,
+    stats: &mut RuntimeStats,
+) -> Result<(), DiagnosableError>
+where
+    E: MacroExecutor,
+{
+    while let Some(task) = scheduler.pop_next() {
+        let started_at = Instant::now();
+        let result = execute_controller_task(program, &task, capabilities, executor, stats);
+        let disposition = scheduler.finish(task, started_at.elapsed());
+        if disposition == CallbackDisposition::Slow {
+            println!("controller_callback_slow disposition=slow");
+        }
+        result?;
+    }
+    Ok(())
+}
+
+fn execute_controller_task<E>(
+    program: &ControllerProgram,
+    task: &signal_auras_core::LuaCallbackTask,
+    capabilities: &CapabilityReport,
+    executor: &mut E,
+    stats: &mut RuntimeStats,
+) -> Result<(), DiagnosableError>
+where
+    E: MacroExecutor,
+{
+    let callback = program.callback(&task.callback).ok_or_else(|| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!("controller callback '{}' is unavailable", task.callback),
+        )
+    })?;
+    let mut batch = RustOperationBatch::new(256)?;
+    queue_controller_callback_outputs(callback, capabilities, &mut batch)?;
+    stats.record_output_queue_depth(batch.len() as u64);
+    for request in batch.drain() {
+        match executor.execute_input_request(request)? {
+            signal_auras_core::InputEmission::Emitted => stats.record_synthesized_input_emitted(),
+            signal_auras_core::InputEmission::Denied => {
+                stats.record_synthesized_input_denied();
+                return Err(DiagnosableError::new(
+                    ErrorPhase::MacroExecution,
+                    "controller synthesized input was denied",
+                ));
+            }
+            signal_auras_core::InputEmission::Failed => {
+                return Err(DiagnosableError::new(
+                    ErrorPhase::MacroExecution,
+                    "controller synthesized input failed",
+                ));
+            }
+            signal_auras_core::InputEmission::Cancelled => {
+                return Err(DiagnosableError::new(
+                    ErrorPhase::Shutdown,
+                    "controller synthesized input was cancelled",
+                ));
+            }
+        }
+    }
+    stats.macro_success_count += 1;
+    Ok(())
+}
+
 fn run_live_real_lifecycle(
     bindings: &[HotkeyBinding],
     motions: &[RuntimeMotion],
@@ -1446,6 +1969,424 @@ fn run_live_real_lifecycle(
         }
         macro_queue.drive_ready(adapter, stats)?;
     }
+}
+
+fn run_live_real_controller_lifecycle(
+    program: &ControllerProgram,
+    adapter: &mut RealWaylandAdapter,
+    capabilities: &CapabilityReport,
+    stats: &mut RuntimeStats,
+    log: RuntimeLog,
+    mut signal_fd: RuntimeSignalFd,
+) -> Result<ShutdownReason, DiagnosableError> {
+    let timer_fd = RuntimeTimerFd::new()?;
+    let mut scheduler = LuaCallbackScheduler::new(64, Duration::from_millis(50))?;
+    let mut motion_runtime = MotionRuntime::new(controller_motion_definitions(program)?);
+    let mut repeat_ticks = controller_repeat_ticks(program)?;
+    let mut last_repeat_ticks = BTreeMap::new();
+    let motion_time_base = Instant::now();
+    loop {
+        stats.record_event_loop_wakeup();
+        drain_live_controller_shortcut_callbacks(
+            program,
+            adapter,
+            &mut scheduler,
+            capabilities,
+            stats,
+            log,
+        )?;
+        drain_controller_callbacks(program, &mut scheduler, capabilities, adapter, stats)?;
+        let wait_timeout =
+            next_live_wait_timeout(&repeat_ticks, &last_repeat_ticks, &motion_runtime);
+        timer_fd.arm_after(wait_timeout)?;
+        let mut runtime_fds = vec![signal_fd.as_raw_fd(), timer_fd.as_raw_fd()];
+        if let Some(fd) = adapter.callback_wake_fd() {
+            runtime_fds.push(fd);
+        }
+        match adapter.wait_next_input_or_runtime_fd(wait_timeout, &runtime_fds)? {
+            signal_auras_wayland::evdev::EvdevInputWaitOutcome::RuntimeFd(fd)
+                if fd == signal_fd.as_raw_fd() =>
+            {
+                if let Some(reason) = signal_fd.drain_shutdown_reason()? {
+                    let cancelled = scheduler.cancel_all();
+                    if cancelled > 0 {
+                        stats.record_cancelled_macro_runs(cancelled as u64);
+                    }
+                    return Ok(reason);
+                }
+            }
+            signal_auras_wayland::evdev::EvdevInputWaitOutcome::RuntimeFd(fd)
+                if fd == timer_fd.as_raw_fd() =>
+            {
+                timer_fd.drain()?;
+            }
+            signal_auras_wayland::evdev::EvdevInputWaitOutcome::RuntimeFd(fd)
+                if adapter.callback_wake_fd() == Some(fd) =>
+            {
+                adapter.drain_callback_wake_fd()?;
+                drain_live_controller_shortcut_callbacks(
+                    program,
+                    adapter,
+                    &mut scheduler,
+                    capabilities,
+                    stats,
+                    log,
+                )?;
+            }
+            signal_auras_wayland::evdev::EvdevInputWaitOutcome::Input(event) => {
+                let mut context = LiveControllerInputContext {
+                    program,
+                    adapter,
+                    motion_runtime: &mut motion_runtime,
+                    scheduler: &mut scheduler,
+                    capabilities,
+                    stats,
+                    last_repeat_ticks: &mut last_repeat_ticks,
+                    motion_time_base,
+                };
+                handle_live_controller_observed_input(event, &mut context)?;
+            }
+            signal_auras_wayland::evdev::EvdevInputWaitOutcome::RuntimeFd(_)
+            | signal_auras_wayland::evdev::EvdevInputWaitOutcome::Timeout => {}
+        }
+        while let Some(event) = adapter.next_input_event()? {
+            let mut context = LiveControllerInputContext {
+                program,
+                adapter,
+                motion_runtime: &mut motion_runtime,
+                scheduler: &mut scheduler,
+                capabilities,
+                stats,
+                last_repeat_ticks: &mut last_repeat_ticks,
+                motion_time_base,
+            };
+            handle_live_controller_observed_input(event, &mut context)?;
+        }
+        drain_controller_callbacks(program, &mut scheduler, capabilities, adapter, stats)?;
+        let now = Instant::now();
+        for (trigger, interval_ms) in &mut repeat_ticks {
+            if !motion_runtime.loop_is_active(trigger) {
+                last_repeat_ticks.remove(trigger);
+                continue;
+            }
+            let due = last_repeat_ticks.get(trigger).is_none_or(|last_tick| {
+                now.duration_since(*last_tick).as_millis() >= *interval_ms as u128
+            });
+            if due {
+                if let Some(registration) =
+                    matching_controller_motion_registration(program, trigger)?
+                {
+                    if let Some(loop_policy) = &registration.loop_policy {
+                        let _ = schedule_controller_callback_name(
+                            registration,
+                            &loop_policy.repeat_callback,
+                            &*adapter,
+                            &mut scheduler,
+                            capabilities,
+                            stats,
+                            now,
+                        )?;
+                        stats.record_motion_repeat_tick();
+                    }
+                }
+                last_repeat_ticks.insert(trigger.clone(), now);
+            }
+        }
+        drain_controller_callbacks(program, &mut scheduler, capabilities, adapter, stats)?;
+    }
+}
+
+fn controller_motion_definitions(
+    program: &ControllerProgram,
+) -> Result<Vec<MotionDefinition>, DiagnosableError> {
+    program
+        .registrations()
+        .registrations()
+        .iter()
+        .filter(|registration| registration.kind == ControllerRegistrationKind::Motion)
+        .map(|registration| {
+            MotionDefinition::with_requires_held(
+                registration.requires_held.clone(),
+                controller_motion_trigger(registration)?,
+                registration.mode,
+                if registration.loop_policy.is_none() {
+                    Some(controller_dummy_macro()?)
+                } else {
+                    None
+                },
+                registration
+                    .loop_policy
+                    .as_ref()
+                    .map(controller_loop_definition)
+                    .transpose()?,
+                signal_auras_core::DEFAULT_MOTION_DURATION.as_millis() as u64,
+                0,
+            )
+        })
+        .collect()
+}
+
+fn controller_dummy_macro() -> Result<MacroDefinition, DiagnosableError> {
+    MacroDefinition::new(vec![MacroAction::delay(1)?])
+}
+
+fn controller_loop_definition(
+    loop_policy: &signal_auras_core::ControllerLoopPolicy,
+) -> Result<LoopDefinition, DiagnosableError> {
+    Ok(LoopDefinition::new(
+        loop_policy.while_held.clone(),
+        loop_policy
+            .before_callback
+            .as_ref()
+            .map(|_| controller_dummy_macro())
+            .transpose()?,
+        LoopBody::Repeat(LoopRepeat::new(
+            LoopInterval::new(loop_policy.repeat_every_ms)?,
+            controller_dummy_macro()?,
+        )),
+        loop_policy
+            .after_callback
+            .as_ref()
+            .map(|_| controller_dummy_macro())
+            .transpose()?,
+    ))
+}
+
+fn controller_repeat_ticks(
+    program: &ControllerProgram,
+) -> Result<Vec<(MotionTrigger, u64)>, DiagnosableError> {
+    program
+        .registrations()
+        .registrations()
+        .iter()
+        .filter(|registration| registration.kind == ControllerRegistrationKind::Motion)
+        .filter_map(|registration| {
+            registration.loop_policy.as_ref().map(|loop_policy| {
+                Ok((
+                    controller_motion_trigger(registration)?,
+                    loop_policy.repeat_every_ms,
+                ))
+            })
+        })
+        .collect()
+}
+
+fn controller_motion_trigger(
+    registration: &ControllerRegistration,
+) -> Result<MotionTrigger, DiagnosableError> {
+    MotionTrigger::parse(registration.trigger.split_whitespace())
+}
+
+fn controller_press_token(
+    registration: &ControllerRegistration,
+) -> Result<MotionToken, DiagnosableError> {
+    MotionToken::parse(&registration.trigger)
+}
+
+struct LiveControllerInputContext<'a> {
+    program: &'a ControllerProgram,
+    adapter: &'a mut RealWaylandAdapter,
+    motion_runtime: &'a mut MotionRuntime,
+    scheduler: &'a mut LuaCallbackScheduler,
+    capabilities: &'a CapabilityReport,
+    stats: &'a mut RuntimeStats,
+    last_repeat_ticks: &'a mut BTreeMap<MotionTrigger, Instant>,
+    motion_time_base: Instant,
+}
+
+fn handle_live_controller_observed_input(
+    observed: signal_auras_wayland::evdev::ObservedInputEvent,
+    context: &mut LiveControllerInputContext<'_>,
+) -> Result<(), DiagnosableError> {
+    let Some(event) = observed.event.clone() else {
+        if observed.grabbed {
+            context.adapter.passthrough_raw_input(&observed.raw)?;
+        }
+        return Ok(());
+    };
+    if event.token == MotionToken::Leader && event.state == MotionInputState::Pressed {
+        context.adapter.arm_input_grab()?;
+    }
+    let (_, _) = record_motion_latency_metrics(
+        context.stats,
+        observed.observed_at,
+        observed.raw.kernel_timestamp,
+    );
+    let event_time = motion_runtime_event_time(
+        observed.raw.kernel_timestamp,
+        observed.observed_at,
+        context.motion_time_base,
+    );
+    let mut consumed = false;
+    let motion_events = context
+        .motion_runtime
+        .handle_input_at(event.clone(), event_time);
+    if event.state == MotionInputState::Pressed {
+        if let Some(registration) =
+            matching_controller_press_registration(context.program, &event, context.motion_runtime)?
+        {
+            consumed |= schedule_controller_callback(
+                registration,
+                &*context.adapter,
+                context.scheduler,
+                context.capabilities,
+                context.stats,
+                observed.observed_at,
+            )?;
+        }
+    }
+    for event in motion_events {
+        match event {
+            MotionRuntimeEvent::Triggered {
+                trigger,
+                starts_loop,
+            } => {
+                if let Some(registration) =
+                    matching_controller_motion_registration(context.program, &trigger)?
+                {
+                    if starts_loop {
+                        if let Some(loop_policy) = &registration.loop_policy {
+                            if let Some(before_callback) = &loop_policy.before_callback {
+                                consumed |= schedule_controller_callback_name(
+                                    registration,
+                                    before_callback,
+                                    &*context.adapter,
+                                    context.scheduler,
+                                    context.capabilities,
+                                    context.stats,
+                                    observed.observed_at,
+                                )?;
+                            }
+                            context
+                                .last_repeat_ticks
+                                .insert(trigger.clone(), Instant::now());
+                        }
+                    } else if registration.loop_policy.is_none() {
+                        consumed |= schedule_controller_callback(
+                            registration,
+                            &*context.adapter,
+                            context.scheduler,
+                            context.capabilities,
+                            context.stats,
+                            observed.observed_at,
+                        )?;
+                    }
+                }
+            }
+            MotionRuntimeEvent::LoopCancelled { trigger } => {
+                context.stats.record_motion_repeat_cancel();
+                context.last_repeat_ticks.remove(&trigger);
+                if let Some(registration) =
+                    matching_controller_motion_registration(context.program, &trigger)?
+                {
+                    if let Some(after_callback) = registration
+                        .loop_policy
+                        .as_ref()
+                        .and_then(|loop_policy| loop_policy.after_callback.as_ref())
+                    {
+                        consumed |= schedule_controller_callback_name(
+                            registration,
+                            after_callback,
+                            &*context.adapter,
+                            context.scheduler,
+                            context.capabilities,
+                            context.stats,
+                            observed.observed_at,
+                        )?;
+                    }
+                }
+            }
+            MotionRuntimeEvent::MotionDiscarded { .. } => context.stats.record_motion_discard(),
+        }
+    }
+    if observed.grabbed && !consumed {
+        context.adapter.passthrough_raw_input(&observed.raw)?;
+    }
+    if event.token == MotionToken::Leader && event.state == MotionInputState::Released {
+        context.adapter.release_input_grab()?;
+    }
+    Ok(())
+}
+
+fn matching_controller_press_registration<'a>(
+    program: &'a ControllerProgram,
+    event: &MotionInputEvent,
+    motion_runtime: &MotionRuntime,
+) -> Result<Option<&'a ControllerRegistration>, DiagnosableError> {
+    for registration in program
+        .registrations()
+        .registrations()
+        .iter()
+        .filter(|registration| registration.kind == ControllerRegistrationKind::Press)
+    {
+        if controller_press_token(registration)? == event.token
+            && motion_runtime.held_satisfies(&registration.requires_held)
+        {
+            return Ok(Some(registration));
+        }
+    }
+    Ok(None)
+}
+
+fn matching_controller_motion_registration<'a>(
+    program: &'a ControllerProgram,
+    trigger: &MotionTrigger,
+) -> Result<Option<&'a ControllerRegistration>, DiagnosableError> {
+    for registration in program
+        .registrations()
+        .registrations()
+        .iter()
+        .filter(|registration| registration.kind == ControllerRegistrationKind::Motion)
+    {
+        if controller_motion_trigger(registration)? == *trigger {
+            return Ok(Some(registration));
+        }
+    }
+    Ok(None)
+}
+
+fn drain_live_controller_shortcut_callbacks(
+    program: &ControllerProgram,
+    adapter: &mut RealWaylandAdapter,
+    scheduler: &mut LuaCallbackScheduler,
+    capabilities: &CapabilityReport,
+    stats: &mut RuntimeStats,
+    log: RuntimeLog,
+) -> Result<(), DiagnosableError> {
+    let dropped = adapter.take_callback_dropped_count();
+    if dropped > 0 {
+        stats.record_callback_dropped(dropped);
+        log.warn(format!(
+            "event=controller_callback_burst_limited disposition=dropped count={dropped}"
+        ));
+    }
+
+    while let Some(event) = adapter.next_shortcut_event() {
+        stats.record_callback_received();
+        let dispatch_latency_ms = event.received_at.elapsed().as_millis() as u64;
+        stats.record_callback_dispatched(dispatch_latency_ms);
+        log.debug(format!(
+            "event=controller_callback_received hotkey={} dispatch_latency_ms={dispatch_latency_ms}",
+            event.hotkey.as_str()
+        ));
+        if let Some(registration) = controller_registration_for_hotkey(program, &event.hotkey) {
+            let _ = schedule_controller_callback(
+                registration,
+                &*adapter,
+                scheduler,
+                capabilities,
+                stats,
+                event.received_at,
+            )?;
+        } else {
+            stats.record_shortcut_ignored();
+            log.debug(format!(
+                "event=controller_callback_ignored hotkey={} reason=unregistered",
+                event.hotkey.as_str()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn drain_live_shortcut_callbacks(
@@ -2929,7 +3870,7 @@ mod tests {
             "run".to_string(),
             "--verbose".to_string(),
             "--color=always".to_string(),
-            "examples/poe2-hideout.lua".to_string(),
+            "examples/poe2.lua".to_string(),
         ];
         let options = parse_run_args(&args).unwrap();
 
@@ -2943,12 +3884,12 @@ mod tests {
         let args = vec![
             "doctor".to_string(),
             "input".to_string(),
-            "examples/poe2-hideout.lua".to_string(),
+            "examples/poe2-legacy.lua".to_string(),
         ];
         let options = parse_doctor_args(&args).unwrap();
 
         assert_eq!(options.command, DoctorCommand::Input);
-        assert_eq!(options.lua_file, PathBuf::from("examples/poe2-hideout.lua"));
+        assert_eq!(options.lua_file, PathBuf::from("examples/poe2-legacy.lua"));
     }
 
     #[test]
@@ -2956,12 +3897,12 @@ mod tests {
         let args = vec![
             "doctor".to_string(),
             "keys".to_string(),
-            "examples/poe2-hideout.lua".to_string(),
+            "examples/poe2-legacy.lua".to_string(),
         ];
         let options = parse_doctor_args(&args).unwrap();
 
         assert_eq!(options.command, DoctorCommand::Keys);
-        assert_eq!(options.lua_file, PathBuf::from("examples/poe2-hideout.lua"));
+        assert_eq!(options.lua_file, PathBuf::from("examples/poe2-legacy.lua"));
     }
 
     #[test]
