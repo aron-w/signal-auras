@@ -1,4 +1,8 @@
-use crate::prompt::{stdin_is_interactive, ScopePrompt, TerminalPrompt};
+pub use crate::logging::{ColorMode, RuntimeLog, RuntimeLogGuard};
+use crate::{
+    logging::{init_runtime_logging, RuntimeLogConfig, RuntimeLogFormat, RuntimeLogLevel},
+    prompt::{stdin_is_interactive, ScopePrompt, TerminalPrompt},
+};
 use signal_auras_core::{
     execute_plan_with_inter_action_delay, queue_controller_callback_outputs, ActiveProcessProvider,
     BindingMode, BindingTrigger, CallbackDisposition, CapabilityKind, CapabilityReport,
@@ -23,10 +27,9 @@ use signal_auras_wayland::{
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
-    io::{self, IsTerminal},
+    io,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
-    sync::Once,
     thread,
     time::{Duration, Instant},
 };
@@ -166,7 +169,7 @@ pub fn run_cli(
         ));
     }
     let options = parse_run_args(&args)?;
-    init_runtime_logging(options.log);
+    let _log_guard = init_runtime_logging(&options.log);
     let mut adapter = RealWaylandAdapter::new();
     if lua_file_looks_like_controller(&options.lua_file)? {
         start_live_real_controller_runner_with_options(&options.lua_file, &mut adapter, options.log)
@@ -195,143 +198,33 @@ pub enum DoctorCommand {
     Keys,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RuntimeLog {
-    pub verbose: bool,
-    color_mode: ColorMode,
-    color: bool,
-    started_at: Instant,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ColorMode {
-    Auto,
-    Always,
-    Never,
-}
-
-impl Default for RuntimeLog {
-    fn default() -> Self {
-        Self::new(false)
-    }
-}
-
-impl RuntimeLog {
-    pub fn new(verbose: bool) -> Self {
-        Self::new_with_color_mode(verbose, ColorMode::Auto)
-    }
-
-    pub fn new_with_color_mode(verbose: bool, color_mode: ColorMode) -> Self {
-        Self::with_color_enabled(verbose, color_mode, color_enabled(color_mode))
-    }
-
-    fn with_color_enabled(verbose: bool, color_mode: ColorMode, color: bool) -> Self {
-        Self {
-            verbose,
-            color_mode,
-            color,
-            started_at: Instant::now(),
-        }
-    }
-
-    fn debug(self, message: impl AsRef<str>) {
-        if self.verbose {
-            self.emit(tracing::Level::DEBUG, message.as_ref());
-        }
-    }
-
-    fn info(self, message: impl AsRef<str>) {
-        self.emit(tracing::Level::INFO, message.as_ref());
-    }
-
-    fn warn(self, message: impl AsRef<str>) {
-        self.emit(tracing::Level::WARN, message.as_ref());
-    }
-
-    fn elapsed_ms(self) -> u128 {
-        self.started_at.elapsed().as_millis()
-    }
-
-    fn emit(self, level: tracing::Level, message: &str) {
-        let elapsed_ms = self.elapsed_ms();
-        let event = field_value(message, "event").unwrap_or("runtime");
-        let details = without_field(message, "event");
-        match level {
-            tracing::Level::DEBUG => {
-                tracing::debug!(runtime_elapsed_ms = elapsed_ms, event, details)
-            }
-            tracing::Level::WARN => {
-                tracing::warn!(runtime_elapsed_ms = elapsed_ms, event, details)
-            }
-            tracing::Level::ERROR => {
-                tracing::error!(runtime_elapsed_ms = elapsed_ms, event, details)
-            }
-            tracing::Level::INFO => {
-                tracing::info!(runtime_elapsed_ms = elapsed_ms, event, details)
-            }
-            tracing::Level::TRACE => {
-                tracing::trace!(runtime_elapsed_ms = elapsed_ms, event, details)
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn render_plain(self, level: &'static str, message: &str) -> String {
-        let elapsed = self.started_at.elapsed();
-        let timestamp = format!("{:>5}.{:03}s", elapsed.as_secs(), elapsed.subsec_millis());
-        let event = field_value(message, "event").unwrap_or("runtime");
-        let rest = without_field(message, "event");
-        format!("{timestamp}  {level:<5}  {event:<30}  {rest}")
-    }
-}
-
-fn color_enabled(mode: ColorMode) -> bool {
-    match mode {
-        ColorMode::Auto => {
-            std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
-        }
-        ColorMode::Always => true,
-        ColorMode::Never => false,
-    }
-}
-
-static TRACING_INIT: Once = Once::new();
-
-fn init_runtime_logging(log: RuntimeLog) {
-    TRACING_INIT.call_once(|| {
-        let filter = if log.verbose {
-            "signal_auras_cli=debug,signal_auras_wayland=debug"
-        } else {
-            "signal_auras_cli=info,signal_auras_wayland=warn"
-        };
-        let subscriber = tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .with_ansi(log.color)
-            .with_target(false)
-            .with_level(false)
-            .with_writer(std::io::stderr)
-            .finish();
-        let _ = tracing::subscriber::set_global_default(subscriber);
-    });
-}
-
 pub fn parse_run_args(args: &[String]) -> Result<RunOptions, DiagnosableError> {
     if args.first().map(String::as_str) != Some("run") {
         return Err(DiagnosableError::new(
             ErrorPhase::ArgumentValidation,
-            "usage: signal-auras run [--verbose|-v] [--color=auto|always|never] <lua-file>",
+            run_usage(),
         ));
     }
     let mut verbose = false;
-    let mut color_mode = ColorMode::Auto;
+    let mut config = RuntimeLogConfig::new(false);
     let mut paths = Vec::new();
     for arg in &args[1..] {
         match arg.as_str() {
             "--verbose" | "-v" => verbose = true,
-            "--color=auto" => color_mode = ColorMode::Auto,
-            "--color=always" => color_mode = ColorMode::Always,
-            "--color=never" => color_mode = ColorMode::Never,
-            "--no-color" => color_mode = ColorMode::Never,
+            "--color=auto" => config.color_mode = ColorMode::Auto,
+            "--color=always" => config.color_mode = ColorMode::Always,
+            "--color=never" => config.color_mode = ColorMode::Never,
+            "--no-color" => config.color_mode = ColorMode::Never,
+            value if let Some(level) = value.strip_prefix("--log-level=") => {
+                config.level = Some(level.parse::<RuntimeLogLevel>().map_err(|error| {
+                    DiagnosableError::new(ErrorPhase::ArgumentValidation, error.to_string())
+                })?);
+            }
+            value if let Some(format) = value.strip_prefix("--log-format=") => {
+                config.format = format.parse::<RuntimeLogFormat>().map_err(|error| {
+                    DiagnosableError::new(ErrorPhase::ArgumentValidation, error.to_string())
+                })?;
+            }
             value if value.starts_with('-') => {
                 return Err(DiagnosableError::new(
                     ErrorPhase::ArgumentValidation,
@@ -344,13 +237,18 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions, DiagnosableError> {
     if paths.len() != 1 {
         return Err(DiagnosableError::new(
             ErrorPhase::ArgumentValidation,
-            "usage: signal-auras run [--verbose|-v] [--color=auto|always|never] <lua-file>",
+            run_usage(),
         ));
     }
+    config.verbose = verbose;
     Ok(RunOptions {
         lua_file: paths.remove(0),
-        log: RuntimeLog::new_with_color_mode(verbose, color_mode),
+        log: RuntimeLog::from_config(config),
     })
+}
+
+fn run_usage() -> &'static str {
+    "usage: signal-auras run [--verbose|-v] [--log-level=off|error|warn|info|debug|trace] [--log-format=auto|pretty|compact] [--color=auto|always|never] [--no-color] <lua-file>"
 }
 
 pub fn parse_doctor_args(args: &[String]) -> Result<DoctorOptions, DiagnosableError> {
@@ -786,22 +684,6 @@ fn shell_token(value: &str) -> String {
     value.replace(' ', "_")
 }
 
-fn field_value<'a>(message: &'a str, field: &str) -> Option<&'a str> {
-    let prefix = format!("{field}=");
-    message
-        .split_whitespace()
-        .find_map(|part| part.strip_prefix(&prefix))
-}
-
-fn without_field(message: &str, field: &str) -> String {
-    let prefix = format!("{field}=");
-    message
-        .split_whitespace()
-        .filter(|part| !part.starts_with(&prefix))
-        .collect::<Vec<_>>()
-        .join("  ")
-}
-
 pub fn start_runner<R, P, E>(
     lua_file: &Path,
     prompt: &mut impl ScopePrompt,
@@ -839,22 +721,23 @@ where
     E: MacroExecutor,
     L: RunnerLifecycle,
 {
-    println!("startup script_path={}", lua_file.display());
+    let log = RuntimeLog::default();
+    log.info(format!("event=startup script_path={}", lua_file.display()));
     let config = load_lua_file(lua_file)?;
-    println!("script_validation result=ok");
+    log.info("event=script_validation result=ok");
 
     let scope = match config.scope.clone() {
         Some(script_scope) => ScopeSelection::from_script(script_scope),
         None => match prompt.resolve_missing_scope()?.into_scope()? {
             Some(scope) => scope,
             None => {
-                println!("scope_prompt result=cancelled");
+                log.info("event=scope_prompt result=cancelled");
                 return Ok(RuntimeStats::new());
             }
         },
     };
-    println!("effective_scope {}", scope.describe());
-    println!("capability_probe result=mock-adapter");
+    log.info(format!("event=effective_scope {}", scope.describe()));
+    log.info("event=capability_probe result=mock-adapter");
 
     let mut stats = RuntimeStats::new();
     let bindings = config.bindings_for_scope(scope.clone());
@@ -865,12 +748,12 @@ where
         match registrar.register(binding.clone()) {
             Ok(id) => {
                 stats.record_registration_success();
-                println!(
-                    "binding_registered trigger={} mode={} id={}",
+                log.info(format!(
+                    "event=registration trigger={} mode={} id={}",
                     binding.trigger_label(),
                     binding.mode.as_str(),
                     id.as_str()
-                );
+                ));
             }
             Err(error) => {
                 stats.record_registration_failure();
@@ -916,16 +799,20 @@ where
     E: ControllerHost,
     L: RunnerLifecycle,
 {
-    println!("startup controller_script_path={}", lua_file.display());
+    let log = RuntimeLog::default();
+    log.info(format!(
+        "event=startup controller_script_path={}",
+        lua_file.display()
+    ));
     let program = load_lua_controller_program_file(lua_file)?;
     let runtime = load_imperative_controller_runtime(lua_file)?;
-    println!(
-        "controller_registration result=ok registrations={} callbacks={}",
+    log.info(format!(
+        "event=registration result=ok registrations={} callbacks={}",
         program.registrations().registrations().len(),
         program.callbacks().count()
-    );
+    ));
     program.validate_capabilities(&capabilities)?;
-    println!("capability_probe result=ok");
+    log.info("event=capability_probe result=ok");
 
     let mut stats = RuntimeStats::new();
     let hotkey_bindings = controller_hotkey_bindings(&program)?;
@@ -934,12 +821,12 @@ where
         match registrar.register(binding.clone()) {
             Ok(id) => {
                 stats.record_registration_success();
-                println!(
-                    "controller_binding_registered trigger={} mode={} id={}",
+                log.info(format!(
+                    "event=registration controller=true trigger={} mode={} id={}",
                     binding.trigger_label(),
                     binding.mode.as_str(),
                     id.as_str()
-                );
+                ));
             }
             Err(error) => {
                 stats.record_registration_failure();
@@ -980,50 +867,53 @@ pub fn start_real_runner_with_lifecycle<L>(
 where
     L: RunnerLifecycle,
 {
-    println!("startup script_path={}", lua_file.display());
+    let log = RuntimeLog::default();
+    log.info(format!("event=startup script_path={}", lua_file.display()));
     let config = load_lua_file(lua_file)?;
-    println!("script_validation result=ok");
+    log.info("event=script_validation result=ok");
 
     let scope = match config.scope.clone() {
         Some(script_scope) => ScopeSelection::from_script(script_scope),
         None => match prompt.resolve_missing_scope()?.into_scope()? {
             Some(scope) => scope,
             None => {
-                println!("scope_prompt result=cancelled");
+                log.info("event=scope_prompt result=cancelled");
                 return Ok(RuntimeStats::new());
             }
         },
     };
-    println!("effective_scope {}", scope.describe());
+    log.info(format!("event=effective_scope {}", scope.describe()));
 
     let mut stats = RuntimeStats::new();
     let bindings = config.bindings_for_scope(scope.clone());
     let motions = config.motions_for_scope(scope.clone());
     let presses = config.presses_for_scope(scope.clone());
     let required = CapabilitySet::for_configuration_scope(&config, &scope);
-    println!("provider selected=kde-plasma-wayland");
+    log.info("event=startup provider=kde-plasma-wayland");
     adapter.configure_input_provider(config.input_provider.as_ref(), config.leader.as_ref())?;
     let report = adapter.probe_capabilities(&required);
     if let Some(error) = report.first_blocking_error(&required) {
         stats.record_capability_probe_failure();
         stats.record_permission_failure();
-        println!("capability_probe result=failed error={error}");
+        log.warn(format!(
+            "event=capability_probe result=failed hint=check_permissions error={error}"
+        ));
         return Err(error);
     }
     stats.record_capability_probe_success();
-    println!("capability_probe result=ok");
+    log.info("event=capability_probe result=ok");
 
     for binding in &bindings {
         stats.record_registration_attempt();
         match adapter.register(binding.clone()) {
             Ok(id) => {
                 stats.record_registration_success();
-                println!(
-                    "binding_registered trigger={} mode={} id={}",
+                log.info(format!(
+                    "event=registration trigger={} mode={} id={}",
                     binding.trigger_label(),
                     binding.mode.as_str(),
                     id.as_str()
-                );
+                ));
             }
             Err(error) => {
                 stats.record_registration_failure();
@@ -1065,27 +955,33 @@ pub fn start_real_controller_runner_with_lifecycle<L>(
 where
     L: RunnerLifecycle,
 {
-    println!("startup controller_script_path={}", lua_file.display());
+    let log = RuntimeLog::default();
+    log.info(format!(
+        "event=startup controller_script_path={}",
+        lua_file.display()
+    ));
     let program = load_lua_controller_program_file(lua_file)?;
     let runtime = load_imperative_controller_runtime(lua_file)?;
-    println!(
-        "controller_registration result=ok registrations={} callbacks={}",
+    log.info(format!(
+        "event=registration result=ok registrations={} callbacks={}",
         program.registrations().registrations().len(),
         program.callbacks().count()
-    );
+    ));
     let required = program.required_capabilities().clone();
-    println!("provider selected=kde-plasma-wayland");
+    log.info("event=startup provider=kde-plasma-wayland");
     adapter.configure_input_provider(program.input_provider.as_ref(), program.leader.as_ref())?;
     let report = adapter.probe_capabilities(&required);
     let mut stats = RuntimeStats::new();
     if let Some(error) = report.first_blocking_error(&required) {
         stats.record_capability_probe_failure();
         stats.record_permission_failure();
-        println!("capability_probe result=failed error={error}");
+        log.warn(format!(
+            "event=capability_probe result=failed hint=check_permissions error={error}"
+        ));
         return Err(error);
     }
     stats.record_capability_probe_success();
-    println!("capability_probe result=ok");
+    log.info("event=capability_probe result=ok");
     if required.contains(CapabilityKind::ActiveProcessMetadata) {
         adapter.ensure_active_process_provider()?;
         stats.record_kde_bridge_setup();
@@ -1097,12 +993,12 @@ where
         match adapter.register(binding.clone()) {
             Ok(id) => {
                 stats.record_registration_success();
-                println!(
-                    "controller_binding_registered trigger={} mode={} id={}",
+                log.info(format!(
+                    "event=registration controller=true trigger={} mode={} id={}",
                     binding.trigger_label(),
                     binding.mode.as_str(),
                     id.as_str()
-                );
+                ));
             }
             Err(error) => {
                 stats.record_registration_failure();
@@ -1150,18 +1046,21 @@ pub fn start_live_real_controller_runner_with_options(
     adapter: &mut RealWaylandAdapter,
     log: RuntimeLog,
 ) -> Result<RuntimeStats, DiagnosableError> {
-    init_runtime_logging(log);
-    println!("startup controller_script_path={}", lua_file.display());
+    let log_guard = init_runtime_logging(&log);
+    log.info(format!(
+        "event=startup controller_script_path={}",
+        lua_file.display()
+    ));
     let program = load_lua_controller_program_file(lua_file)?;
     let runtime = load_imperative_controller_runtime(lua_file)?;
-    println!(
-        "controller_registration result=ok registrations={} callbacks={}",
+    log.info(format!(
+        "event=registration result=ok registrations={} callbacks={}",
         program.registrations().registrations().len(),
         program.callbacks().count()
-    );
+    ));
     let required = program.required_capabilities().clone();
     let signal_fd = RuntimeSignalFd::shutdown()?;
-    println!("provider selected=kde-plasma-wayland");
+    log.info("event=startup provider=kde-plasma-wayland");
     adapter.configure_input_provider(program.input_provider.as_ref(), program.leader.as_ref())?;
     if let Some(summary) = adapter.input_provider_summary() {
         log.debug(format!("event=input_provider_configured {summary}"));
@@ -1181,11 +1080,14 @@ pub fn start_live_real_controller_runner_with_options(
     if let Some(error) = report.first_blocking_error(&required) {
         stats.record_capability_probe_failure();
         stats.record_permission_failure();
-        println!("capability_probe result=failed error={error}");
+        log.warn(format!(
+            "event=capability_probe result=failed hint=check_permissions error={error}"
+        ));
+        log_guard.log_summary(&log);
         return Err(error);
     }
     stats.record_capability_probe_success();
-    println!("capability_probe result=ok");
+    log.info("event=capability_probe result=ok");
     if required.contains(CapabilityKind::ActiveProcessMetadata) {
         log.debug("event=active_process_provider_start provider=kwin-script");
         adapter.ensure_active_process_provider()?;
@@ -1199,12 +1101,12 @@ pub fn start_live_real_controller_runner_with_options(
         match adapter.register(binding.clone()) {
             Ok(id) => {
                 stats.record_registration_success();
-                println!(
-                    "controller_binding_registered trigger={} mode={} id={}",
+                log.info(format!(
+                    "event=registration controller=true trigger={} mode={} id={}",
                     binding.trigger_label(),
                     binding.mode.as_str(),
                     id.as_str()
-                );
+                ));
             }
             Err(error) => {
                 stats.record_registration_failure();
@@ -1228,6 +1130,7 @@ pub fn start_live_real_controller_runner_with_options(
             println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
             adapter.cancel_pending()?;
             cleanup_after_error(adapter, ErrorPhase::Shutdown)?;
+            log_guard.log_summary(&log);
             return Err(error);
         }
     };
@@ -1235,6 +1138,8 @@ pub fn start_live_real_controller_runner_with_options(
     println!("{}", stats.render_summary(shutdown_reason));
     adapter.cancel_pending()?;
     adapter.unregister_all()?;
+    log.info(format!("event=shutdown reason={shutdown_reason:?}"));
+    log_guard.log_summary(&log);
     Ok(stats)
 }
 
@@ -1244,22 +1149,24 @@ pub fn start_live_real_runner_with_options(
     adapter: &mut RealWaylandAdapter,
     log: RuntimeLog,
 ) -> Result<RuntimeStats, DiagnosableError> {
-    init_runtime_logging(log);
-    println!("startup script_path={}", lua_file.display());
+    let log_guard = init_runtime_logging(&log);
+    log.info(format!("event=startup script_path={}", lua_file.display()));
     let config = load_lua_file(lua_file)?;
-    println!("script_validation result=ok");
-    log.debug(format!(
-        "event=config_loaded bindings={} motions={} presses={} input_provider={} leader={}",
-        config.bindings().len(),
-        config.motions().len(),
-        config.presses().len(),
-        config.input_provider.is_some(),
-        config
-            .leader
-            .as_ref()
-            .map(signal_auras_core::MotionToken::describe)
-            .unwrap_or_else(|| "none".to_string())
-    ));
+    log.info("event=script_validation result=ok");
+    log.debug_lazy(|| {
+        format!(
+            "event=config_loaded bindings={} motions={} presses={} input_provider={} leader={}",
+            config.bindings().len(),
+            config.motions().len(),
+            config.presses().len(),
+            config.input_provider.is_some(),
+            config
+                .leader
+                .as_ref()
+                .map(signal_auras_core::MotionToken::describe)
+                .unwrap_or_else(|| "none".to_string())
+        )
+    });
     warn_for_observe_mode_mouse_button_repeats(
         log,
         config.input_provider.as_ref(),
@@ -1271,12 +1178,13 @@ pub fn start_live_real_runner_with_options(
         None => match prompt.resolve_missing_scope()?.into_scope()? {
             Some(scope) => scope,
             None => {
-                println!("scope_prompt result=cancelled");
+                log.info("event=scope_prompt result=cancelled");
+                log_guard.log_summary(&log);
                 return Ok(RuntimeStats::new());
             }
         },
     };
-    println!("effective_scope {}", scope.describe());
+    log.info(format!("event=effective_scope {}", scope.describe()));
 
     let mut stats = RuntimeStats::new();
     let bindings = config.bindings_for_scope(scope.clone());
@@ -1284,7 +1192,7 @@ pub fn start_live_real_runner_with_options(
     let presses = config.presses_for_scope(scope.clone());
     let required = CapabilitySet::for_configuration_scope(&config, &scope);
     let signal_fd = RuntimeSignalFd::shutdown()?;
-    println!("provider selected=kde-plasma-wayland");
+    log.info("event=startup provider=kde-plasma-wayland");
     adapter.configure_input_provider(config.input_provider.as_ref(), config.leader.as_ref())?;
     if let Some(summary) = adapter.input_provider_summary() {
         log.debug(format!("event=input_provider_configured {summary}"));
@@ -1303,11 +1211,14 @@ pub fn start_live_real_runner_with_options(
     if let Some(error) = report.first_blocking_error(&required) {
         stats.record_capability_probe_failure();
         stats.record_permission_failure();
-        println!("capability_probe result=failed error={error}");
+        log.warn(format!(
+            "event=capability_probe result=failed hint=check_permissions error={error}"
+        ));
+        log_guard.log_summary(&log);
         return Err(error);
     }
     stats.record_capability_probe_success();
-    println!("capability_probe result=ok");
+    log.info("event=capability_probe result=ok");
     if required.contains(CapabilityKind::ActiveProcessMetadata) {
         log.debug("event=active_process_provider_start provider=kwin-script");
         adapter.ensure_active_process_provider()?;
@@ -1320,12 +1231,12 @@ pub fn start_live_real_runner_with_options(
         match adapter.register(binding.clone()) {
             Ok(id) => {
                 stats.record_registration_success();
-                println!(
-                    "binding_registered trigger={} mode={} id={}",
+                log.info(format!(
+                    "event=registration trigger={} mode={} id={}",
                     binding.trigger_label(),
                     binding.mode.as_str(),
                     id.as_str()
-                );
+                ));
             }
             Err(error) => {
                 stats.record_registration_failure();
@@ -1343,6 +1254,7 @@ pub fn start_live_real_runner_with_options(
             println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
             adapter.cancel_pending()?;
             cleanup_after_error(adapter, ErrorPhase::Shutdown)?;
+            log_guard.log_summary(&log);
             return Err(error);
         }
     };
@@ -1350,6 +1262,8 @@ pub fn start_live_real_runner_with_options(
     println!("{}", stats.render_summary(shutdown_reason));
     adapter.cancel_pending()?;
     adapter.unregister_all()?;
+    log.info(format!("event=shutdown reason={shutdown_reason:?}"));
+    log_guard.log_summary(&log);
     Ok(stats)
 }
 
@@ -1795,11 +1709,12 @@ where
     if !state.is_active() {
         if let Some(diagnostic) = state.diagnostic {
             record_scope_denial(stats, &diagnostic);
-            println!(
-                "denied_controller_callback trigger={} reason={} {}",
-                registration.trigger,
-                state.reason.as_str(),
-                diagnostic.render_fields()
+            tracing::info!(
+                event = "callback_received",
+                trigger = %registration.trigger,
+                reason = state.reason.as_str(),
+                details = %diagnostic.render_fields(),
+                disposition = "denied"
             );
         }
         return Ok(false);
@@ -1829,12 +1744,12 @@ where
         | CallbackDisposition::Failed
         | CallbackDisposition::Cancelled => {}
     }
-    println!(
-        "controller_callback_scheduled trigger={} callback={} disposition={:?} queue_depth={}",
-        registration.trigger,
-        callback_name,
-        result.disposition,
-        scheduler.pending_len()
+    tracing::debug!(
+        event = "callback_received",
+        trigger = %registration.trigger,
+        callback = callback_name,
+        disposition = ?result.disposition,
+        queue_depth = scheduler.pending_len()
     );
     stats.record_output_queue_depth(scheduler.pending_len() as u64);
     Ok(result.disposition == CallbackDisposition::Accepted
@@ -1858,7 +1773,7 @@ where
             execute_controller_task(program, runtime, &task, capabilities, executor, stats);
         let disposition = scheduler.finish(task, started_at.elapsed());
         if disposition == CallbackDisposition::Slow {
-            println!("controller_callback_slow disposition=slow");
+            tracing::warn!(event = "callback_received", disposition = "slow");
         }
         result?;
     }
@@ -3193,12 +3108,12 @@ fn schedule_live_binding(
     if !state.is_active() {
         if let Some(diagnostic) = state.diagnostic {
             record_scope_denial(stats, &diagnostic);
-            println!(
-                "denied_trigger hotkey={} reason={} {}",
+            log.info(format!(
+                "event=scoped_focus_transition trigger={} reason={} {} disposition=denied",
                 trigger_label,
                 state.reason.as_str(),
                 diagnostic.render_fields()
-            );
+            ));
         }
     } else {
         stats.record_trigger(&trigger_label);
@@ -3259,10 +3174,10 @@ fn schedule_live_motion_runtime_event(
                 + macro_queue.cancel_trigger(&once_label);
             stats.record_cancelled_macro_runs(cancelled as u64);
             schedule_live_motion_loop_after(&trigger, motions, macro_queue, stats);
-            println!(
-                "motion_loop_cancelled trigger={} queued_macros_cancelled={cancelled}",
-                trigger.describe()
-            );
+            log.debug(format!(
+                "event=motion_input trigger={} disposition=cancelled queued_macros_cancelled={cancelled}",
+                trigger_label_for_log(&trigger)
+            ));
             Ok(true)
         }
         MotionRuntimeEvent::MotionDiscarded { .. } => {
@@ -3312,12 +3227,12 @@ fn schedule_live_press(
     if !state.is_active() {
         if let Some(diagnostic) = state.diagnostic {
             record_scope_denial(stats, &diagnostic);
-            println!(
-                "denied_press trigger={} reason={} {}",
+            log.info(format!(
+                "event=scoped_focus_transition trigger={} reason={} {} disposition=denied",
                 trigger_label,
                 state.reason.as_str(),
                 diagnostic.render_fields()
-            );
+            ));
         }
         return Ok(false);
     }
@@ -3391,12 +3306,12 @@ fn schedule_live_motion_trigger(
     if !state.is_active() {
         if let Some(diagnostic) = state.diagnostic {
             record_scope_denial(stats, &diagnostic);
-            println!(
-                "denied_motion trigger={} reason={} {}",
+            log.info(format!(
+                "event=scoped_focus_transition trigger={} reason={} {} disposition=denied",
                 trigger_label,
                 state.reason.as_str(),
                 diagnostic.render_fields()
-            );
+            ));
         }
         Ok(false)
     } else {
@@ -3514,12 +3429,12 @@ fn schedule_live_motion_repeat_tick(
     if !state.is_active() {
         if let Some(diagnostic) = state.diagnostic {
             record_scope_denial(stats, &diagnostic);
-            println!(
-                "denied_motion_repeat trigger={} reason={} {}",
+            log.info(format!(
+                "event=repeat_overload trigger={} reason={} {} disposition=denied",
                 trigger_label,
                 state.reason.as_str(),
                 diagnostic.render_fields()
-            );
+            ));
         }
     } else {
         stats.record_active_process_match();
@@ -3591,11 +3506,12 @@ where
     if !state.is_active() {
         if let Some(diagnostic) = state.diagnostic {
             record_scope_denial(stats, &diagnostic);
-            println!(
-                "denied_trigger hotkey={} reason={} {}",
-                trigger_label,
-                state.reason.as_str(),
-                diagnostic.render_fields()
+            tracing::info!(
+                event = "scoped_focus_transition",
+                trigger = %trigger_label,
+                reason = state.reason.as_str(),
+                details = %diagnostic.render_fields(),
+                disposition = "denied"
             );
         }
         return Ok(());
@@ -3659,7 +3575,11 @@ where
         }
         MotionRuntimeEvent::LoopCancelled { trigger } => {
             stats.record_motion_repeat_cancel();
-            println!("motion_loop_cancelled trigger={}", trigger.describe());
+            tracing::debug!(
+                event = "motion_input",
+                trigger = %trigger.describe(),
+                disposition = "cancelled"
+            );
             Ok(())
         }
         MotionRuntimeEvent::MotionDiscarded { .. } => {
@@ -3708,11 +3628,12 @@ where
     if !state.is_active() {
         if let Some(diagnostic) = state.diagnostic {
             record_scope_denial(stats, &diagnostic);
-            println!(
-                "denied_press trigger={} reason={} {}",
-                trigger_label,
-                state.reason.as_str(),
-                diagnostic.render_fields()
+            tracing::info!(
+                event = "scoped_focus_transition",
+                trigger = %trigger_label,
+                reason = state.reason.as_str(),
+                details = %diagnostic.render_fields(),
+                disposition = "denied"
             );
         }
         return Ok(());
@@ -3776,11 +3697,12 @@ where
     if !state.is_active() {
         if let Some(diagnostic) = state.diagnostic {
             record_scope_denial(stats, &diagnostic);
-            println!(
-                "denied_motion trigger={} reason={} {}",
-                trigger_label,
-                state.reason.as_str(),
-                diagnostic.render_fields()
+            tracing::info!(
+                event = "scoped_focus_transition",
+                trigger = %trigger_label,
+                reason = state.reason.as_str(),
+                details = %diagnostic.render_fields(),
+                disposition = "denied"
             );
         }
         return Ok(());
@@ -3925,11 +3847,12 @@ where
     if !state.is_active() {
         if let Some(diagnostic) = state.diagnostic {
             record_scope_denial(stats, &diagnostic);
-            println!(
-                "denied_motion_repeat trigger={} reason={} {}",
-                trigger_label,
-                state.reason.as_str(),
-                diagnostic.render_fields()
+            tracing::info!(
+                event = "repeat_overload",
+                trigger = %trigger_label,
+                reason = state.reason.as_str(),
+                details = %diagnostic.render_fields(),
+                disposition = "denied"
             );
         }
         return Ok(());
@@ -4036,8 +3959,13 @@ mod tests {
 
     #[test]
     fn runtime_log_rendering_does_not_embed_ansi_escapes() {
-        let rendered = RuntimeLog::with_color_enabled(true, ColorMode::Never, false)
-            .render_plain("DEBUG", "event=motion_input token=<LClick>");
+        let rendered = RuntimeLog::from_config(RuntimeLogConfig {
+            verbose: true,
+            level: None,
+            format: RuntimeLogFormat::Pretty,
+            color_mode: ColorMode::Never,
+        })
+        .render_plain("DEBUG", "event=motion_input token=<LClick>");
 
         assert!(!rendered.contains('\x1b'));
         assert!(rendered.contains("DEBUG"));
@@ -4110,10 +4038,15 @@ mod tests {
 
     #[test]
     fn runtime_log_color_mode_controls_subscriber_ansi() {
-        let log = RuntimeLog::with_color_enabled(true, ColorMode::Always, true);
+        let log = RuntimeLog::from_config(RuntimeLogConfig {
+            verbose: true,
+            level: None,
+            format: RuntimeLogFormat::Pretty,
+            color_mode: ColorMode::Always,
+        });
 
-        assert_eq!(log.color_mode, ColorMode::Always);
-        assert!(log.color);
+        assert_eq!(log.color_mode(), ColorMode::Always);
+        assert!(log.color());
     }
 
     #[test]
@@ -4139,9 +4072,55 @@ mod tests {
         ];
         let options = parse_run_args(&args).unwrap();
 
-        assert!(options.log.verbose);
-        assert_eq!(options.log.color_mode, ColorMode::Always);
-        assert!(options.log.color);
+        assert!(options.log.verbose());
+        assert_eq!(options.log.color_mode(), ColorMode::Always);
+    }
+
+    #[test]
+    fn parses_explicit_log_level_and_format_options() {
+        let args = vec![
+            "run".to_string(),
+            "--verbose".to_string(),
+            "--log-level=warn".to_string(),
+            "--log-format=compact".to_string(),
+            "examples/poe2.lua".to_string(),
+        ];
+        let options = parse_run_args(&args).unwrap();
+
+        assert_eq!(options.log.config.level, Some(RuntimeLogLevel::Warn));
+        assert_eq!(options.log.config.format, RuntimeLogFormat::Compact);
+        assert!(!options.log.verbose());
+    }
+
+    #[test]
+    fn rejects_invalid_log_options() {
+        let error = parse_run_args(&[
+            "run".to_string(),
+            "--log-level=chatty".to_string(),
+            "examples/poe2.lua".to_string(),
+        ])
+        .unwrap_err();
+
+        assert!(error.to_string().contains("invalid log level"));
+    }
+
+    #[test]
+    fn compact_log_rendering_is_parseable_and_uncolored() {
+        let rendered = RuntimeLog::from_config(RuntimeLogConfig {
+            verbose: true,
+            level: None,
+            format: RuntimeLogFormat::Compact,
+            color_mode: ColorMode::Always,
+        })
+        .render_plain(
+            "DEBUG",
+            "event=capability_probe result=failed hint=check_permissions",
+        );
+
+        assert!(rendered.starts_with("runtime_elapsed_ms="));
+        assert!(rendered.contains(" level=debug event=capability_probe "));
+        assert!(rendered.contains("result=failed hint=check_permissions"));
+        assert!(!rendered.contains('\x1b'));
     }
 
     #[test]

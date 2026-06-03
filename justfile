@@ -58,9 +58,9 @@ story-tests:
     nix develop -c cargo test --test lua_api --test cli_runner --test runner_flow --test rust_library
 
 # Run the scoped sample. Press Ctrl-C to stop and print final stats.
-run file="examples/poe2.lua":
+run *args:
     @printf '%s\n' '# running scoped Lua example; press Ctrl-C to stop'
-    nix develop -c cargo run -p signal-auras-cli -- run {{file}}
+    args=( {{args}} ); file="examples/poe2.lua"; flags=(); for arg in "${args[@]}"; do if [[ "$arg" == -* ]]; then flags+=("$arg"); else file="$arg"; fi; done; nix develop -c cargo run -p signal-auras-cli -- run "${flags[@]}" "$file"
 
 # Run the scoped sample with verbose event logs for provider/input debugging.
 run-verbose file="examples/poe2.lua":

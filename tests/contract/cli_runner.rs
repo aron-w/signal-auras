@@ -23,7 +23,7 @@ fn cli_requires_run_and_one_path() {
     assert!(parse_run_args(&["run".into(), "a.lua".into(), "b.lua".into()]).is_err());
     let options = parse_run_args(&["run".into(), "--verbose".into(), "a.lua".into()]).unwrap();
     assert_eq!(options.lua_file, PathBuf::from("a.lua"));
-    assert!(options.log.verbose);
+    assert!(options.log.verbose());
 }
 
 #[test]
