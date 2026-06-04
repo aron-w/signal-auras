@@ -452,12 +452,12 @@ impl QmlOverlayProcess {
             .map_err(overlay_io_error)?;
             self.qml_written = true;
         }
-        fs::write(&self.state_path, overlay_snapshot_qml(snapshot)).map_err(overlay_io_error)?;
+        write_atomic(&self.state_path, overlay_snapshot_qml(snapshot)).map_err(overlay_io_error)?;
         Ok(())
     }
 
     fn write_hidden(&self) -> Result<(), DiagnosableError> {
-        fs::write(&self.state_path, empty_overlay_state_qml()).map_err(overlay_io_error)
+        write_atomic(&self.state_path, empty_overlay_state_qml()).map_err(overlay_io_error)
     }
 
     fn ensure_running(&mut self) -> Result<(), DiagnosableError> {
@@ -1019,6 +1019,18 @@ fn not_empty(value: &str) -> bool {
     !value.trim().is_empty()
 }
 
+fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let mut tmp = path.to_path_buf();
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map_or_else(|| "tmp".to_string(), |extension| format!("{extension}.tmp"));
+    tmp.set_extension(format!("{extension}.{}", std::process::id()));
+    fs::write(&tmp, contents)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 fn overlay_io_error(error: impl std::fmt::Display) -> DiagnosableError {
     overlay_error(error.to_string())
 }
@@ -1225,6 +1237,24 @@ mod tests {
         let process = QmlOverlayProcess::new("poe2-test");
 
         assert!(process.stderr_path.ends_with("stderr.log"));
+    }
+
+    #[test]
+    fn qml_state_updates_are_written_atomically() {
+        let path = std::env::temp_dir().join(format!(
+            "signal-auras-overlay-test-{}-atomic-state.qml",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+
+        write_atomic(&path, "import QtQuick\nItem { width: 1 }").unwrap();
+        write_atomic(&path, "import QtQuick\nItem { width: 2 }").unwrap();
+
+        let state = fs::read_to_string(&path).unwrap();
+        assert_eq!(state, "import QtQuick\nItem { width: 2 }");
+        assert!(!state.is_empty());
+
+        let _ = fs::remove_file(&path);
     }
 
     #[test]
