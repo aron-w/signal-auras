@@ -826,21 +826,11 @@ fn kwin_configure_overlay_window_script(
              try {{ target.skipSwitcher = true; }} catch (error) {{}}\n\
              try {{ target.noBorder = true; }} catch (error) {{}}\n\
              try {{ target.minimized = false; }} catch (error) {{}}\n\
-             var geometry = {{ x: {x}, y: {y}, width: {w}, height: {h} }};\n\
-             try {{\n\
-                 target.frameGeometry = geometry;\n\
-             }} catch (error) {{\n\
-                 try {{ if (target.moveResize) {{ target.moveResize(geometry); }} }} catch (error2) {{}}\n\
-             }}\n\
          }}\n\
          callDBus({bus:?}, {path:?}, \"org.signalAuras.KWinBridge\", \"windowResult\", {request:?}, target !== null, \"\");\n",
         kwin_window_helpers(),
         title = placement.title.as_str(),
         pid = js_optional_u32(placement.process_id),
-        x = placement.x,
-        y = placement.y,
-        w = placement.w,
-        h = placement.h,
         bus = bus_name,
         path = object_path,
         request = request_id,
@@ -1021,13 +1011,9 @@ mod tests {
         assert!(script.contains("target.keepAbove = true"));
         assert!(script.contains("target.skipTaskbar = true"));
         assert!(script.contains("target.noBorder = true"));
-        assert!(script.contains("target.frameGeometry = geometry"));
-        assert!(script.contains("target.moveResize(geometry)"));
-        assert!(script.contains("x: 120"));
-        assert!(script.contains("y: 140"));
-        assert!(script.contains("width: 320"));
-        assert!(script.contains("height: 48"));
         assert!(script.contains("\"windowResult\""));
+        assert!(!script.contains("frameGeometry"));
+        assert!(!script.contains("moveResize"));
         assert!(!script.contains("registerShortcut"));
         assert!(!script.contains("capture"));
     }

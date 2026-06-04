@@ -6,8 +6,11 @@ use signal_auras_core::{
 use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    thread,
+    time::Duration,
 };
 
 use crate::capability::KdeEnvironment;
@@ -450,15 +453,27 @@ impl QmlOverlayProcess {
             .truncate(true)
             .open(&self.stderr_path)
             .map_err(overlay_io_error)?;
-        let child = Command::new(QML_LAUNCHER)
+        let mut command = Command::new(QML_LAUNCHER);
+        command
             .arg("--transparent")
             .arg("-f")
             .arg(&self.qml_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::from(stderr))
-            .spawn()
-            .map_err(overlay_io_error)?;
+            .stderr(Stdio::from(stderr));
+        // The runtime handles Ctrl-C through signalfd, so child processes would
+        // otherwise inherit blocked SIGINT/SIGTERM. Put QML in its own process
+        // group and restore the normal signal mask/handlers before exec.
+        unsafe {
+            command.pre_exec(|| {
+                reset_child_shutdown_signals()?;
+                if libc::setpgid(0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn().map_err(overlay_io_error)?;
         tracing::info!(
             event = "overlay_qml_spawn",
             overlay_id = %self.overlay_id,
@@ -497,7 +512,14 @@ impl QmlOverlayProcess {
 
     fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
+            terminate_process_group(child.id());
+            for _ in 0..10 {
+                if child.try_wait().ok().flatten().is_some() {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            kill_process_group(child.id());
             let _ = child.wait();
         }
     }
@@ -527,10 +549,11 @@ Window {{
     title: {title:?}
     x: 0
     y: 0
-    width: 1
-    height: 1
+    width: Screen.width
+    height: Screen.height
     color: "transparent"
     visible: true
+    visibility: Window.FullScreen
     opacity: 0
     flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus
     property string stateUrl: {state_url:?}
@@ -542,10 +565,6 @@ Window {{
         request.send()
         if (request.status === 0 || request.status === 200) {{
             var parsed = JSON.parse(request.responseText)
-            root.x = parsed.x || 0
-            root.y = parsed.y || 0
-            root.width = Math.max(1, parsed.w || 1)
-            root.height = Math.max(1, parsed.h || 1)
             bars = parsed.visuals || []
             root.opacity = bars.length > 0 ? 1 : 0
         }}
@@ -613,7 +632,7 @@ fn overlay_snapshot_json(snapshot: &OverlaySnapshot) -> String {
     let visuals = snapshot
         .visuals
         .iter()
-        .map(|visual| visual_json(visual, bounds.x, bounds.y))
+        .map(|visual| visual_json(visual, 0, 0))
         .collect::<Vec<_>>()
         .join(",");
     format!(
@@ -731,6 +750,46 @@ fn sanitize_path_component(value: &str) -> String {
         .collect()
 }
 
+fn reset_child_shutdown_signals() -> std::io::Result<()> {
+    unsafe {
+        if libc::signal(libc::SIGINT, libc::SIG_DFL) == libc::SIG_ERR {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::signal(libc::SIGTERM, libc::SIG_DFL) == libc::SIG_ERR {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut mask = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+        if libc::sigemptyset(mask.as_mut_ptr()) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::sigprocmask(libc::SIG_SETMASK, mask.as_ptr(), std::ptr::null_mut()) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+fn terminate_process_group(pid: u32) {
+    signal_process_group(pid, libc::SIGTERM);
+}
+
+fn kill_process_group(pid: u32) {
+    signal_process_group(pid, libc::SIGKILL);
+}
+
+fn signal_process_group(pid: u32, signal: libc::c_int) {
+    let Ok(pid) = i32::try_from(pid) else {
+        return;
+    };
+    if pid <= 0 {
+        return;
+    }
+    unsafe {
+        let _ = libc::kill(-pid, signal);
+        let _ = libc::kill(pid, signal);
+    }
+}
+
 pub fn provider_report_for_environment(environment: &KdeEnvironment) -> OverlayProviderReport {
     NativeOverlayRenderer::live().provider_report(environment)
 }
@@ -831,15 +890,17 @@ mod tests {
         assert!(qml.contains("WindowStaysOnTopHint"));
         assert!(qml.contains("color: \"transparent\""));
         assert!(qml.contains("visible: true"));
+        assert!(qml.contains("visibility: Window.FullScreen"));
         assert!(qml.contains("opacity: 0"));
+        assert!(qml.contains("width: Screen.width"));
+        assert!(qml.contains("height: Screen.height"));
         assert!(qml.contains("XMLHttpRequest"));
         assert!(qml.contains("modelData.fill_fraction"));
-        assert!(qml.contains("root.x = parsed.x"));
         assert!(qml.contains("root.opacity = bars.length > 0 ? 1 : 0"));
         assert!(qml.contains("Signal Auras Overlay poe2-bars"));
         assert!(!qml.contains("visible: modelData.active"));
-        assert!(!qml.contains("width: Screen.width"));
-        assert!(!qml.contains("height: Screen.height"));
+        assert!(!qml.contains("root.x = parsed.x"));
+        assert!(!qml.contains("root.width ="));
     }
 
     #[test]
@@ -852,8 +913,8 @@ mod tests {
         assert!(json.contains("\"w\":160"));
         assert!(json.contains("\"h\":12"));
         assert!(json.contains("\"visual_id\":\"heavy-stun\""));
-        assert!(json.contains("\"x\":0"));
-        assert!(json.contains("\"y\":0"));
+        assert!(json.contains("\"x\":10"));
+        assert!(json.contains("\"y\":20"));
         assert!(json.contains("\"fill\":\"#6ee7b7\""));
         assert!(json.contains("\"fill_fraction\":0.5"));
         assert!(!json.contains("pixels"));
