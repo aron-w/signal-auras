@@ -32,7 +32,15 @@ fn cli_accepts_doctor_keys_command_shape() {
         parse_doctor_args(&["doctor".into(), "keys".into(), "examples/poe2.lua".into()]).unwrap();
 
     assert_eq!(options.command, DoctorCommand::Keys);
-    assert_eq!(options.lua_file, PathBuf::from("examples/poe2.lua"));
+    assert_eq!(options.lua_file, Some(PathBuf::from("examples/poe2.lua")));
+}
+
+#[test]
+fn cli_accepts_doctor_overlay_command_shape() {
+    let options = parse_doctor_args(&["doctor".into(), "overlay".into()]).unwrap();
+
+    assert_eq!(options.command, DoctorCommand::Overlay);
+    assert_eq!(options.lua_file, None);
 }
 
 #[test]

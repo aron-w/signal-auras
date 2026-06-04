@@ -155,10 +155,27 @@ pub fn run_cli(
         let failure_message = match options.command {
             DoctorCommand::Input => "input doctor found missing unsafe input permissions",
             DoctorCommand::Keys => "key doctor found missing unsafe input permissions",
+            DoctorCommand::Overlay => "overlay doctor did not observe rendered overlay pixels",
+        };
+        if options.command == DoctorCommand::Overlay {
+            println!(
+                "overlay smoke: select the entire screen in the screen-share portal when prompted"
+            );
+            let mut adapter = RealWaylandAdapter::new();
+            let report = adapter.run_overlay_smoke_test()?;
+            println!("{}", report.render());
+            return Ok(());
+        }
+        let Some(lua_file) = &options.lua_file else {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ArgumentValidation,
+                doctor_usage(),
+            ));
         };
         let report = match options.command {
-            DoctorCommand::Input => input_doctor_report(&options.lua_file)?,
-            DoctorCommand::Keys => key_doctor_report(&options.lua_file)?,
+            DoctorCommand::Input => input_doctor_report(lua_file)?,
+            DoctorCommand::Keys => key_doctor_report(lua_file)?,
+            DoctorCommand::Overlay => unreachable!("overlay doctor returned above"),
         };
         println!("{}", report.render());
         if report.ok {
@@ -190,13 +207,14 @@ pub struct RunOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorOptions {
     pub command: DoctorCommand,
-    pub lua_file: PathBuf,
+    pub lua_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DoctorCommand {
     Input,
     Keys,
+    Overlay,
 }
 
 pub fn parse_run_args(args: &[String]) -> Result<RunOptions, DiagnosableError> {
@@ -253,25 +271,28 @@ fn run_usage() -> &'static str {
 }
 
 pub fn parse_doctor_args(args: &[String]) -> Result<DoctorOptions, DiagnosableError> {
-    if args.first().map(String::as_str) != Some("doctor") || args.len() != 3 {
+    if args.first().map(String::as_str) != Some("doctor") {
         return Err(DiagnosableError::new(
             ErrorPhase::ArgumentValidation,
-            "usage: signal-auras doctor input <lua-file> | signal-auras doctor keys <lua-file>",
+            doctor_usage(),
         ));
     }
-    let command =
-        match args.get(1).map(String::as_str) {
-            Some("input") => DoctorCommand::Input,
-            Some("keys") => DoctorCommand::Keys,
-            _ => return Err(DiagnosableError::new(
+    let (command, lua_file) = match args.get(1).map(String::as_str) {
+        Some("input") if args.len() == 3 => (DoctorCommand::Input, Some(PathBuf::from(&args[2]))),
+        Some("keys") if args.len() == 3 => (DoctorCommand::Keys, Some(PathBuf::from(&args[2]))),
+        Some("overlay") if args.len() == 2 => (DoctorCommand::Overlay, None),
+        _ => {
+            return Err(DiagnosableError::new(
                 ErrorPhase::ArgumentValidation,
-                "usage: signal-auras doctor input <lua-file> | signal-auras doctor keys <lua-file>",
-            )),
-        };
-    Ok(DoctorOptions {
-        command,
-        lua_file: PathBuf::from(&args[2]),
-    })
+                doctor_usage(),
+            ));
+        }
+    };
+    Ok(DoctorOptions { command, lua_file })
+}
+
+fn doctor_usage() -> &'static str {
+    "usage: signal-auras doctor input <lua-file> | signal-auras doctor keys <lua-file> | signal-auras doctor overlay"
 }
 
 fn lua_file_looks_like_controller(lua_file: &Path) -> Result<bool, DiagnosableError> {
@@ -4362,7 +4383,10 @@ mod tests {
         let options = parse_doctor_args(&args).unwrap();
 
         assert_eq!(options.command, DoctorCommand::Input);
-        assert_eq!(options.lua_file, PathBuf::from("examples/poe2-legacy.lua"));
+        assert_eq!(
+            options.lua_file,
+            Some(PathBuf::from("examples/poe2-legacy.lua"))
+        );
     }
 
     #[test]
@@ -4375,7 +4399,19 @@ mod tests {
         let options = parse_doctor_args(&args).unwrap();
 
         assert_eq!(options.command, DoctorCommand::Keys);
-        assert_eq!(options.lua_file, PathBuf::from("examples/poe2-legacy.lua"));
+        assert_eq!(
+            options.lua_file,
+            Some(PathBuf::from("examples/poe2-legacy.lua"))
+        );
+    }
+
+    #[test]
+    fn parses_overlay_doctor_command_without_lua_file() {
+        let args = vec!["doctor".to_string(), "overlay".to_string()];
+        let options = parse_doctor_args(&args).unwrap();
+
+        assert_eq!(options.command, DoctorCommand::Overlay);
+        assert_eq!(options.lua_file, None);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use signal_auras_core::{
     CleanupReport, DiagnosableError, ErrorPhase, OverlayDiagnosticReason, OverlayLifecycleState,
-    OverlayProviderReport, OverlayProviderStatus, OverlaySnapshot, RendererProviderId,
-    VisualSnapshot,
+    OverlayProviderReport, OverlayProviderStatus, OverlayRect, OverlaySnapshot, RendererProviderId,
+    ScreenPixelFormat, ScreenSample, VisualSnapshot,
 };
 use std::{
     collections::BTreeMap,
@@ -19,6 +19,19 @@ use crate::capability::KdeServiceAvailability;
 
 const QML_LAUNCHER: &str = "qml";
 const QML_POLL_INTERVAL_MS: u64 = 50;
+pub const OVERLAY_SMOKE_ID: &str = "signal_auras_overlay_smoke";
+const OVERLAY_SMOKE_RECT: OverlayRect = OverlayRect {
+    x: 64,
+    y: 64,
+    w: 260,
+    h: 48,
+};
+const OVERLAY_SMOKE_FILL: &str = "#ff00ff";
+const OVERLAY_SMOKE_BACKGROUND: &str = "#000000";
+const OVERLAY_SMOKE_PROBE_X: u32 = 96;
+const OVERLAY_SMOKE_PROBE_Y: u32 = 78;
+const OVERLAY_SMOKE_PROBE_W: u32 = 120;
+const OVERLAY_SMOKE_PROBE_H: u32 = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverlayWindowPlacement {
@@ -29,6 +42,22 @@ pub struct OverlayWindowPlacement {
     pub y: u32,
     pub w: u32,
     pub h: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlaySmokePixelReport {
+    pub matched_pixels: u32,
+    pub sampled_pixels: u32,
+    pub sample_width: u32,
+    pub sample_height: u32,
+    pub pixel_format: ScreenPixelFormat,
+}
+
+impl OverlaySmokePixelReport {
+    pub fn passed(&self) -> bool {
+        self.sampled_pixels > 0
+            && self.matched_pixels.saturating_mul(100) >= self.sampled_pixels * 35
+    }
 }
 
 pub trait OverlayRendererAdapter {
@@ -662,6 +691,82 @@ pub fn overlay_window_placement(snapshot: &OverlaySnapshot) -> Option<OverlayWin
     })
 }
 
+pub fn overlay_smoke_snapshot() -> OverlaySnapshot {
+    OverlaySnapshot {
+        overlay_id: OVERLAY_SMOKE_ID.to_string(),
+        provider: RendererProviderId::Native,
+        lifecycle: OverlayLifecycleState::Active,
+        visuals: vec![VisualSnapshot {
+            visual_id: "magenta_probe".to_string(),
+            rect: OVERLAY_SMOKE_RECT,
+            opacity: 1.0,
+            fill: OVERLAY_SMOKE_FILL.to_string(),
+            background: OVERLAY_SMOKE_BACKGROUND.to_string(),
+            label_visible: false,
+            fill_fraction: 1.0,
+            active: true,
+            ready: false,
+        }],
+        diagnostic: None,
+    }
+}
+
+pub fn probe_overlay_smoke_pixels(sample: &ScreenSample) -> OverlaySmokePixelReport {
+    let mut report = OverlaySmokePixelReport {
+        matched_pixels: 0,
+        sampled_pixels: 0,
+        sample_width: sample.width,
+        sample_height: sample.height,
+        pixel_format: sample.pixel_format,
+    };
+    let Some(x_end) = OVERLAY_SMOKE_PROBE_X.checked_add(OVERLAY_SMOKE_PROBE_W) else {
+        return report;
+    };
+    let Some(y_end) = OVERLAY_SMOKE_PROBE_Y.checked_add(OVERLAY_SMOKE_PROBE_H) else {
+        return report;
+    };
+    if x_end > sample.width || y_end > sample.height {
+        return report;
+    }
+    let bytes_per_pixel = sample.pixel_format.bytes_per_pixel();
+    let stride = sample.stride as usize;
+    if stride < sample.width as usize * bytes_per_pixel {
+        return report;
+    }
+    for y in OVERLAY_SMOKE_PROBE_Y..y_end {
+        for x in OVERLAY_SMOKE_PROBE_X..x_end {
+            let offset = y as usize * stride + x as usize * bytes_per_pixel;
+            let Some(pixel) = sample.pixels.get(offset..offset + bytes_per_pixel) else {
+                continue;
+            };
+            report.sampled_pixels += 1;
+            if is_smoke_magenta_pixel(pixel, sample.pixel_format) {
+                report.matched_pixels += 1;
+            }
+        }
+    }
+    report
+}
+
+fn is_smoke_magenta_pixel(pixel: &[u8], format: ScreenPixelFormat) -> bool {
+    let Some((red, green, blue)) = rgb_channels(pixel, format) else {
+        return false;
+    };
+    red >= 170 && blue >= 170 && green <= 120
+}
+
+fn rgb_channels(pixel: &[u8], format: ScreenPixelFormat) -> Option<(u8, u8, u8)> {
+    match format {
+        ScreenPixelFormat::Luma8 => None,
+        ScreenPixelFormat::Rgb888 | ScreenPixelFormat::Rgba8888 | ScreenPixelFormat::Rgbx8888 => {
+            Some((*pixel.first()?, *pixel.get(1)?, *pixel.get(2)?))
+        }
+        ScreenPixelFormat::Bgr888 | ScreenPixelFormat::Bgra8888 | ScreenPixelFormat::Bgrx8888 => {
+            Some((*pixel.get(2)?, *pixel.get(1)?, *pixel.first()?))
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct OverlayBounds {
     x: u32,
@@ -920,6 +1025,47 @@ mod tests {
         assert!(!json.contains("pixels"));
         assert!(!json.contains("compositor"));
         assert!(!json.contains("SynthesizedInput"));
+    }
+
+    #[test]
+    fn overlay_smoke_pixel_probe_detects_magenta_rendered_region() {
+        let mut pixels = vec![0u8; 260 * 120 * 3];
+        for y in OVERLAY_SMOKE_PROBE_Y..OVERLAY_SMOKE_PROBE_Y + OVERLAY_SMOKE_PROBE_H {
+            for x in OVERLAY_SMOKE_PROBE_X..OVERLAY_SMOKE_PROBE_X + OVERLAY_SMOKE_PROBE_W {
+                let offset = (y as usize * 260 + x as usize) * 3;
+                pixels[offset] = 255;
+                pixels[offset + 1] = 0;
+                pixels[offset + 2] = 255;
+            }
+        }
+        let sample =
+            ScreenSample::from_pixels(260, 120, 260 * 3, ScreenPixelFormat::Rgb888, 0, pixels);
+
+        let report = probe_overlay_smoke_pixels(&sample);
+
+        assert!(report.passed());
+        assert_eq!(
+            report.sampled_pixels,
+            OVERLAY_SMOKE_PROBE_W * OVERLAY_SMOKE_PROBE_H
+        );
+        assert_eq!(report.matched_pixels, report.sampled_pixels);
+    }
+
+    #[test]
+    fn overlay_smoke_pixel_probe_rejects_missing_rendered_region() {
+        let sample = ScreenSample::from_pixels(
+            260,
+            120,
+            260 * 3,
+            ScreenPixelFormat::Rgb888,
+            0,
+            vec![0u8; 260 * 120 * 3],
+        );
+
+        let report = probe_overlay_smoke_pixels(&sample);
+
+        assert!(!report.passed());
+        assert_eq!(report.matched_pixels, 0);
     }
 
     #[test]

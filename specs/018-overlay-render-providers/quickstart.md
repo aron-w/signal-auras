@@ -23,6 +23,21 @@ nix develop -c cargo test
 nix flake check
 ```
 
+## Live KDE Overlay Smoke Test
+
+Run the compositor smoke check from a KDE Plasma Wayland session:
+
+```sh
+nix develop -c cargo run -p signal-auras-cli -- doctor overlay
+```
+
+When the screen-share portal opens, select the entire screen. The smoke test
+renders a known magenta progress bar through the native overlay provider,
+captures a screen frame through the screen-read provider, checks the expected
+pixel region, and then cleans up the overlay. Selecting a single game/window may
+exclude overlay surfaces from the captured frame and should fail the pixel
+check.
+
 ## Lua Example Shape
 
 The PoE2 controller example keeps existing tracker declarations and may add an overlay declaration like:

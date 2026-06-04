@@ -11,6 +11,26 @@ use crate::capability::{environment_probe, KdeEnvironment};
 use crate::diagnostics::unsupported_protocol;
 use crate::overlay::OverlayRendererAdapter;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlaySmokeTestReport {
+    pub overlay_id: String,
+    pub pixel_report: crate::overlay::OverlaySmokePixelReport,
+}
+
+impl OverlaySmokeTestReport {
+    pub fn render(&self) -> String {
+        format!(
+            "overlay smoke ok overlay_id={} matched_pixels={} sampled_pixels={} sample={}x{} format={:?}",
+            self.overlay_id,
+            self.pixel_report.matched_pixels,
+            self.pixel_report.sampled_pixels,
+            self.pixel_report.sample_width,
+            self.pixel_report.sample_height,
+            self.pixel_report.pixel_format
+        )
+    }
+}
+
 #[derive(Default)]
 pub struct MockableWaylandAdapter {
     registrations: Vec<RegistrationId>,
@@ -386,6 +406,45 @@ impl RealWaylandAdapter {
         self.overlay_placements.clear();
         self.overlay_placement_attempts.clear();
         Ok(report)
+    }
+
+    pub fn run_overlay_smoke_test(&mut self) -> Result<OverlaySmokeTestReport, DiagnosableError> {
+        let result = self.run_overlay_smoke_test_inner();
+        let cleanup_result = self.cleanup_overlays();
+        let _ = self.close_screen_cast_session();
+        match (result, cleanup_result) {
+            (Ok(report), Ok(_)) => Ok(report),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    fn run_overlay_smoke_test_inner(&mut self) -> Result<OverlaySmokeTestReport, DiagnosableError> {
+        self.render_overlay_snapshot(crate::overlay::overlay_smoke_snapshot())?;
+        std::thread::sleep(std::time::Duration::from_millis(750));
+        let sample = self.capture_screen_sample()?;
+        let pixel_report = crate::overlay::probe_overlay_smoke_pixels(&sample);
+        if !pixel_report.passed() {
+            return Err(DiagnosableError::new(
+                ErrorPhase::CapabilityProbe,
+                format!(
+                    "overlay smoke pixel check failed: matched_pixels={} sampled_pixels={} sample={}x{} format={:?}",
+                    pixel_report.matched_pixels,
+                    pixel_report.sampled_pixels,
+                    pixel_report.sample_width,
+                    pixel_report.sample_height,
+                    pixel_report.pixel_format
+                ),
+            )
+            .with_source("native-overlay-smoke")
+            .with_remediation(
+                "rerun `signal-auras doctor overlay` and select the entire screen in the screen-share portal",
+            ));
+        }
+        Ok(OverlaySmokeTestReport {
+            overlay_id: crate::overlay::OVERLAY_SMOKE_ID.to_string(),
+            pixel_report,
+        })
     }
 
     pub fn active_overlay_snapshot_for_test(&self, overlay_id: &str) -> Option<&OverlaySnapshot> {
