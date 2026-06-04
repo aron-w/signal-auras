@@ -156,15 +156,28 @@ pub fn run_cli(
             DoctorCommand::Input => "input doctor found missing unsafe input permissions",
             DoctorCommand::Keys => "key doctor found missing unsafe input permissions",
             DoctorCommand::Overlay => "overlay doctor did not observe rendered overlay pixels",
+            DoctorCommand::OverlayNested => {
+                "overlay nested doctor did not observe rendered overlay pixels"
+            }
         };
-        if options.command == DoctorCommand::Overlay {
-            println!(
-                "overlay smoke: select the entire screen in the screen-share portal when prompted"
-            );
-            let mut adapter = RealWaylandAdapter::new();
-            let report = adapter.run_overlay_smoke_test()?;
-            println!("{}", report.render());
-            return Ok(());
+        match options.command {
+            DoctorCommand::Overlay => {
+                println!(
+                    "overlay smoke: select the entire screen in the screen-share portal when prompted"
+                );
+                let mut adapter = RealWaylandAdapter::new();
+                let report = adapter.run_overlay_smoke_test()?;
+                println!("{}", report.render());
+                return Ok(());
+            }
+            DoctorCommand::OverlayNested => {
+                println!("overlay nested smoke: rendering native overlay and checking QML pixels");
+                let mut adapter = RealWaylandAdapter::new();
+                let report = adapter.run_overlay_nested_smoke_test()?;
+                println!("{}", report.render());
+                return Ok(());
+            }
+            DoctorCommand::Input | DoctorCommand::Keys => {}
         }
         let Some(lua_file) = &options.lua_file else {
             return Err(DiagnosableError::new(
@@ -175,7 +188,9 @@ pub fn run_cli(
         let report = match options.command {
             DoctorCommand::Input => input_doctor_report(lua_file)?,
             DoctorCommand::Keys => key_doctor_report(lua_file)?,
-            DoctorCommand::Overlay => unreachable!("overlay doctor returned above"),
+            DoctorCommand::Overlay | DoctorCommand::OverlayNested => {
+                unreachable!("overlay doctor returned above")
+            }
         };
         println!("{}", report.render());
         if report.ok {
@@ -215,6 +230,7 @@ pub enum DoctorCommand {
     Input,
     Keys,
     Overlay,
+    OverlayNested,
 }
 
 pub fn parse_run_args(args: &[String]) -> Result<RunOptions, DiagnosableError> {
@@ -281,6 +297,7 @@ pub fn parse_doctor_args(args: &[String]) -> Result<DoctorOptions, DiagnosableEr
         Some("input") if args.len() == 3 => (DoctorCommand::Input, Some(PathBuf::from(&args[2]))),
         Some("keys") if args.len() == 3 => (DoctorCommand::Keys, Some(PathBuf::from(&args[2]))),
         Some("overlay") if args.len() == 2 => (DoctorCommand::Overlay, None),
+        Some("overlay-nested") if args.len() == 2 => (DoctorCommand::OverlayNested, None),
         _ => {
             return Err(DiagnosableError::new(
                 ErrorPhase::ArgumentValidation,
@@ -292,7 +309,7 @@ pub fn parse_doctor_args(args: &[String]) -> Result<DoctorOptions, DiagnosableEr
 }
 
 fn doctor_usage() -> &'static str {
-    "usage: signal-auras doctor input <lua-file> | signal-auras doctor keys <lua-file> | signal-auras doctor overlay"
+    "usage: signal-auras doctor input <lua-file> | signal-auras doctor keys <lua-file> | signal-auras doctor overlay | signal-auras doctor overlay-nested"
 }
 
 fn lua_file_looks_like_controller(lua_file: &Path) -> Result<bool, DiagnosableError> {
@@ -4411,6 +4428,15 @@ mod tests {
         let options = parse_doctor_args(&args).unwrap();
 
         assert_eq!(options.command, DoctorCommand::Overlay);
+        assert_eq!(options.lua_file, None);
+    }
+
+    #[test]
+    fn parses_overlay_nested_doctor_command_without_lua_file() {
+        let args = vec!["doctor".to_string(), "overlay-nested".to_string()];
+        let options = parse_doctor_args(&args).unwrap();
+
+        assert_eq!(options.command, DoctorCommand::OverlayNested);
         assert_eq!(options.lua_file, None);
     }
 

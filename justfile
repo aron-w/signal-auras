@@ -18,6 +18,7 @@ guide:
     @printf '%s\n' 'just run          # run the scoped poe2 example and wait for Ctrl-C'
     @printf '%s\n' 'just run-verbose  # run the scoped poe2 example with debug event logs'
     @printf '%s\n' 'just input-doctor # check evdev/uinput access for a Lua script'
+    @printf '%s\n' 'just overlay-smoke-nested # run native overlay pixel smoke in nested virtual KWin'
     @printf '%s\n' 'just unsafe-input-acl # temporarily grant this user evdev/uinput access'
     @printf '%s\n' 'just run-prompt   # run the scope-free example and exercise terminal consent'
     @printf '%s\n' 'just sigint-smoke # send SIGINT to the runner and verify final stats print'
@@ -70,6 +71,11 @@ run-verbose file="examples/poe2.lua":
 # Check unsafe input permissions needed by a script without grabbing or emitting input.
 input-doctor file="examples/poe2-legacy.lua":
     nix develop -c cargo run -p signal-auras-cli -- doctor input {{file}}
+
+# Run native overlay rendering smoke test in a nested virtual KWin session.
+# This avoids the real screen-share portal while still checking compositor pixels.
+overlay-smoke-nested:
+    nix develop -c scripts/overlay-smoke-nested.sh
 
 # Temporarily grant the current user access to unsafe input devices for local testing.
 # These ACLs are reset by reboot, device replug, or udev permission changes.

@@ -63,6 +63,7 @@
             cargo
             direnv
             git
+            imagemagick
             just
             lua-language-server
             llvmPackages.libclang
@@ -76,6 +77,7 @@
             wayland-protocols
             dbus
             pipewire
+            pipewire.dev
             xdg-desktop-portal
           ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
             kdePackages.kglobalaccel

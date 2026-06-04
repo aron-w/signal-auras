@@ -426,7 +426,7 @@ impl QmlOverlayProcess {
         Self {
             overlay_id: overlay_id.to_string(),
             qml_path: dir.join("overlay.qml"),
-            state_path: dir.join("state.json"),
+            state_path: dir.join("state.qml"),
             stderr_path: dir.join("stderr.log"),
             qml_written: false,
             child: None,
@@ -446,19 +446,12 @@ impl QmlOverlayProcess {
             .map_err(overlay_io_error)?;
             self.qml_written = true;
         }
-        fs::write(&self.state_path, overlay_snapshot_json(snapshot)).map_err(overlay_io_error)?;
+        fs::write(&self.state_path, overlay_snapshot_qml(snapshot)).map_err(overlay_io_error)?;
         Ok(())
     }
 
     fn write_hidden(&self) -> Result<(), DiagnosableError> {
-        fs::write(
-            &self.state_path,
-            format!(
-                "{{\"overlay_id\":{},\"x\":0,\"y\":0,\"w\":1,\"h\":1,\"visuals\":[]}}",
-                json_string(&self.overlay_id)
-            ),
-        )
-        .map_err(overlay_io_error)
+        fs::write(&self.state_path, empty_overlay_state_qml()).map_err(overlay_io_error)
     }
 
     fn ensure_running(&mut self) -> Result<(), DiagnosableError> {
@@ -568,7 +561,11 @@ pub fn qml_overlay_title(overlay_id: &str) -> String {
 }
 
 fn qml_overlay_source(overlay_id: &str, state_path: &Path) -> String {
-    let state_url = format!("file://{}", state_path.display());
+    let state_name = state_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("state.qml");
+    let grab_path = std::env::var("SIGNAL_AURAS_OVERLAY_GRAB_PATH").unwrap_or_default();
     format!(
         r##"import QtQuick
 import QtQuick.Window
@@ -585,18 +582,17 @@ Window {{
     visibility: Window.FullScreen
     opacity: 0
     flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus
-    property string stateUrl: {state_url:?}
-    property var bars: []
+    property url stateUrl: Qt.resolvedUrl({state_name:?})
+    property string grabPath: {grab_path:?}
+    property bool grabSaved: false
 
     function reloadState() {{
-        var request = new XMLHttpRequest()
-        request.open("GET", stateUrl + "?t=" + Date.now(), false)
-        request.send()
-        if (request.status === 0 || request.status === 200) {{
-            var parsed = JSON.parse(request.responseText)
-            bars = parsed.visuals || []
-            root.opacity = bars.length > 0 ? 1 : 0
+        if (root.grabPath.length > 0 && !root.grabSaved) {{
+            grabTimer.restart()
         }}
+        overlayLoader.active = false
+        overlayLoader.source = stateUrl
+        overlayLoader.active = true
     }}
 
     Component.onCompleted: reloadState()
@@ -608,49 +604,36 @@ Window {{
         onTriggered: root.reloadState()
     }}
 
-    Repeater {{
-        model: root.bars
-        delegate: Item {{
-            x: modelData.x
-            y: modelData.y
-            width: modelData.w
-            height: modelData.h
-            opacity: modelData.opacity
+    Timer {{
+        id: grabTimer
+        interval: 600
+        repeat: false
+        running: false
+        onTriggered: paintRoot.grabToImage(function(result) {{
+            root.grabSaved = true
+            result.saveToFile(root.grabPath)
+        }})
+    }}
 
-            Rectangle {{
-                anchors.fill: parent
-                color: modelData.background
-                radius: 3
-                opacity: 0.72
-            }}
+    Item {{
+        id: paintRoot
+        anchors.fill: parent
 
-            Rectangle {{
-                x: 0
-                y: 0
-                width: parent.width * modelData.fill_fraction
-                height: parent.height
-                color: modelData.fill
-                radius: 3
-            }}
-
-            Text {{
-                anchors.centerIn: parent
-                visible: modelData.label_visible
-                text: modelData.ready ? modelData.visual_id + " ready" : modelData.visual_id
-                color: "#f8fafc"
-                font.pixelSize: Math.max(10, Math.floor(parent.height * 0.62))
-                font.bold: true
-            }}
+        Loader {{
+            id: overlayLoader
+            anchors.fill: parent
         }}
     }}
 }}
 "##,
         title = qml_overlay_title(overlay_id),
-        state_url = state_url,
+        state_name = state_name,
+        grab_path = grab_path,
         interval_ms = QML_POLL_INTERVAL_MS,
     )
 }
 
+#[cfg(test)]
 fn overlay_snapshot_json(snapshot: &OverlaySnapshot) -> String {
     let bounds = overlay_bounds(&snapshot.visuals).unwrap_or(OverlayBounds {
         x: 0,
@@ -661,7 +644,7 @@ fn overlay_snapshot_json(snapshot: &OverlaySnapshot) -> String {
     let visuals = snapshot
         .visuals
         .iter()
-        .map(|visual| visual_json(visual, 0, 0))
+        .map(|visual| visual_json(visual, bounds.x, bounds.y))
         .collect::<Vec<_>>()
         .join(",");
     format!(
@@ -673,6 +656,29 @@ fn overlay_snapshot_json(snapshot: &OverlaySnapshot) -> String {
         bounds.h,
         visuals
     )
+}
+
+fn overlay_snapshot_qml(snapshot: &OverlaySnapshot) -> String {
+    let bounds = overlay_bounds(&snapshot.visuals).unwrap_or(OverlayBounds {
+        x: 0,
+        y: 0,
+        w: 1,
+        h: 1,
+    });
+    let visuals = snapshot
+        .visuals
+        .iter()
+        .map(|visual| visual_qml(visual, bounds.x, bounds.y))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "import QtQuick\n\nItem {{\n    width: parent ? parent.width : {}\n    height: parent ? parent.height : {}\n{}\n}}\n",
+        bounds.w, bounds.h, visuals
+    )
+}
+
+fn empty_overlay_state_qml() -> &'static str {
+    "import QtQuick\n\nItem { width: 1; height: 1 }\n"
 }
 
 pub fn overlay_window_placement(snapshot: &OverlaySnapshot) -> Option<OverlayWindowPlacement> {
@@ -712,6 +718,22 @@ pub fn overlay_smoke_snapshot() -> OverlaySnapshot {
 }
 
 pub fn probe_overlay_smoke_pixels(sample: &ScreenSample) -> OverlaySmokePixelReport {
+    probe_overlay_smoke_pixels_at(sample, OVERLAY_SMOKE_PROBE_X, OVERLAY_SMOKE_PROBE_Y)
+}
+
+pub fn probe_overlay_smoke_grab_pixels(sample: &ScreenSample) -> OverlaySmokePixelReport {
+    probe_overlay_smoke_pixels_at(
+        sample,
+        OVERLAY_SMOKE_PROBE_X.saturating_sub(OVERLAY_SMOKE_RECT.x),
+        OVERLAY_SMOKE_PROBE_Y.saturating_sub(OVERLAY_SMOKE_RECT.y),
+    )
+}
+
+fn probe_overlay_smoke_pixels_at(
+    sample: &ScreenSample,
+    probe_x: u32,
+    probe_y: u32,
+) -> OverlaySmokePixelReport {
     let mut report = OverlaySmokePixelReport {
         matched_pixels: 0,
         sampled_pixels: 0,
@@ -719,10 +741,10 @@ pub fn probe_overlay_smoke_pixels(sample: &ScreenSample) -> OverlaySmokePixelRep
         sample_height: sample.height,
         pixel_format: sample.pixel_format,
     };
-    let Some(x_end) = OVERLAY_SMOKE_PROBE_X.checked_add(OVERLAY_SMOKE_PROBE_W) else {
+    let Some(x_end) = probe_x.checked_add(OVERLAY_SMOKE_PROBE_W) else {
         return report;
     };
-    let Some(y_end) = OVERLAY_SMOKE_PROBE_Y.checked_add(OVERLAY_SMOKE_PROBE_H) else {
+    let Some(y_end) = probe_y.checked_add(OVERLAY_SMOKE_PROBE_H) else {
         return report;
     };
     if x_end > sample.width || y_end > sample.height {
@@ -733,8 +755,8 @@ pub fn probe_overlay_smoke_pixels(sample: &ScreenSample) -> OverlaySmokePixelRep
     if stride < sample.width as usize * bytes_per_pixel {
         return report;
     }
-    for y in OVERLAY_SMOKE_PROBE_Y..y_end {
-        for x in OVERLAY_SMOKE_PROBE_X..x_end {
+    for y in probe_y..y_end {
+        for x in probe_x..x_end {
             let offset = y as usize * stride + x as usize * bytes_per_pixel;
             let Some(pixel) = sample.pixels.get(offset..offset + bytes_per_pixel) else {
                 continue;
@@ -795,6 +817,7 @@ fn overlay_bounds(visuals: &[VisualSnapshot]) -> Option<OverlayBounds> {
     })
 }
 
+#[cfg(test)]
 fn visual_json(visual: &VisualSnapshot, origin_x: u32, origin_y: u32) -> String {
     format!(
         concat!(
@@ -822,6 +845,63 @@ fn visual_json(visual: &VisualSnapshot, origin_x: u32, origin_y: u32) -> String 
         visual.fill_fraction.clamp(0.0, 1.0),
         visual.active,
         visual.ready,
+    )
+}
+
+fn visual_qml(visual: &VisualSnapshot, origin_x: u32, origin_y: u32) -> String {
+    let x = visual.rect.x.saturating_sub(origin_x);
+    let y = visual.rect.y.saturating_sub(origin_y);
+    let opacity = visual.opacity.clamp(0.0, 1.0);
+    let fill_fraction = visual.fill_fraction.clamp(0.0, 1.0);
+    format!(
+        r##"
+    Item {{
+        x: {x}
+        y: {y}
+        width: {w}
+        height: {h}
+        opacity: {opacity}
+
+        Rectangle {{
+            anchors.fill: parent
+            color: {background}
+            radius: 3
+            opacity: 0.72
+        }}
+
+        Rectangle {{
+            x: 0
+            y: 0
+            width: parent.width * {fill_fraction}
+            height: parent.height
+            color: {fill}
+            radius: 3
+        }}
+
+        Text {{
+            anchors.centerIn: parent
+            visible: {label_visible}
+            text: {label}
+            color: "#f8fafc"
+            font.pixelSize: Math.max(10, Math.floor(parent.height * 0.62))
+            font.bold: true
+        }}
+    }}
+"##,
+        x = x,
+        y = y,
+        w = visual.rect.w,
+        h = visual.rect.h,
+        opacity = opacity,
+        background = json_string(&visual.background),
+        fill_fraction = fill_fraction,
+        fill = json_string(&visual.fill),
+        label_visible = visual.label_visible,
+        label = json_string(if visual.ready {
+            "ready"
+        } else {
+            &visual.visual_id
+        }),
     )
 }
 
@@ -999,9 +1079,9 @@ mod tests {
         assert!(qml.contains("opacity: 0"));
         assert!(qml.contains("width: Screen.width"));
         assert!(qml.contains("height: Screen.height"));
-        assert!(qml.contains("XMLHttpRequest"));
-        assert!(qml.contains("modelData.fill_fraction"));
-        assert!(qml.contains("root.opacity = bars.length > 0 ? 1 : 0"));
+        assert!(qml.contains("Loader"));
+        assert!(qml.contains("overlayLoader.source"));
+        assert!(qml.contains("grabToImage"));
         assert!(qml.contains("Signal Auras Overlay poe2-bars"));
         assert!(!qml.contains("visible: modelData.active"));
         assert!(!qml.contains("root.x = parsed.x"));
@@ -1018,13 +1098,25 @@ mod tests {
         assert!(json.contains("\"w\":160"));
         assert!(json.contains("\"h\":12"));
         assert!(json.contains("\"visual_id\":\"heavy-stun\""));
-        assert!(json.contains("\"x\":10"));
-        assert!(json.contains("\"y\":20"));
+        assert!(json.contains("\"visual_id\":\"heavy-stun\",\"x\":0,\"y\":0"));
         assert!(json.contains("\"fill\":\"#6ee7b7\""));
         assert!(json.contains("\"fill_fraction\":0.5"));
         assert!(!json.contains("pixels"));
         assert!(!json.contains("compositor"));
         assert!(!json.contains("SynthesizedInput"));
+    }
+
+    #[test]
+    fn qml_renderer_generates_local_state_component() {
+        let qml = overlay_snapshot_qml(&active_snapshot("poe2-bars"));
+
+        assert!(qml.contains("import QtQuick"));
+        assert!(qml.contains("x: 0"));
+        assert!(qml.contains("y: 0"));
+        assert!(qml.contains("width: parent.width * 0.5"));
+        assert!(qml.contains("color: \"#6ee7b7\""));
+        assert!(!qml.contains("pixels"));
+        assert!(!qml.contains("compositor"));
     }
 
     #[test]
@@ -1048,6 +1140,28 @@ mod tests {
             report.sampled_pixels,
             OVERLAY_SMOKE_PROBE_W * OVERLAY_SMOKE_PROBE_H
         );
+        assert_eq!(report.matched_pixels, report.sampled_pixels);
+    }
+
+    #[test]
+    fn overlay_smoke_grab_probe_uses_local_overlay_coordinates() {
+        let local_x = OVERLAY_SMOKE_PROBE_X - OVERLAY_SMOKE_RECT.x;
+        let local_y = OVERLAY_SMOKE_PROBE_Y - OVERLAY_SMOKE_RECT.y;
+        let mut pixels = vec![0u8; 260 * 120 * 3];
+        for y in local_y..local_y + OVERLAY_SMOKE_PROBE_H {
+            for x in local_x..local_x + OVERLAY_SMOKE_PROBE_W {
+                let offset = (y as usize * 260 + x as usize) * 3;
+                pixels[offset] = 255;
+                pixels[offset + 1] = 0;
+                pixels[offset + 2] = 255;
+            }
+        }
+        let sample =
+            ScreenSample::from_pixels(260, 120, 260 * 3, ScreenPixelFormat::Rgb888, 0, pixels);
+
+        let report = probe_overlay_smoke_grab_pixels(&sample);
+
+        assert!(report.passed());
         assert_eq!(report.matched_pixels, report.sampled_pixels);
     }
 
@@ -1130,7 +1244,7 @@ mod tests {
 
         process.write_hidden().unwrap();
         let hidden_state = fs::read_to_string(&process.state_path).unwrap();
-        assert!(hidden_state.contains("\"visuals\":[]"));
+        assert!(hidden_state.contains("Item { width: 1; height: 1 }"));
 
         let _ = fs::remove_file(&process.qml_path);
         let _ = fs::remove_file(&process.state_path);

@@ -23,7 +23,22 @@ nix develop -c cargo test
 nix flake check
 ```
 
-## Live KDE Overlay Smoke Test
+## Nested KDE Overlay Smoke Test
+
+Run the fast compositor smoke check in a nested virtual KWin session:
+
+```sh
+just overlay-smoke-nested
+```
+
+This starts a private D-Bus session and virtual KWin output, renders the native
+overlay smoke bar, verifies that KWin can place the overlay window, asks the QML
+scene to save a rendered image, converts that image to raw RGB with ImageMagick,
+and checks the expected magenta pixel region. It does not open the screen-share
+portal and is intended for renderer/placement regression testing during
+implementation.
+
+## Live KDE Portal Overlay Smoke Test
 
 Run the compositor smoke check from a KDE Plasma Wayland session:
 
@@ -37,6 +52,12 @@ captures a screen frame through the screen-read provider, checks the expected
 pixel region, and then cleans up the overlay. Selecting a single game/window may
 exclude overlay surfaces from the captured frame and should fail the pixel
 check.
+
+If `doctor overlay` reports `matched_pixels=0` but `just overlay-smoke-nested`
+passes, the native renderer can spawn, place, and paint under KDE Wayland, and
+the remaining failure is in the real portal capture path or selection. If both
+fail, debug native QML window creation, KWin placement, and overlay colors
+before testing PoE2.
 
 ## Lua Example Shape
 

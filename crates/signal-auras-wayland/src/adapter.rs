@@ -3,9 +3,11 @@ use signal_auras_core::{
     CapabilitySet, CapabilityStatus, CleanupReport, DiagnosableError, ErrorPhase, HotkeyBinding,
     HotkeyRegistrar, InputEmission, InputProviderBackend, InputProviderConfig, MacroAction,
     MacroExecutor, MotionInputEvent, MotionToken, OverlayProviderReport, OverlaySnapshot,
-    ProcessName, RegistrationId, ScreenSample, ScreenSampleProvider, SynthesizedInputRequest,
+    ProcessName, RegistrationId, ScreenPixelFormat, ScreenSample, ScreenSampleProvider,
+    SynthesizedInputRequest,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use crate::capability::{environment_probe, KdeEnvironment};
 use crate::diagnostics::unsupported_protocol;
@@ -419,9 +421,20 @@ impl RealWaylandAdapter {
         }
     }
 
+    pub fn run_overlay_nested_smoke_test(
+        &mut self,
+    ) -> Result<OverlaySmokeTestReport, DiagnosableError> {
+        let result = self.run_overlay_nested_smoke_test_inner();
+        let cleanup_result = self.cleanup_overlays();
+        match (result, cleanup_result) {
+            (Ok(report), Ok(_)) => Ok(report),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
     fn run_overlay_smoke_test_inner(&mut self) -> Result<OverlaySmokeTestReport, DiagnosableError> {
-        self.render_overlay_snapshot(crate::overlay::overlay_smoke_snapshot())?;
-        std::thread::sleep(std::time::Duration::from_millis(750));
+        self.render_overlay_smoke_until_ready()?;
         let sample = self.capture_screen_sample()?;
         let pixel_report = crate::overlay::probe_overlay_smoke_pixels(&sample);
         if !pixel_report.passed() {
@@ -445,6 +458,70 @@ impl RealWaylandAdapter {
             overlay_id: crate::overlay::OVERLAY_SMOKE_ID.to_string(),
             pixel_report,
         })
+    }
+
+    fn run_overlay_nested_smoke_test_inner(
+        &mut self,
+    ) -> Result<OverlaySmokeTestReport, DiagnosableError> {
+        self.render_overlay_smoke_until_ready()?;
+        let grab_path = render_standalone_qml_smoke_grab()?;
+        let sample_result = load_png_sample_with_magick(&grab_path);
+        let sample = sample_result?;
+        let pixel_report = crate::overlay::probe_overlay_smoke_grab_pixels(&sample);
+        if !pixel_report.passed() {
+            let grab_detail = if keep_overlay_smoke_grab() {
+                format!(" grab={}", grab_path.display())
+            } else {
+                let _ = std::fs::remove_file(&grab_path);
+                String::new()
+            };
+            let runtime_diagnostic = self
+                .overlay_renderer
+                .runtime_diagnostic(crate::overlay::OVERLAY_SMOKE_ID)
+                .map(|diagnostic| format!(" {diagnostic}"))
+                .unwrap_or_default();
+            return Err(DiagnosableError::new(
+                ErrorPhase::CapabilityProbe,
+                format!(
+                    "overlay nested pixel check failed: matched_pixels={} sampled_pixels={} sample={}x{} format={:?}{}{}",
+                    pixel_report.matched_pixels,
+                    pixel_report.sampled_pixels,
+                    pixel_report.sample_width,
+                    pixel_report.sample_height,
+                    pixel_report.pixel_format,
+                    grab_detail,
+                    runtime_diagnostic
+                ),
+            )
+            .with_source("native-overlay-nested-smoke")
+            .with_remediation(
+                "run `just overlay-smoke-nested` to verify in a clean nested KWin session, or set SIGNAL_AURAS_KEEP_OVERLAY_SMOKE_GRAB=1 to inspect the rendered QML grab",
+            ));
+        }
+        let _ = std::fs::remove_file(&grab_path);
+        Ok(OverlaySmokeTestReport {
+            overlay_id: crate::overlay::OVERLAY_SMOKE_ID.to_string(),
+            pixel_report,
+        })
+    }
+
+    fn render_overlay_smoke_until_ready(&mut self) -> Result<(), DiagnosableError> {
+        let snapshot = crate::overlay::overlay_smoke_snapshot();
+        for _ in 0..20 {
+            self.render_overlay_snapshot(snapshot.clone())?;
+            if self.environment.is_some()
+                || self
+                    .overlay_placements
+                    .contains_key(crate::overlay::OVERLAY_SMOKE_ID)
+            {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        self.render_overlay_snapshot(snapshot)?;
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        Ok(())
     }
 
     pub fn active_overlay_snapshot_for_test(&self, overlay_id: &str) -> Option<&OverlaySnapshot> {
@@ -761,6 +838,257 @@ impl MacroExecutor for RealWaylandAdapter {
     }
 }
 
+fn render_standalone_qml_smoke_grab() -> Result<PathBuf, DiagnosableError> {
+    let qml_path = unique_overlay_smoke_qml_path();
+    let grab_path = unique_overlay_smoke_grab_path();
+    std::fs::write(&qml_path, standalone_qml_smoke_source(&grab_path)).map_err(|error| {
+        DiagnosableError::new(
+            ErrorPhase::CapabilityProbe,
+            format!("failed to write standalone QML smoke file: {error}"),
+        )
+        .with_source("native-overlay-nested-smoke")
+    })?;
+    let mut child = std::process::Command::new("qml")
+        .arg("--transparent")
+        .arg("-f")
+        .arg(&qml_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            DiagnosableError::new(
+                ErrorPhase::CapabilityProbe,
+                format!("failed to launch standalone QML smoke renderer: {error}"),
+            )
+            .with_source("native-overlay-nested-smoke")
+            .with_remediation("enter `nix develop` so the Qt qml launcher is available in PATH")
+        })?;
+    for _ in 0..40 {
+        if grab_path.exists() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&qml_path);
+            return Ok(grab_path);
+        }
+        if let Some(status) = child.try_wait().map_err(overlay_smoke_io_error)? {
+            let _ = std::fs::remove_file(&qml_path);
+            return Err(DiagnosableError::new(
+                ErrorPhase::CapabilityProbe,
+                format!("standalone QML smoke renderer exited before writing grab: {status}"),
+            )
+            .with_source("native-overlay-nested-smoke")
+            .with_remediation("verify the Qt qml runtime can render and save grabToImage output"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_file(&qml_path);
+    Err(DiagnosableError::new(
+        ErrorPhase::CapabilityProbe,
+        format!(
+            "standalone QML smoke renderer did not write grab '{}'",
+            grab_path.display()
+        ),
+    )
+    .with_source("native-overlay-nested-smoke")
+    .with_remediation("verify the Qt qml runtime can render and save grabToImage output"))
+}
+
+fn standalone_qml_smoke_source(grab_path: &Path) -> String {
+    format!(
+        r##"import QtQuick
+import QtQuick.Window
+
+Window {{
+    id: root
+    width: 260
+    height: 120
+    visible: true
+    color: "transparent"
+    flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+
+    Item {{
+        id: paintRoot
+        anchors.fill: parent
+
+        Rectangle {{
+            x: 32
+            y: 14
+            width: 120
+            height: 20
+            color: "#ff00ff"
+        }}
+    }}
+
+    Timer {{
+        interval: 500
+        repeat: false
+        running: true
+        onTriggered: paintRoot.grabToImage(function(result) {{
+            result.saveToFile({grab_path:?})
+            Qt.quit()
+        }})
+    }}
+}}
+"##,
+        grab_path = grab_path.display().to_string(),
+    )
+}
+
+fn overlay_smoke_io_error(error: std::io::Error) -> DiagnosableError {
+    DiagnosableError::new(
+        ErrorPhase::CapabilityProbe,
+        format!("standalone QML smoke process error: {error}"),
+    )
+    .with_source("native-overlay-nested-smoke")
+}
+
+fn load_png_sample_with_magick(path: &Path) -> Result<ScreenSample, DiagnosableError> {
+    let (width, height) = identify_png_dimensions(path)?;
+    let expected_len = width
+        .checked_mul(height)
+        .and_then(|pixels| pixels.checked_mul(3))
+        .ok_or_else(|| {
+            DiagnosableError::new(
+                ErrorPhase::CapabilityProbe,
+                "screenshot dimensions overflowed raw RGB conversion size",
+            )
+            .with_source("imagemagick")
+        })?;
+    let output = std::process::Command::new("magick")
+        .arg(path)
+        .args(["-depth", "8", "RGB:-"])
+        .output()
+        .map_err(|error| {
+            DiagnosableError::new(
+                ErrorPhase::CapabilityProbe,
+                format!("failed to launch ImageMagick for overlay nested smoke test: {error}"),
+            )
+            .with_source("imagemagick")
+            .with_remediation("enter `nix develop` so ImageMagick is available in PATH")
+        })?;
+    if !output.status.success() {
+        return Err(DiagnosableError::new(
+            ErrorPhase::CapabilityProbe,
+            format!(
+                "ImageMagick RGB conversion failed with status {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        )
+        .with_source("imagemagick")
+        .with_remediation("verify the QML grab PNG is readable"));
+    }
+    if output.stdout.len() != expected_len as usize {
+        return Err(DiagnosableError::new(
+            ErrorPhase::CapabilityProbe,
+            format!(
+                "ImageMagick RGB conversion returned {} bytes, expected {} for {}x{}",
+                output.stdout.len(),
+                expected_len,
+                width,
+                height
+            ),
+        )
+        .with_source("imagemagick")
+        .with_remediation("verify the QML grab PNG dimensions are stable and readable"));
+    }
+    Ok(ScreenSample::from_pixels(
+        width,
+        height,
+        width * 3,
+        ScreenPixelFormat::Rgb888,
+        0,
+        output.stdout,
+    ))
+}
+
+fn identify_png_dimensions(path: &Path) -> Result<(u32, u32), DiagnosableError> {
+    let output = std::process::Command::new("magick")
+        .arg("identify")
+        .arg("-format")
+        .arg("%w %h")
+        .arg(path)
+        .output()
+        .map_err(|error| {
+            DiagnosableError::new(
+                ErrorPhase::CapabilityProbe,
+                format!("failed to launch ImageMagick identify: {error}"),
+            )
+            .with_source("imagemagick")
+            .with_remediation("enter `nix develop` so ImageMagick is available in PATH")
+        })?;
+    if !output.status.success() {
+        return Err(DiagnosableError::new(
+            ErrorPhase::CapabilityProbe,
+            format!(
+                "ImageMagick identify failed with status {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        )
+        .with_source("imagemagick")
+        .with_remediation("verify the QML grab PNG is readable"));
+    }
+    parse_png_dimensions(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_png_dimensions(output: &str) -> Result<(u32, u32), DiagnosableError> {
+    let mut parts = output.split_whitespace();
+    let width = parts
+        .next()
+        .ok_or_else(invalid_png_dimensions)?
+        .parse::<u32>()
+        .map_err(|_| invalid_png_dimensions())?;
+    let height = parts
+        .next()
+        .ok_or_else(invalid_png_dimensions)?
+        .parse::<u32>()
+        .map_err(|_| invalid_png_dimensions())?;
+    if parts.next().is_some() || width == 0 || height == 0 {
+        return Err(invalid_png_dimensions());
+    }
+    Ok((width, height))
+}
+
+fn invalid_png_dimensions() -> DiagnosableError {
+    DiagnosableError::new(
+        ErrorPhase::CapabilityProbe,
+        "ImageMagick returned invalid PNG dimensions",
+    )
+    .with_source("imagemagick")
+}
+
+fn unique_overlay_smoke_grab_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "signal-auras-overlay-smoke-grab-{}-{}.png",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ))
+}
+
+fn unique_overlay_smoke_qml_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "signal-auras-overlay-smoke-grab-{}-{}.qml",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ))
+}
+
+fn keep_overlay_smoke_grab() -> bool {
+    std::env::var("SIGNAL_AURAS_KEEP_OVERLAY_SMOKE_GRAB")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+}
+
 impl ScreenSampleProvider for RealWaylandAdapter {
     fn capture_screen_sample(&mut self) -> Result<ScreenSample, DiagnosableError> {
         if self.screen_cast_session.is_none() {
@@ -835,6 +1163,19 @@ mod tests {
         assert!(adapter
             .active_overlay_snapshot_for_test("poe2-status")
             .is_none());
+    }
+
+    #[test]
+    fn parses_imagemagick_png_dimensions() {
+        assert_eq!(parse_png_dimensions("3840 2160").unwrap(), (3840, 2160));
+    }
+
+    #[test]
+    fn rejects_invalid_imagemagick_png_dimensions() {
+        assert!(parse_png_dimensions("3840").is_err());
+        assert!(parse_png_dimensions("3840 0").is_err());
+        assert!(parse_png_dimensions("3840 2160 extra").is_err());
+        assert!(parse_png_dimensions("wide tall").is_err());
     }
 
     fn native_overlay_snapshot(id: &str) -> OverlaySnapshot {
