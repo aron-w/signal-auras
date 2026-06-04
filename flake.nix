@@ -82,6 +82,7 @@
           ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
             kdePackages.kglobalaccel
             kdePackages.kwin
+            kdePackages.layer-shell-qt
             kdePackages.qttools
             kdePackages.xdg-desktop-portal-kde
             systemd

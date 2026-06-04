@@ -195,6 +195,10 @@ impl NativeOverlayRenderer {
         }
     }
 
+    pub fn uses_compositor_layer_surface(&self) -> bool {
+        matches!(self, Self::Qml(_))
+    }
+
     fn backend_available(&self) -> bool {
         match self {
             Self::InMemory(_) => true,
@@ -486,6 +490,7 @@ impl QmlOverlayProcess {
             .arg("--transparent")
             .arg("-f")
             .arg(&self.qml_path)
+            .env("QT_WAYLAND_SHELL_INTEGRATION", "layer-shell")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr));
@@ -576,6 +581,7 @@ fn qml_overlay_source(overlay_id: &str, state_path: &Path, bounds: OverlayBounds
     format!(
         r##"import QtQuick
 import QtQuick.Window
+import org.kde.layershell 1.0 as LayerShell
 
 Window {{
     id: root
@@ -588,6 +594,14 @@ Window {{
     visible: true
     opacity: 0
     flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus
+    LayerShell.Window.scope: "signal-auras-overlay"
+    LayerShell.Window.layer: LayerShell.Window.LayerOverlay
+    LayerShell.Window.anchors: LayerShell.Window.AnchorTop | LayerShell.Window.AnchorLeft
+    LayerShell.Window.margins: Qt.margins({x}, {y}, 0, 0)
+    LayerShell.Window.exclusionZone: -1
+    LayerShell.Window.keyboardInteractivity: LayerShell.Window.KeyboardInteractivityNone
+    LayerShell.Window.activateOnShow: false
+    LayerShell.Window.wantsToBeOnActiveScreen: true
     property url stateUrl: Qt.resolvedUrl({state_name:?})
     property string grabPath: {grab_path:?}
     property bool grabSaved: false
@@ -1119,6 +1133,12 @@ mod tests {
         assert!(qml.contains("WindowTransparentForInput"));
         assert!(qml.contains("WindowDoesNotAcceptFocus"));
         assert!(qml.contains("WindowStaysOnTopHint"));
+        assert!(qml.contains("import org.kde.layershell 1.0 as LayerShell"));
+        assert!(qml.contains("LayerShell.Window.layer: LayerShell.Window.LayerOverlay"));
+        assert!(qml.contains(
+            "LayerShell.Window.keyboardInteractivity: LayerShell.Window.KeyboardInteractivityNone"
+        ));
+        assert!(qml.contains("LayerShell.Window.margins: Qt.margins(10, 20, 0, 0)"));
         assert!(!qml.contains("Qt.Tool"));
         assert!(qml.contains("color: \"transparent\""));
         assert!(qml.contains("visible: true"));

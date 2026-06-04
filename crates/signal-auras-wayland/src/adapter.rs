@@ -334,6 +334,11 @@ impl RealWaylandAdapter {
         let overlay_id = snapshot.overlay_id.clone();
         let placement = crate::overlay::overlay_window_placement(&snapshot);
         self.overlay_renderer.render_snapshot(snapshot)?;
+        if self.overlay_renderer.uses_compositor_layer_surface() {
+            self.overlay_placements.remove(&overlay_id);
+            self.overlay_placement_attempts.remove(&overlay_id);
+            return Ok(());
+        }
         if self.environment.is_some() {
             return Ok(());
         }
@@ -1180,6 +1185,14 @@ mod tests {
         assert!(adapter
             .active_overlay_snapshot_for_test("poe2-status")
             .is_none());
+    }
+
+    #[test]
+    fn live_layer_shell_overlay_skips_kwin_window_placement() {
+        let mut adapter = RealWaylandAdapter::new();
+        adapter.overlay_renderer = crate::overlay::NativeOverlayRenderer::live();
+
+        assert!(adapter.overlay_renderer.uses_compositor_layer_surface());
     }
 
     #[test]
