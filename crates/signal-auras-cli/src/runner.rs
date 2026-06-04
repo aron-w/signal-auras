@@ -2466,7 +2466,7 @@ impl LiveStateTrackerRuntime {
         let summary = state.summary();
         let unchanged = self.last_summaries.get(id) == Some(&summary);
         self.last_summaries.insert(id.to_string(), summary);
-        if unchanged && matches!(state, TrackerState::Inactive { .. }) {
+        if unchanged {
             StateTrackerUpdateLogLevel::Trace
         } else {
             StateTrackerUpdateLogLevel::Info
@@ -4904,7 +4904,7 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_inactive_state_tracker_updates_are_trace_only() {
+    fn unchanged_state_tracker_updates_are_trace_only() {
         let trackers = signal_auras_core::StateTrackerDefinitionSet::default();
         let mut runtime = LiveStateTrackerRuntime::new(StateTrackerPoller::new(trackers));
         let inactive = TrackerState::Inactive {
@@ -4933,7 +4933,7 @@ mod tests {
         );
         assert_eq!(
             runtime.log_level_for_update("heavy_stun", &active),
-            StateTrackerUpdateLogLevel::Info
+            StateTrackerUpdateLogLevel::Trace
         );
     }
 

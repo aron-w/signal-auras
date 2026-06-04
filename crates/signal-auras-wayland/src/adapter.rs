@@ -94,7 +94,6 @@ pub fn real_registration_unavailable() -> DiagnosableError {
     unsupported_protocol(Capability::GlobalShortcut)
 }
 
-#[derive(Default)]
 pub struct RealWaylandAdapter {
     registrations: Vec<RegistrationId>,
     environment: Option<KdeEnvironment>,
@@ -109,7 +108,17 @@ pub struct RealWaylandAdapter {
 
 impl RealWaylandAdapter {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            registrations: Vec::new(),
+            environment: None,
+            rejected_hotkeys: BTreeSet::new(),
+            portal_session: None,
+            screen_cast_session: None,
+            uinput_session: None,
+            shortcut_bridge: None,
+            evdev_provider: None,
+            overlay_renderer: crate::overlay::NativeOverlayRenderer::live(),
+        }
     }
 
     pub fn from_environment(environment: KdeEnvironment) -> Self {
@@ -122,7 +131,7 @@ impl RealWaylandAdapter {
             uinput_session: None,
             shortcut_bridge: None,
             evdev_provider: None,
-            overlay_renderer: crate::overlay::NativeOverlayRenderer::default(),
+            overlay_renderer: crate::overlay::NativeOverlayRenderer::in_memory(),
         }
     }
 
@@ -287,7 +296,7 @@ impl RealWaylandAdapter {
             .environment
             .clone()
             .unwrap_or_else(crate::capability::KdeEnvironment::from_process_env);
-        crate::overlay::provider_report_for_environment(&environment)
+        self.overlay_renderer.provider_report(&environment)
     }
 
     pub fn render_overlay_snapshot(
@@ -445,6 +454,12 @@ impl RealWaylandAdapter {
                 }
             )
         })
+    }
+}
+
+impl Default for RealWaylandAdapter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
