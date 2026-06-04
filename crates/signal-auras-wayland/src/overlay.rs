@@ -596,7 +596,7 @@ Window {{
             grabTimer.restart()
         }}
         overlayLoader.active = false
-        overlayLoader.source = stateUrl
+        overlayLoader.source = stateUrl.toString() + "?t=" + Date.now()
         overlayLoader.active = true
     }}
 
@@ -1099,7 +1099,7 @@ mod tests {
         assert!(qml.contains("width: 160"));
         assert!(qml.contains("height: 12"));
         assert!(qml.contains("Loader"));
-        assert!(qml.contains("overlayLoader.source"));
+        assert!(qml.contains("overlayLoader.source = stateUrl.toString() + \"?t=\" + Date.now()"));
         assert!(qml.contains("grabToImage"));
         assert!(qml.contains("Signal Auras Overlay poe2-bars"));
         assert!(!qml.contains("visible: modelData.active"));
