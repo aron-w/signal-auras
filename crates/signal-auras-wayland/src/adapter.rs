@@ -2,13 +2,14 @@ use signal_auras_core::{
     ActiveProcessContext, ActiveProcessProvider, Capability, CapabilityKind, CapabilityReport,
     CapabilitySet, CapabilityStatus, CleanupReport, DiagnosableError, ErrorPhase, HotkeyBinding,
     HotkeyRegistrar, InputEmission, InputProviderBackend, InputProviderConfig, MacroAction,
-    MacroExecutor, MotionInputEvent, MotionToken, ProcessName, RegistrationId, ScreenSample,
-    ScreenSampleProvider, SynthesizedInputRequest,
+    MacroExecutor, MotionInputEvent, MotionToken, OverlayProviderReport, OverlaySnapshot,
+    ProcessName, RegistrationId, ScreenSample, ScreenSampleProvider, SynthesizedInputRequest,
 };
 use std::collections::BTreeSet;
 
 use crate::capability::{environment_probe, KdeEnvironment};
 use crate::diagnostics::unsupported_protocol;
+use crate::overlay::OverlayRendererAdapter;
 
 #[derive(Default)]
 pub struct MockableWaylandAdapter {
@@ -103,6 +104,7 @@ pub struct RealWaylandAdapter {
     uinput_session: Option<crate::uinput::UinputOutputSession>,
     shortcut_bridge: Option<crate::kde_bridge::KwinShortcutBridge>,
     evdev_provider: Option<crate::evdev::EvdevObservationProvider>,
+    overlay_renderer: crate::overlay::NativeOverlayRenderer,
 }
 
 impl RealWaylandAdapter {
@@ -120,6 +122,7 @@ impl RealWaylandAdapter {
             uinput_session: None,
             shortcut_bridge: None,
             evdev_provider: None,
+            overlay_renderer: crate::overlay::NativeOverlayRenderer::default(),
         }
     }
 
@@ -277,6 +280,29 @@ impl RealWaylandAdapter {
                 report
             }
         }
+    }
+
+    pub fn overlay_provider_report(&self) -> OverlayProviderReport {
+        let environment = self
+            .environment
+            .clone()
+            .unwrap_or_else(crate::capability::KdeEnvironment::from_process_env);
+        crate::overlay::provider_report_for_environment(&environment)
+    }
+
+    pub fn render_overlay_snapshot(
+        &mut self,
+        snapshot: OverlaySnapshot,
+    ) -> Result<(), DiagnosableError> {
+        self.overlay_renderer.render_snapshot(snapshot)
+    }
+
+    pub fn cleanup_overlays(&mut self) -> Result<CleanupReport, DiagnosableError> {
+        self.overlay_renderer.cleanup_all()
+    }
+
+    pub fn active_overlay_snapshot_for_test(&self, overlay_id: &str) -> Option<&OverlaySnapshot> {
+        self.overlay_renderer.active_snapshot(overlay_id)
     }
 
     pub fn cleanup_report(&self) -> CleanupReport {
@@ -524,6 +550,7 @@ impl HotkeyRegistrar for RealWaylandAdapter {
     }
 
     fn unregister_all(&mut self) -> Result<(), DiagnosableError> {
+        self.cleanup_overlays()?;
         if let Some(bridge) = &mut self.shortcut_bridge {
             let _ = bridge.unload()?;
         }
@@ -613,6 +640,9 @@ impl ScreenSampleProvider for RealWaylandAdapter {
 mod tests {
     use super::*;
     use crate::capability::{KdeEnvironment, KdeServiceAvailability};
+    use signal_auras_core::{
+        OverlayLifecycleState, OverlayRect, RendererProviderId, VisualSnapshot,
+    };
 
     #[test]
     fn cancel_pending_releases_current_run_input_sessions() {
@@ -628,5 +658,55 @@ mod tests {
 
         assert!(adapter.portal_session.is_none());
         assert!(adapter.uinput_session.is_none());
+    }
+
+    #[test]
+    fn real_adapter_reports_renders_and_cleans_up_native_overlay_snapshots() {
+        let mut adapter = RealWaylandAdapter::from_environment(
+            crate::overlay::available_overlay_environment_for_test(),
+        );
+
+        assert!(adapter
+            .overlay_provider_report()
+            .status(RendererProviderId::Native)
+            .availability
+            .allows_activation());
+
+        adapter
+            .render_overlay_snapshot(native_overlay_snapshot("poe2-status"))
+            .unwrap();
+        assert!(adapter
+            .active_overlay_snapshot_for_test("poe2-status")
+            .is_some());
+
+        adapter.unregister_all().unwrap();
+        assert!(adapter
+            .active_overlay_snapshot_for_test("poe2-status")
+            .is_none());
+    }
+
+    fn native_overlay_snapshot(id: &str) -> OverlaySnapshot {
+        OverlaySnapshot {
+            overlay_id: id.to_string(),
+            provider: RendererProviderId::Native,
+            lifecycle: OverlayLifecycleState::Active,
+            visuals: vec![VisualSnapshot {
+                visual_id: "heavy_stun".to_string(),
+                rect: OverlayRect {
+                    x: 20,
+                    y: 30,
+                    w: 240,
+                    h: 18,
+                },
+                opacity: 0.7,
+                fill: "#d8b84c".to_string(),
+                background: "#101820".to_string(),
+                label_visible: true,
+                fill_fraction: 0.42,
+                active: true,
+                ready: false,
+            }],
+            diagnostic: None,
+        }
     }
 }

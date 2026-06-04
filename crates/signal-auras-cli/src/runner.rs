@@ -12,9 +12,9 @@ use signal_auras_core::{
     LoopDefinition, LoopInterval, LoopRepeat, LuaCallbackScheduler, MacroAction, MacroDefinition,
     MacroExecutor, MacroRunId, MacroRunPoll, MacroRunState, MacroScheduler, MotionDefinition,
     MotionDiscardReason, MotionInputEvent, MotionInputState, MotionRuntime, MotionRuntimeEvent,
-    MotionToken, MotionTrigger, OverlayProviderReport, RegistrationState, RuntimeMotion,
-    RuntimePress, RuntimeStats, RustOperationBatch, ScopeSelection, ShutdownReason,
-    StateTrackerPoller, SynthesizedInputRequest, TrackerState,
+    MotionToken, MotionTrigger, RegistrationState, RuntimeMotion, RuntimePress, RuntimeStats,
+    RustOperationBatch, ScopeSelection, ShutdownReason, StateTrackerPoller,
+    SynthesizedInputRequest, TrackerState,
 };
 use signal_auras_lua::{
     load_lua_controller_program_file, load_lua_file, ActiveWindowMetadata, ImperativeLuaController,
@@ -2387,26 +2387,37 @@ fn poll_live_state_trackers(
             }
         }
     }
-    poll_live_overlays(program, runtime, capabilities, &active_context, log);
+    poll_live_overlays(
+        program,
+        runtime,
+        adapter,
+        capabilities,
+        &active_context,
+        log,
+        now_ms,
+    )?;
     Ok(())
 }
 
 fn poll_live_overlays(
     program: &ControllerProgram,
     runtime: &LiveStateTrackerRuntime,
+    adapter: &mut RealWaylandAdapter,
     capabilities: &CapabilityReport,
     active_context: &signal_auras_core::ActiveProcessContext,
     log: RuntimeLog,
-) {
+    now_ms: u64,
+) -> Result<(), DiagnosableError> {
     if program.overlays().is_empty() {
-        return;
+        return Ok(());
     }
+    let provider_report = adapter.overlay_provider_report();
     let snapshots = program.overlays().snapshots(
-        0,
+        now_ms,
         capabilities,
         active_context,
         runtime.poller.latest_states(),
-        &OverlayProviderReport::native_available(),
+        &provider_report,
     );
     for snapshot in snapshots {
         if snapshot.is_active() {
@@ -2416,7 +2427,7 @@ fn poll_live_overlays(
                 snapshot.provider.as_str(),
                 snapshot.visuals.len()
             ));
-        } else if let Some(diagnostic) = snapshot.diagnostic {
+        } else if let Some(diagnostic) = &snapshot.diagnostic {
             log.debug(format!(
                 "event=overlay_snapshot id={} provider={} state={:?} reason={:?} tracker={:?} field={:?}",
                 diagnostic.overlay_id,
@@ -2427,7 +2438,9 @@ fn poll_live_overlays(
                 diagnostic.field.map(|field| field.as_str())
             ));
         }
+        adapter.render_overlay_snapshot(snapshot)?;
     }
+    Ok(())
 }
 
 struct LiveStateTrackerRuntime {
