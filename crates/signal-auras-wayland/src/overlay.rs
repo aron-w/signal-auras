@@ -439,9 +439,15 @@ impl QmlOverlayProcess {
         };
         fs::create_dir_all(dir).map_err(overlay_io_error)?;
         if !self.qml_written {
+            let bounds = overlay_bounds(&snapshot.visuals).unwrap_or(OverlayBounds {
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 1,
+            });
             fs::write(
                 &self.qml_path,
-                qml_overlay_source(&self.overlay_id, &self.state_path),
+                qml_overlay_source(&self.overlay_id, &self.state_path, bounds),
             )
             .map_err(overlay_io_error)?;
             self.qml_written = true;
@@ -560,7 +566,7 @@ pub fn qml_overlay_title(overlay_id: &str) -> String {
     format!("Signal Auras Overlay {overlay_id}")
 }
 
-fn qml_overlay_source(overlay_id: &str, state_path: &Path) -> String {
+fn qml_overlay_source(overlay_id: &str, state_path: &Path, bounds: OverlayBounds) -> String {
     let state_name = state_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -573,13 +579,12 @@ import QtQuick.Window
 Window {{
     id: root
     title: {title:?}
-    x: 0
-    y: 0
-    width: Screen.width
-    height: Screen.height
+    x: {x}
+    y: {y}
+    width: {w}
+    height: {h}
     color: "transparent"
     visible: true
-    visibility: Window.FullScreen
     opacity: 0
     flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus
     property url stateUrl: Qt.resolvedUrl({state_name:?})
@@ -627,6 +632,10 @@ Window {{
 }}
 "##,
         title = qml_overlay_title(overlay_id),
+        x = bounds.x,
+        y = bounds.y,
+        w = bounds.w,
+        h = bounds.h,
         state_name = state_name,
         grab_path = grab_path,
         interval_ms = QML_POLL_INTERVAL_MS,
@@ -1068,24 +1077,34 @@ mod tests {
 
     #[test]
     fn qml_renderer_generates_transparent_input_passthrough_window_source() {
-        let qml = qml_overlay_source("poe2-bars", Path::new("/tmp/signal-auras-state.json"));
+        let qml = qml_overlay_source(
+            "poe2-bars",
+            Path::new("/tmp/signal-auras-state.qml"),
+            OverlayBounds {
+                x: 10,
+                y: 20,
+                w: 160,
+                h: 12,
+            },
+        );
 
         assert!(qml.contains("WindowTransparentForInput"));
         assert!(qml.contains("WindowDoesNotAcceptFocus"));
         assert!(qml.contains("WindowStaysOnTopHint"));
         assert!(qml.contains("color: \"transparent\""));
         assert!(qml.contains("visible: true"));
-        assert!(qml.contains("visibility: Window.FullScreen"));
+        assert!(qml.contains("x: 10"));
+        assert!(qml.contains("y: 20"));
         assert!(qml.contains("opacity: 0"));
-        assert!(qml.contains("width: Screen.width"));
-        assert!(qml.contains("height: Screen.height"));
+        assert!(qml.contains("width: 160"));
+        assert!(qml.contains("height: 12"));
         assert!(qml.contains("Loader"));
         assert!(qml.contains("overlayLoader.source"));
         assert!(qml.contains("grabToImage"));
         assert!(qml.contains("Signal Auras Overlay poe2-bars"));
         assert!(!qml.contains("visible: modelData.active"));
-        assert!(!qml.contains("root.x = parsed.x"));
-        assert!(!qml.contains("root.width ="));
+        assert!(!qml.contains("Window.FullScreen"));
+        assert!(!qml.contains("Screen.width"));
     }
 
     #[test]

@@ -820,6 +820,7 @@ fn kwin_configure_overlay_window_script(
              if (caption === title || caption.indexOf(title) === 0 || (overlayPid !== null && pid === overlayPid.toString())) {{ target = window; break; }}\n\
          }}\n\
          if (target) {{\n\
+             try {{ target.frameGeometry = {{ x: {x}, y: {y}, width: {w}, height: {h} }}; }} catch (error) {{}}\n\
              try {{ target.keepAbove = true; }} catch (error) {{}}\n\
              try {{ target.skipTaskbar = true; }} catch (error) {{}}\n\
              try {{ target.skipPager = true; }} catch (error) {{}}\n\
@@ -831,6 +832,10 @@ fn kwin_configure_overlay_window_script(
         kwin_window_helpers(),
         title = placement.title.as_str(),
         pid = js_optional_u32(placement.process_id),
+        x = placement.x,
+        y = placement.y,
+        w = placement.w,
+        h = placement.h,
         bus = bus_name,
         path = object_path,
         request = request_id,
@@ -1008,11 +1013,13 @@ mod tests {
         assert!(script.contains("caption === title || caption.indexOf(title) === 0"));
         assert!(script.contains("var overlayPid = 4242;"));
         assert!(script.contains("pid === overlayPid.toString()"));
+        assert!(
+            script.contains("target.frameGeometry = { x: 120, y: 140, width: 320, height: 48 }")
+        );
         assert!(script.contains("target.keepAbove = true"));
         assert!(script.contains("target.skipTaskbar = true"));
         assert!(script.contains("target.noBorder = true"));
         assert!(script.contains("\"windowResult\""));
-        assert!(!script.contains("frameGeometry"));
         assert!(!script.contains("moveResize"));
         assert!(!script.contains("registerShortcut"));
         assert!(!script.contains("capture"));
