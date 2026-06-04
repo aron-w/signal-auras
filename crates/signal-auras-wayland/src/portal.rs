@@ -5,7 +5,9 @@ use signal_auras_core::{
 };
 use std::{
     cell::RefCell,
+    env, fs,
     os::fd::OwnedFd,
+    path::PathBuf,
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -260,15 +262,17 @@ impl Drop for PortalScreenCastSession {
 async fn open_screencast_portal() -> ashpd::Result<ScreenCastPortalHandles> {
     let proxy = Screencast::new().await?;
     let session = proxy.create_session(Default::default()).await?;
+    let restore_token = read_screen_cast_restore_token();
+    let mut select_options = SelectSourcesOptions::default()
+        .set_cursor_mode(CursorMode::Hidden)
+        .set_sources(SourceType::Monitor | SourceType::Window)
+        .set_multiple(false)
+        .set_persist_mode(PersistMode::ExplicitlyRevoked);
+    if let Some(token) = restore_token.as_deref() {
+        select_options = select_options.set_restore_token(Some(token));
+    }
     proxy
-        .select_sources(
-            &session,
-            SelectSourcesOptions::default()
-                .set_cursor_mode(CursorMode::Hidden)
-                .set_sources(SourceType::Monitor | SourceType::Window)
-                .set_multiple(false)
-                .set_persist_mode(PersistMode::DoNot),
-        )
+        .select_sources(&session, select_options)
         .await?
         .response()?;
 
@@ -276,6 +280,9 @@ async fn open_screencast_portal() -> ashpd::Result<ScreenCastPortalHandles> {
         .start(&session, None, Default::default())
         .await?
         .response()?;
+    if let Some(token) = response.restore_token() {
+        write_screen_cast_restore_token(token);
+    }
     let stream = response.streams().first().cloned().ok_or_else(|| {
         ashpd::Error::Portal(ashpd::PortalError::Failed(
             "no ScreenCast stream selected".into(),
@@ -298,6 +305,87 @@ async fn open_screencast_portal() -> ashpd::Result<ScreenCastPortalHandles> {
         stream,
         pipewire_fd,
     })
+}
+
+fn read_screen_cast_restore_token() -> Option<String> {
+    let path = screen_cast_restore_token_path()?;
+    match fs::read_to_string(&path) {
+        Ok(token) => not_empty(token.trim()).map(str::to_string),
+        Err(error) => {
+            tracing::debug!(
+                event = "screen_read_restore_token",
+                phase = "read",
+                path = %path.display(),
+                error = %error,
+                "no reusable xdg-desktop-portal ScreenCast restore token loaded"
+            );
+            None
+        }
+    }
+}
+
+fn write_screen_cast_restore_token(token: &str) {
+    let Some(token) = not_empty(token.trim()) else {
+        return;
+    };
+    let Some(path) = screen_cast_restore_token_path() else {
+        tracing::debug!(
+            event = "screen_read_restore_token",
+            phase = "write",
+            "no user state directory available for xdg-desktop-portal ScreenCast restore token"
+        );
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            tracing::warn!(
+                event = "screen_read_restore_token",
+                phase = "write",
+                path = %path.display(),
+                error = %error,
+                "failed to create directory for xdg-desktop-portal ScreenCast restore token"
+            );
+            return;
+        }
+    }
+    if let Err(error) = fs::write(&path, token) {
+        tracing::warn!(
+            event = "screen_read_restore_token",
+            phase = "write",
+            path = %path.display(),
+            error = %error,
+            "failed to store xdg-desktop-portal ScreenCast restore token"
+        );
+        return;
+    }
+    tracing::debug!(
+        event = "screen_read_restore_token",
+        phase = "write",
+        path = %path.display(),
+        "stored xdg-desktop-portal ScreenCast restore token"
+    );
+}
+
+fn screen_cast_restore_token_path() -> Option<PathBuf> {
+    screen_cast_restore_token_path_from_env(env::var_os("XDG_STATE_HOME"), env::var_os("HOME"))
+}
+
+fn screen_cast_restore_token_path_from_env(
+    xdg_state_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    let base = xdg_state_home
+        .map(PathBuf::from)
+        .or_else(|| home.map(|home| PathBuf::from(home).join(".local/state")))?;
+    Some(base.join("signal-auras").join("screencast-restore-token"))
+}
+
+fn not_empty(value: &str) -> Option<&str> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn open_pipewire_screencast(
@@ -710,4 +798,46 @@ fn screen_read_error(
         .with_capability(Capability::ScreenRead)
         .with_source(source)
         .with_remediation(remediation)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    #[test]
+    fn screen_cast_restore_token_prefers_xdg_state_home() {
+        let path = screen_cast_restore_token_path_from_env(
+            Some(OsString::from("/tmp/signal-auras-state")),
+            Some(OsString::from("/home/tester")),
+        )
+        .unwrap();
+
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/signal-auras-state")
+                .join("signal-auras")
+                .join("screencast-restore-token")
+        );
+    }
+
+    #[test]
+    fn screen_cast_restore_token_falls_back_to_home_state_dir() {
+        let path =
+            screen_cast_restore_token_path_from_env(None, Some(OsString::from("/home/tester")))
+                .unwrap();
+
+        assert_eq!(
+            path,
+            PathBuf::from("/home/tester")
+                .join(".local/state")
+                .join("signal-auras")
+                .join("screencast-restore-token")
+        );
+    }
+
+    #[test]
+    fn screen_cast_restore_token_path_is_unavailable_without_user_state() {
+        assert!(screen_cast_restore_token_path_from_env(None, None).is_none());
+    }
 }

@@ -821,7 +821,9 @@ fn kwin_configure_overlay_window_script(
          }}\n\
          if (target) {{\n\
              try {{ target.frameGeometry = {{ x: {x}, y: {y}, width: {w}, height: {h} }}; }} catch (error) {{}}\n\
+             try {{ target.keepAbove = false; }} catch (error) {{}}\n\
              try {{ target.keepAbove = true; }} catch (error) {{}}\n\
+             try {{ workspace.raiseWindow(target); }} catch (error) {{}}\n\
              try {{ target.skipTaskbar = true; }} catch (error) {{}}\n\
              try {{ target.skipPager = true; }} catch (error) {{}}\n\
              try {{ target.skipSwitcher = true; }} catch (error) {{}}\n\
@@ -1016,7 +1018,9 @@ mod tests {
         assert!(
             script.contains("target.frameGeometry = { x: 120, y: 140, width: 320, height: 48 }")
         );
+        assert!(script.contains("target.keepAbove = false"));
         assert!(script.contains("target.keepAbove = true"));
+        assert!(script.contains("workspace.raiseWindow(target)"));
         assert!(script.contains("target.skipTaskbar = true"));
         assert!(script.contains("target.noBorder = true"));
         assert!(script.contains("\"windowResult\""));

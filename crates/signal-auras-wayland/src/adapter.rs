@@ -534,8 +534,8 @@ impl RealWaylandAdapter {
 
     pub fn close_screen_cast_session(&mut self) -> CleanupReport {
         self.screen_cast_session
-            .as_mut()
-            .map(crate::portal::PortalScreenCastSession::close)
+            .take()
+            .map(|mut session| session.close())
             .unwrap_or_else(CleanupReport::empty)
     }
 
@@ -824,6 +824,7 @@ impl MacroExecutor for RealWaylandAdapter {
     }
 
     fn cancel_pending(&mut self) -> Result<(), DiagnosableError> {
+        self.cleanup_overlays()?;
         self.release_input_grab()?;
         if let Some(session) = &mut self.portal_session {
             let _ = session.close();
@@ -1138,6 +1139,22 @@ mod tests {
 
         assert!(adapter.portal_session.is_none());
         assert!(adapter.uinput_session.is_none());
+    }
+
+    #[test]
+    fn cancel_pending_cleans_up_overlay_windows_before_shutdown_finishes() {
+        let mut adapter = RealWaylandAdapter::from_environment(
+            crate::overlay::available_overlay_environment_for_test(),
+        );
+        adapter
+            .render_overlay_snapshot(native_overlay_snapshot("poe2-status"))
+            .unwrap();
+
+        adapter.cancel_pending().unwrap();
+
+        assert!(adapter
+            .active_overlay_snapshot_for_test("poe2-status")
+            .is_none());
     }
 
     #[test]
