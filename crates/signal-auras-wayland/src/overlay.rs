@@ -21,6 +21,7 @@ const QML_POLL_INTERVAL_MS: u64 = 50;
 pub struct OverlayWindowPlacement {
     pub overlay_id: String,
     pub title: String,
+    pub process_id: Option<u32>,
     pub x: u32,
     pub y: u32,
     pub w: u32,
@@ -146,6 +147,20 @@ impl NativeOverlayRenderer {
 
     pub fn last_lifecycle(&self) -> Option<OverlayLifecycleState> {
         self.mounted().last().map(|snapshot| snapshot.lifecycle)
+    }
+
+    pub fn overlay_process_id(&self, overlay_id: &str) -> Option<u32> {
+        match self {
+            Self::InMemory(_) => None,
+            Self::Qml(renderer) => renderer.overlay_process_id(overlay_id),
+        }
+    }
+
+    pub fn runtime_diagnostic(&self, overlay_id: &str) -> Option<String> {
+        match self {
+            Self::InMemory(_) => None,
+            Self::Qml(renderer) => renderer.runtime_diagnostic(overlay_id),
+        }
     }
 
     fn backend_available(&self) -> bool {
@@ -286,6 +301,18 @@ impl QmlOverlayRenderer {
 
     pub fn active_snapshot(&self, overlay_id: &str) -> Option<&OverlaySnapshot> {
         self.active.get(overlay_id)
+    }
+
+    pub fn overlay_process_id(&self, overlay_id: &str) -> Option<u32> {
+        self.processes
+            .get(overlay_id)
+            .and_then(QmlOverlayProcess::process_id)
+    }
+
+    pub fn runtime_diagnostic(&self, overlay_id: &str) -> Option<String> {
+        self.processes
+            .get(overlay_id)
+            .map(QmlOverlayProcess::runtime_diagnostic)
     }
 
     pub fn cleanup_all(&mut self) -> Result<CleanupReport, DiagnosableError> {
@@ -455,6 +482,19 @@ impl QmlOverlayProcess {
         format!("{snippet} (stderr: {})", self.stderr_path.display())
     }
 
+    fn process_id(&self) -> Option<u32> {
+        self.child.as_ref().map(Child::id)
+    }
+
+    fn runtime_diagnostic(&self) -> String {
+        format!(
+            "qml_path={} state_path={} {}",
+            self.qml_path.display(),
+            self.state_path.display(),
+            self.stderr_snippet()
+        )
+    }
+
     fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
@@ -490,7 +530,8 @@ Window {{
     width: 1
     height: 1
     color: "transparent"
-    visible: false
+    visible: true
+    opacity: 0
     flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus
     property string stateUrl: {state_url:?}
     property var bars: []
@@ -506,7 +547,7 @@ Window {{
             root.width = Math.max(1, parsed.w || 1)
             root.height = Math.max(1, parsed.h || 1)
             bars = parsed.visuals || []
-            root.visible = bars.length > 0
+            root.opacity = bars.length > 0 ? 1 : 0
         }}
     }}
 
@@ -595,6 +636,7 @@ pub fn overlay_window_placement(snapshot: &OverlaySnapshot) -> Option<OverlayWin
     Some(OverlayWindowPlacement {
         overlay_id: snapshot.overlay_id.clone(),
         title: qml_overlay_title(&snapshot.overlay_id),
+        process_id: None,
         x: bounds.x,
         y: bounds.y,
         w: bounds.w,
@@ -789,9 +831,12 @@ mod tests {
         assert!(qml.contains("WindowDoesNotAcceptFocus"));
         assert!(qml.contains("WindowStaysOnTopHint"));
         assert!(qml.contains("color: \"transparent\""));
+        assert!(qml.contains("visible: true"));
+        assert!(qml.contains("opacity: 0"));
         assert!(qml.contains("XMLHttpRequest"));
         assert!(qml.contains("modelData.fill_fraction"));
         assert!(qml.contains("root.x = parsed.x"));
+        assert!(qml.contains("root.opacity = bars.length > 0 ? 1 : 0"));
         assert!(qml.contains("Signal Auras Overlay poe2-bars"));
         assert!(!qml.contains("width: Screen.width"));
         assert!(!qml.contains("height: Screen.height"));
@@ -822,6 +867,7 @@ mod tests {
 
         assert_eq!(placement.overlay_id, "poe2-bars");
         assert_eq!(placement.title, "Signal Auras Overlay poe2-bars");
+        assert_eq!(placement.process_id, None);
         assert_eq!(placement.x, 10);
         assert_eq!(placement.y, 20);
         assert_eq!(placement.w, 160);

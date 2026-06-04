@@ -315,11 +315,12 @@ impl RealWaylandAdapter {
         if self.environment.is_some() {
             return Ok(());
         }
-        let Some(placement) = placement else {
+        let Some(mut placement) = placement else {
             self.overlay_placements.remove(&overlay_id);
             self.overlay_placement_attempts.remove(&overlay_id);
             return Ok(());
         };
+        placement.process_id = self.overlay_renderer.overlay_process_id(&overlay_id);
         if self.overlay_placements.get(&overlay_id) == Some(&placement) {
             return Ok(());
         }
@@ -329,11 +330,16 @@ impl RealWaylandAdapter {
             .and_then(|(pending, attempts)| (pending == &placement).then_some(*attempts))
             .unwrap_or(0);
         if attempts >= 20 {
+            let runtime_diagnostic = self
+                .overlay_renderer
+                .runtime_diagnostic(&overlay_id)
+                .map(|diagnostic| format!("; {diagnostic}"))
+                .unwrap_or_default();
             return Err(DiagnosableError::new(
                 ErrorPhase::Registration,
                 format!(
-                    "native overlay window '{}' was not found by KWin after QML startup",
-                    placement.title
+                    "native overlay window '{}' was not found by KWin after QML startup{}",
+                    placement.title, runtime_diagnostic
                 ),
             )
             .with_source("kwin-scripting")

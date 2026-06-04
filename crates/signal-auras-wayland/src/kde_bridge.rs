@@ -810,12 +810,14 @@ fn kwin_configure_overlay_window_script(
     format!(
         "{}\
          var title = {title:?};\n\
+         var overlayPid = {pid};\n\
          var windows = signalAurasWindows();\n\
          var target = null;\n\
          for (var i = 0; i < windows.length; i++) {{\n\
              var window = windows[i];\n\
              var caption = signalAurasWindowCaption(window);\n\
-             if (caption === title || caption.indexOf(title) === 0) {{ target = window; break; }}\n\
+             var pid = signalAurasValue(window.pid);\n\
+             if (caption === title || caption.indexOf(title) === 0 || (overlayPid !== null && pid === overlayPid.toString())) {{ target = window; break; }}\n\
          }}\n\
          if (target) {{\n\
              try {{ target.keepAbove = true; }} catch (error) {{}}\n\
@@ -834,6 +836,7 @@ fn kwin_configure_overlay_window_script(
          callDBus({bus:?}, {path:?}, \"org.signalAuras.KWinBridge\", \"windowResult\", {request:?}, target !== null, \"\");\n",
         kwin_window_helpers(),
         title = placement.title.as_str(),
+        pid = js_optional_u32(placement.process_id),
         x = placement.x,
         y = placement.y,
         w = placement.w,
@@ -842,6 +845,10 @@ fn kwin_configure_overlay_window_script(
         path = object_path,
         request = request_id,
     )
+}
+
+fn js_optional_u32(value: Option<u32>) -> String {
+    value.map_or_else(|| "null".to_string(), |value| value.to_string())
 }
 
 fn bridge_error(error: impl std::fmt::Display) -> DiagnosableError {
@@ -994,6 +1001,7 @@ mod tests {
         let placement = crate::overlay::OverlayWindowPlacement {
             overlay_id: "poe2-status".to_string(),
             title: "Signal Auras Overlay poe2-status".to_string(),
+            process_id: Some(4242),
             x: 120,
             y: 140,
             w: 320,
@@ -1008,6 +1016,8 @@ mod tests {
 
         assert!(script.contains("Signal Auras Overlay poe2-status"));
         assert!(script.contains("caption === title || caption.indexOf(title) === 0"));
+        assert!(script.contains("var overlayPid = 4242;"));
+        assert!(script.contains("pid === overlayPid.toString()"));
         assert!(script.contains("target.keepAbove = true"));
         assert!(script.contains("target.skipTaskbar = true"));
         assert!(script.contains("target.noBorder = true"));
