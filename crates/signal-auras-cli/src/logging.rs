@@ -233,6 +233,12 @@ impl RuntimeLog {
         }
     }
 
+    pub fn trace(&self, message: impl AsRef<str>) {
+        if matches!(self.config.level, Some(RuntimeLogLevel::Trace)) {
+            self.emit(Level::TRACE, message.as_ref());
+        }
+    }
+
     pub fn info(&self, message: impl AsRef<str>) {
         self.emit(Level::INFO, message.as_ref());
     }

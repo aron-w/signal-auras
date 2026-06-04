@@ -13,7 +13,8 @@ use signal_auras_core::{
     MacroExecutor, MacroRunId, MacroRunPoll, MacroRunState, MacroScheduler, MotionDefinition,
     MotionDiscardReason, MotionInputEvent, MotionInputState, MotionRuntime, MotionRuntimeEvent,
     MotionToken, MotionTrigger, RegistrationState, RuntimeMotion, RuntimePress, RuntimeStats,
-    RustOperationBatch, ScopeSelection, ShutdownReason, SynthesizedInputRequest,
+    RustOperationBatch, ScopeSelection, ShutdownReason, StateTrackerPoller,
+    SynthesizedInputRequest, TrackerState,
 };
 use signal_auras_lua::{
     load_lua_controller_program_file, load_lua_file, ActiveWindowMetadata, ImperativeLuaController,
@@ -285,6 +286,7 @@ fn lua_file_looks_like_controller(lua_file: &Path) -> Result<bool, DiagnosableEr
         || source.contains("sa.press")
         || source.contains("sa.timer")
         || source.contains("sa.shutdown")
+        || source.contains("sa.state.track")
         || source.contains("sa.callback"))
 }
 
@@ -2144,6 +2146,14 @@ fn run_live_real_controller_lifecycle(
     let mut repeat_ticks = controller_repeat_ticks(program)?;
     let mut last_repeat_ticks = BTreeMap::new();
     let motion_time_base = Instant::now();
+    let tracker_time_base = Instant::now();
+    let mut state_trackers = if program.state_trackers().is_empty() {
+        None
+    } else {
+        Some(LiveStateTrackerRuntime::new(StateTrackerPoller::new(
+            program.state_trackers().clone(),
+        )))
+    };
     loop {
         stats.record_event_loop_wakeup();
         drain_live_controller_shortcut_callbacks(
@@ -2154,6 +2164,14 @@ fn run_live_real_controller_lifecycle(
             stats,
             log,
         )?;
+        poll_live_state_trackers(
+            program,
+            &mut state_trackers,
+            adapter,
+            capabilities,
+            log,
+            tracker_time_base,
+        )?;
         drain_controller_callbacks(
             program,
             runtime,
@@ -2163,7 +2181,9 @@ fn run_live_real_controller_lifecycle(
             stats,
         )?;
         let wait_timeout =
-            next_live_wait_timeout(&repeat_ticks, &last_repeat_ticks, &motion_runtime);
+            next_live_wait_timeout(&repeat_ticks, &last_repeat_ticks, &motion_runtime).min(
+                next_live_state_tracker_wait_timeout(&state_trackers, tracker_time_base),
+            );
         timer_fd.arm_after(wait_timeout)?;
         let mut runtime_fds = vec![signal_fd.as_raw_fd(), timer_fd.as_raw_fd()];
         if let Some(fd) = adapter.callback_wake_fd() {
@@ -2228,6 +2248,14 @@ fn run_live_real_controller_lifecycle(
             };
             handle_live_controller_observed_input(event, &mut context)?;
         }
+        poll_live_state_trackers(
+            program,
+            &mut state_trackers,
+            adapter,
+            capabilities,
+            log,
+            tracker_time_base,
+        )?;
         drain_controller_callbacks(
             program,
             runtime,
@@ -2274,6 +2302,154 @@ fn run_live_real_controller_lifecycle(
             stats,
         )?;
     }
+}
+
+fn poll_live_state_trackers(
+    program: &ControllerProgram,
+    runtime: &mut Option<LiveStateTrackerRuntime>,
+    adapter: &mut RealWaylandAdapter,
+    capabilities: &CapabilityReport,
+    log: RuntimeLog,
+    tracker_time_base: Instant,
+) -> Result<(), DiagnosableError> {
+    let Some(runtime) = runtime.as_mut() else {
+        return Ok(());
+    };
+    let now_ms = tracker_time_base.elapsed().as_millis() as u64;
+    let Some(due_in_ms) = runtime.poller.next_due_in_ms(now_ms) else {
+        return Ok(());
+    };
+    if due_in_ms > 0 {
+        return Ok(());
+    }
+    log.trace(format!(
+        "event=state_tracker_poll phase=begin tracker_count={} now_ms={}",
+        program.state_trackers().trackers().len(),
+        now_ms
+    ));
+    let active_context = adapter.active_process_context()?;
+    log.trace(format!(
+        "event=state_tracker_focus confidence={:?} metadata_age_ms={} has_pid={} has_app_id={} has_window_class={}",
+        active_context.confidence,
+        active_context.captured_at.elapsed().as_millis(),
+        active_context.process_id.is_some(),
+        active_context.app_id.is_some(),
+        active_context.window_class.is_some()
+    ));
+    let outcome = runtime
+        .poller
+        .poll_due(now_ms, capabilities, &active_context, adapter);
+    log.trace(format!(
+        "event=state_tracker_poll phase=complete due={} updated={} samples={}",
+        outcome.due_trackers,
+        outcome.updated.len(),
+        outcome.screen_samples
+    ));
+    for id in outcome.updated {
+        let tracker = program
+            .state_trackers()
+            .trackers()
+            .iter()
+            .find(|tracker| tracker.id == id);
+        let detector_kind = tracker
+            .map(|tracker| tracker.detector.kind())
+            .unwrap_or("unknown");
+        if let Some(state) = runtime.poller.latest_state(&id).cloned() {
+            let message = format!(
+                "event=state_tracker id={} detector={} confidence={} samples={} {}",
+                id,
+                detector_kind,
+                state.confidence(),
+                outcome.screen_samples,
+                state.summary()
+            );
+            match runtime.log_level_for_update(&id, &state) {
+                StateTrackerUpdateLogLevel::Info => log.info(message),
+                StateTrackerUpdateLogLevel::Trace => log.trace(message),
+            }
+            if matches!(
+                state,
+                TrackerState::Inactive {
+                    reason: signal_auras_core::TrackerInactiveReason::FocusInactive,
+                    ..
+                }
+            ) {
+                if let Some(tracker) = tracker {
+                    let focus_state = tracker.scope.scoped_focus_state(&active_context);
+                    let fields = focus_state.transition_fields();
+                    if runtime.focus_denial_changed(&id, &fields) {
+                        log.debug(format!(
+                            "event=state_tracker_focus_denial id={} detector={} {}",
+                            id, detector_kind, fields
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+struct LiveStateTrackerRuntime {
+    poller: StateTrackerPoller,
+    last_summaries: BTreeMap<String, String>,
+    last_focus_denials: BTreeMap<String, String>,
+}
+
+impl LiveStateTrackerRuntime {
+    fn new(poller: StateTrackerPoller) -> Self {
+        Self {
+            poller,
+            last_summaries: BTreeMap::new(),
+            last_focus_denials: BTreeMap::new(),
+        }
+    }
+
+    fn log_level_for_update(
+        &mut self,
+        id: &str,
+        state: &TrackerState,
+    ) -> StateTrackerUpdateLogLevel {
+        let summary = state.summary();
+        let unchanged = self.last_summaries.get(id) == Some(&summary);
+        self.last_summaries.insert(id.to_string(), summary);
+        if unchanged && matches!(state, TrackerState::Inactive { .. }) {
+            StateTrackerUpdateLogLevel::Trace
+        } else {
+            StateTrackerUpdateLogLevel::Info
+        }
+    }
+
+    fn focus_denial_changed(&mut self, id: &str, fields: &str) -> bool {
+        let changed = self
+            .last_focus_denials
+            .get(id)
+            .is_none_or(|previous| previous != fields);
+        self.last_focus_denials
+            .insert(id.to_string(), fields.to_string());
+        changed
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StateTrackerUpdateLogLevel {
+    Info,
+    Trace,
+}
+
+fn next_live_state_tracker_wait_timeout(
+    runtime: &Option<LiveStateTrackerRuntime>,
+    tracker_time_base: Instant,
+) -> Duration {
+    let Some(runtime) = runtime.as_ref() else {
+        return idle_wait_timeout();
+    };
+    let now_ms = tracker_time_base.elapsed().as_millis() as u64;
+    runtime
+        .poller
+        .next_due_in_ms(now_ms)
+        .map(Duration::from_millis)
+        .unwrap_or_else(idle_wait_timeout)
 }
 
 fn controller_motion_definitions(
@@ -4672,6 +4848,59 @@ mod tests {
         assert!(rendered.contains("configured_rule=processes:kate"));
         assert!(!rendered.contains("--secret"));
         assert!(!rendered.contains("Private Title"));
+    }
+
+    #[test]
+    fn unchanged_inactive_state_tracker_updates_are_trace_only() {
+        let trackers = signal_auras_core::StateTrackerDefinitionSet::default();
+        let mut runtime = LiveStateTrackerRuntime::new(StateTrackerPoller::new(trackers));
+        let inactive = TrackerState::Inactive {
+            reason: signal_auras_core::TrackerInactiveReason::FocusInactive,
+            confidence: 0,
+            freshness_ms: 0,
+        };
+        let active = TrackerState::HorizontalProgressBar {
+            visible: true,
+            progress_percent: 42,
+            confidence: 95,
+            freshness_ms: 0,
+        };
+
+        assert_eq!(
+            runtime.log_level_for_update("heavy_stun", &inactive),
+            StateTrackerUpdateLogLevel::Info
+        );
+        assert_eq!(
+            runtime.log_level_for_update("heavy_stun", &inactive),
+            StateTrackerUpdateLogLevel::Trace
+        );
+        assert_eq!(
+            runtime.log_level_for_update("heavy_stun", &active),
+            StateTrackerUpdateLogLevel::Info
+        );
+        assert_eq!(
+            runtime.log_level_for_update("heavy_stun", &active),
+            StateTrackerUpdateLogLevel::Info
+        );
+    }
+
+    #[test]
+    fn state_tracker_focus_denial_diagnostics_are_deduped() {
+        let trackers = signal_auras_core::StateTrackerDefinitionSet::default();
+        let mut runtime = LiveStateTrackerRuntime::new(StateTrackerPoller::new(trackers));
+
+        assert!(runtime.focus_denial_changed(
+            "refutation_cooldown",
+            "state=inactive reason=process_mismatch configured_rule=processes:poe"
+        ));
+        assert!(!runtime.focus_denial_changed(
+            "refutation_cooldown",
+            "state=inactive reason=process_mismatch configured_rule=processes:poe"
+        ));
+        assert!(runtime.focus_denial_changed(
+            "refutation_cooldown",
+            "state=inactive reason=stale_focus configured_rule=processes:poe"
+        ));
     }
 
     #[test]

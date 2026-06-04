@@ -7,6 +7,7 @@ mod key;
 mod macro_plan;
 mod motion;
 mod scope;
+mod screen_state;
 mod stats;
 
 pub use config::{
@@ -45,6 +46,12 @@ pub use scope::{
     ActiveProcessConfidence, ActiveProcessContext, FocusFreshness, FocusFreshnessPolicy,
     ProcessName, ScopeDecision, ScopeDenial, ScopeDenialKind, ScopeSelection, ScopedFocusReason,
     ScopedFocusState, ScriptScope, DEFAULT_FOCUS_STALE_THRESHOLD,
+};
+pub use screen_state::{
+    detect_horizontal_progress_bar, detect_radial_cooldown, screen_read_denied_report,
+    CircularMask, DetectorDefinition, PollOutcome, ProgressFillDirection, RadialCooldownHistory,
+    Roi, ScreenPixelFormat, ScreenSample, ScreenSampleProvider, StateTrackerDefinition,
+    StateTrackerDefinitionSet, StateTrackerPoller, TrackerInactiveReason, TrackerState,
 };
 pub use stats::{RuntimeStats, ShutdownReason};
 

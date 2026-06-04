@@ -65,6 +65,7 @@
             git
             just
             lua-language-server
+            llvmPackages.libclang
             pkg-config
             python313
             rustc
@@ -74,6 +75,7 @@
             wayland
             wayland-protocols
             dbus
+            pipewire
             xdg-desktop-portal
           ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
             kdePackages.kglobalaccel
@@ -88,6 +90,12 @@
             export UV_TOOL_BIN_DIR="$PWD/.direnv/uv/bin"
             export UV_TOOL_DIR="$PWD/.direnv/uv/tools"
             export UV_CACHE_DIR="$PWD/.direnv/uv/cache"
+            export LIBCLANG_PATH="${pkgs.lib.getLib pkgs.llvmPackages.libclang}/lib"
+            export BINDGEN_EXTRA_CLANG_ARGS="$(
+              cat ${pkgs.stdenv.cc}/nix-support/libc-crt1-cflags
+              cat ${pkgs.stdenv.cc}/nix-support/libc-cflags
+              cat ${pkgs.stdenv.cc}/nix-support/cc-cflags
+            )"
             export PATH="$UV_TOOL_BIN_DIR:$PATH"
 
             if [ ! -x "$UV_TOOL_BIN_DIR/specify" ]; then

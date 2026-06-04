@@ -41,6 +41,7 @@ pub enum Capability {
     WindowActivation,
     SynthesizedInput,
     Timer,
+    ScreenRead,
 }
 
 impl fmt::Display for Capability {
@@ -54,6 +55,7 @@ impl fmt::Display for Capability {
             Self::WindowActivation => "window_activation",
             Self::SynthesizedInput => "synthesized_input",
             Self::Timer => "timer",
+            Self::ScreenRead => "screen_read",
         };
         f.write_str(value)
     }
@@ -69,6 +71,7 @@ pub enum CapabilityKind {
     WindowActivation,
     SynthesizedInput,
     Timer,
+    ScreenRead,
 }
 
 impl CapabilityKind {
@@ -82,6 +85,7 @@ impl CapabilityKind {
             Self::WindowActivation => Capability::WindowActivation,
             Self::SynthesizedInput => Capability::SynthesizedInput,
             Self::Timer => Capability::Timer,
+            Self::ScreenRead => Capability::ScreenRead,
         }
     }
 }
@@ -97,6 +101,7 @@ impl fmt::Display for CapabilityKind {
             Self::WindowActivation => "window_activation",
             Self::SynthesizedInput => "synthesized_input",
             Self::Timer => "timer",
+            Self::ScreenRead => "screen_read",
         };
         f.write_str(value)
     }

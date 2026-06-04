@@ -16,4 +16,6 @@ For the scoped focus pass-through follow-up, also read
 `specs/015-scoped-focus-pass-through/plan.md`.
 For the Lua controller runtime follow-up, also read
 `specs/016-lua-controller-runtime/plan.md`.
+For the PoE2 screen state tracking follow-up, also read
+`specs/017-poe2-state-tracking/plan.md`.
 <!-- SPECKIT END -->

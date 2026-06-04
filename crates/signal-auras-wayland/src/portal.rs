@@ -1,7 +1,13 @@
 use signal_auras_core::{
     ActiveProcessContext, Capability, CapabilityKind, CapabilityReport, CapabilitySet,
-    CleanupReport, DiagnosableError, ErrorPhase, InputEmission, MacroAction,
-    SynthesizedInputRequest,
+    CleanupReport, DiagnosableError, ErrorPhase, InputEmission, MacroAction, ScreenPixelFormat,
+    ScreenSample, SynthesizedInputRequest,
+};
+use std::{
+    cell::RefCell,
+    os::fd::OwnedFd,
+    rc::Rc,
+    time::{Duration, Instant},
 };
 
 use crate::{capability::environment_probe, diagnostics::unsupported_protocol};
@@ -11,8 +17,11 @@ use ashpd::desktop::{
         DeviceType, KeyState, NotifyKeyboardKeysymOptions, NotifyPointerButtonOptions,
         RemoteDesktop, SelectDevicesOptions,
     },
-    Session,
+    screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType, Stream},
+    PersistMode, Session,
 };
+use pipewire as pw;
+use pw::{properties::properties, spa};
 
 pub fn probe_required_capabilities(required: &CapabilitySet) -> CapabilityReport {
     environment_probe(required)
@@ -119,6 +128,400 @@ impl PortalInputSession {
         } else {
             CleanupReport::empty()
         }
+    }
+}
+
+#[derive(Debug)]
+struct ScreenCastPortalHandles {
+    session: Session<Screencast>,
+    stream: Stream,
+    pipewire_fd: OwnedFd,
+}
+
+#[derive(Debug)]
+struct ScreenCastFrameState {
+    latest: Option<ScreenSample>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug)]
+struct ScreenCastPipeWireUserData {
+    format: spa::param::video::VideoInfoRaw,
+    latest: Rc<RefCell<ScreenCastFrameState>>,
+    started_at: Instant,
+}
+
+pub struct PortalScreenCastSession {
+    active: bool,
+    portal_session: Session<Screencast>,
+    main_loop: pw::main_loop::MainLoopRc,
+    _context: pw::context::ContextRc,
+    _core: pw::core::CoreRc,
+    stream: pw::stream::StreamRc,
+    _listener: pw::stream::StreamListener<ScreenCastPipeWireUserData>,
+    latest: Rc<RefCell<ScreenCastFrameState>>,
+}
+
+impl PortalScreenCastSession {
+    pub fn open_live() -> Result<Self, DiagnosableError> {
+        tracing::trace!(
+            event = "screen_read_session",
+            phase = "portal_begin",
+            "creating xdg-desktop-portal ScreenCast session"
+        );
+        let handles = portal_block_on(open_screencast_portal()).map_err(screen_cast_error)?;
+        tracing::trace!(
+            event = "screen_read_session",
+            phase = "pipewire_begin",
+            node_id = handles.stream.pipe_wire_node_id(),
+            stream_size = ?handles.stream.size(),
+            stream_source = ?handles.stream.source_type(),
+            "connecting PipeWire stream"
+        );
+        open_pipewire_screencast(handles).map_err(pipewire_screen_cast_error)
+    }
+
+    pub fn capture_latest(&mut self) -> Result<ScreenSample, DiagnosableError> {
+        self.latest.borrow_mut().latest = None;
+        let deadline = Instant::now() + Duration::from_millis(500);
+        tracing::trace!(
+            event = "screen_read_capture",
+            phase = "wait_frame",
+            timeout_ms = 500u64,
+            "waiting for readable PipeWire frame"
+        );
+        while Instant::now() < deadline {
+            self.main_loop
+                .loop_()
+                .iterate(pw::loop_::Timeout::Finite(Duration::from_millis(25)));
+            let mut latest = self.latest.borrow_mut();
+            if let Some(sample) = latest.latest.take() {
+                tracing::trace!(
+                    event = "screen_read_capture",
+                    phase = "frame_ready",
+                    width = sample.width,
+                    height = sample.height,
+                    stride = sample.stride,
+                    pixel_format = ?sample.pixel_format,
+                    byte_len = sample.pixels.len(),
+                    captured_at_ms = sample.captured_at_ms,
+                    "readable screen frame captured"
+                );
+                return Ok(sample);
+            }
+            if let Some(message) = latest.last_error.take() {
+                tracing::trace!(
+                    event = "screen_read_capture",
+                    phase = "frame_error",
+                    reason = %message,
+                    "PipeWire frame was not readable"
+                );
+                return Err(screen_read_error(
+                    message,
+                    "pipewire",
+                    "use a screen source that offers CPU-readable RGB/RGBA/BGRx buffers",
+                ));
+            }
+        }
+        tracing::trace!(
+            event = "screen_read_capture",
+            phase = "timeout",
+            "timed out waiting for readable PipeWire frame"
+        );
+        Err(screen_read_error(
+            "screen_read capture timed out before a readable PipeWire frame arrived",
+            "pipewire",
+            "grant ScreenCast permission and select a visible monitor or window",
+        ))
+    }
+
+    pub fn close(&mut self) -> CleanupReport {
+        if !self.active {
+            return CleanupReport::empty();
+        }
+        let _ = self.stream.disconnect();
+        let _ = portal_block_on(self.portal_session.close());
+        self.active = false;
+        tracing::trace!(
+            event = "screen_read_session",
+            phase = "closed",
+            "closed xdg-desktop-portal ScreenCast session"
+        );
+        CleanupReport::all_succeeded(1)
+    }
+}
+
+impl Drop for PortalScreenCastSession {
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
+}
+
+async fn open_screencast_portal() -> ashpd::Result<ScreenCastPortalHandles> {
+    let proxy = Screencast::new().await?;
+    let session = proxy.create_session(Default::default()).await?;
+    proxy
+        .select_sources(
+            &session,
+            SelectSourcesOptions::default()
+                .set_cursor_mode(CursorMode::Hidden)
+                .set_sources(SourceType::Monitor | SourceType::Window)
+                .set_multiple(false)
+                .set_persist_mode(PersistMode::DoNot),
+        )
+        .await?
+        .response()?;
+
+    let response = proxy
+        .start(&session, None, Default::default())
+        .await?
+        .response()?;
+    let stream = response.streams().first().cloned().ok_or_else(|| {
+        ashpd::Error::Portal(ashpd::PortalError::Failed(
+            "no ScreenCast stream selected".into(),
+        ))
+    })?;
+    tracing::trace!(
+        event = "screen_read_session",
+        phase = "portal_started",
+        node_id = stream.pipe_wire_node_id(),
+        stream_size = ?stream.size(),
+        stream_position = ?stream.position(),
+        stream_source = ?stream.source_type(),
+        "portal ScreenCast stream selected"
+    );
+    let pipewire_fd = proxy
+        .open_pipe_wire_remote(&session, Default::default())
+        .await?;
+    Ok(ScreenCastPortalHandles {
+        session,
+        stream,
+        pipewire_fd,
+    })
+}
+
+fn open_pipewire_screencast(
+    handles: ScreenCastPortalHandles,
+) -> Result<PortalScreenCastSession, pw::Error> {
+    pw::init();
+    let main_loop = pw::main_loop::MainLoopRc::new(None)?;
+    let context = pw::context::ContextRc::new(&main_loop, None)?;
+    let core = context.connect_fd_rc(handles.pipewire_fd, None)?;
+    let latest = Rc::new(RefCell::new(ScreenCastFrameState {
+        latest: None,
+        last_error: None,
+    }));
+    let stream = pw::stream::StreamRc::new(
+        core.clone(),
+        "signal-auras-screen-read",
+        properties! {
+            *pw::keys::MEDIA_TYPE => "Video",
+            *pw::keys::MEDIA_CATEGORY => "Capture",
+            *pw::keys::MEDIA_ROLE => "Screen",
+        },
+    )?;
+    let user_data = ScreenCastPipeWireUserData {
+        format: Default::default(),
+        latest: latest.clone(),
+        started_at: Instant::now(),
+    };
+    let listener = stream
+        .add_local_listener_with_user_data(user_data)
+        .param_changed(|_, user_data, id, param| {
+            let Some(param) = param else {
+                return;
+            };
+            if id != spa::param::ParamType::Format.as_raw() {
+                return;
+            }
+            let Ok((media_type, media_subtype)) = spa::param::format_utils::parse_format(param)
+            else {
+                return;
+            };
+            if media_type != spa::param::format::MediaType::Video
+                || media_subtype != spa::param::format::MediaSubtype::Raw
+            {
+                return;
+            }
+            if let Err(error) = user_data.format.parse(param) {
+                user_data.latest.borrow_mut().last_error =
+                    Some(format!("cannot parse PipeWire video format: {error:?}"));
+                tracing::trace!(
+                    event = "screen_read_pipewire_format",
+                    phase = "parse_error",
+                    error = ?error,
+                    "failed to parse PipeWire video format"
+                );
+                return;
+            }
+            let size = user_data.format.size();
+            tracing::trace!(
+                event = "screen_read_pipewire_format",
+                phase = "negotiated",
+                width = size.width,
+                height = size.height,
+                format = ?user_data.format.format(),
+                framerate_num = user_data.format.framerate().num,
+                framerate_denom = user_data.format.framerate().denom,
+                "PipeWire video format negotiated"
+            );
+        })
+        .process(|stream, user_data| {
+            let sample = copy_pipewire_frame(stream, user_data);
+            let mut latest = user_data.latest.borrow_mut();
+            match sample {
+                Ok(sample) => latest.latest = Some(sample),
+                Err(message) => latest.last_error = Some(message),
+            }
+        })
+        .register()?;
+    let params = screen_cast_format_param();
+    let mut param_refs = [spa::pod::Pod::from_bytes(&params).ok_or(pw::Error::CreationFailed)?];
+    stream.connect(
+        spa::utils::Direction::Input,
+        Some(handles.stream.pipe_wire_node_id()),
+        pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
+        &mut param_refs,
+    )?;
+
+    Ok(PortalScreenCastSession {
+        active: true,
+        portal_session: handles.session,
+        main_loop,
+        _context: context,
+        _core: core,
+        stream,
+        _listener: listener,
+        latest,
+    })
+}
+
+fn screen_cast_format_param() -> Vec<u8> {
+    let object = spa::pod::object!(
+        spa::utils::SpaTypes::ObjectParamFormat,
+        spa::param::ParamType::EnumFormat,
+        spa::pod::property!(
+            spa::param::format::FormatProperties::MediaType,
+            Id,
+            spa::param::format::MediaType::Video
+        ),
+        spa::pod::property!(
+            spa::param::format::FormatProperties::MediaSubtype,
+            Id,
+            spa::param::format::MediaSubtype::Raw
+        ),
+        spa::pod::property!(
+            spa::param::format::FormatProperties::VideoFormat,
+            Choice,
+            Enum,
+            Id,
+            spa::param::video::VideoFormat::BGRx,
+            spa::param::video::VideoFormat::BGRx,
+            spa::param::video::VideoFormat::RGBx,
+            spa::param::video::VideoFormat::BGRA,
+            spa::param::video::VideoFormat::RGBA,
+            spa::param::video::VideoFormat::BGR,
+            spa::param::video::VideoFormat::RGB,
+            spa::param::video::VideoFormat::GRAY8,
+        )
+    );
+    spa::pod::serialize::PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &spa::pod::Value::Object(object),
+    )
+    .expect("screen cast format parameter is serializable")
+    .0
+    .into_inner()
+}
+
+fn copy_pipewire_frame(
+    stream: &pw::stream::Stream,
+    user_data: &ScreenCastPipeWireUserData,
+) -> Result<ScreenSample, String> {
+    let Some(mut buffer) = stream.dequeue_buffer() else {
+        return Err("PipeWire stream had no buffer to dequeue".to_string());
+    };
+    let datas = buffer.datas_mut();
+    let Some(data) = datas.first_mut() else {
+        return Err("PipeWire buffer did not contain image data".to_string());
+    };
+    let buffer_type = data.type_();
+    if !matches!(
+        buffer_type,
+        spa::buffer::DataType::MemPtr | spa::buffer::DataType::MemFd
+    ) {
+        return Err(format!(
+            "unsupported PipeWire screen_read buffer type {:?}; only mapped MemPtr/MemFd CPU memory is supported",
+            buffer_type
+        ));
+    }
+    if !data.flags().contains(spa::buffer::DataFlags::READABLE) {
+        return Err("PipeWire screen_read buffer is not marked readable".to_string());
+    }
+    let Some(format) = screen_pixel_format(user_data.format.format()) else {
+        return Err(format!(
+            "unsupported PipeWire video format {:?}",
+            user_data.format.format()
+        ));
+    };
+    let size = user_data.format.size();
+    let width = size.width;
+    let height = size.height;
+    if width == 0 || height == 0 {
+        return Err("PipeWire video format has empty dimensions".to_string());
+    }
+    let chunk = data.chunk();
+    if chunk.stride() <= 0 {
+        return Err("PipeWire screen_read buffer uses unsupported negative stride".to_string());
+    }
+    let stride = u32::try_from(chunk.stride()).map_err(|_| {
+        "PipeWire screen_read buffer stride does not fit the screen sample model".to_string()
+    })?;
+    let bytes_per_pixel = format.bytes_per_pixel() as u32;
+    if stride < width.saturating_mul(bytes_per_pixel) {
+        return Err("PipeWire screen_read buffer stride is smaller than one image row".to_string());
+    }
+    let offset = chunk.offset() as usize;
+    let required = height as usize * stride as usize;
+    let Some(mapped) = data.data() else {
+        return Err("PipeWire screen_read buffer was not mapped into CPU memory".to_string());
+    };
+    let end = offset
+        .checked_add(required)
+        .ok_or_else(|| "PipeWire screen_read buffer size overflow".to_string())?;
+    if end > mapped.len() {
+        return Err("PipeWire screen_read buffer is shorter than the advertised frame".to_string());
+    }
+    tracing::trace!(
+        event = "screen_read_pipewire_frame",
+        width,
+        height,
+        stride,
+        pixel_format = ?format,
+        byte_len = required,
+        buffer_type = ?buffer_type,
+        "copied mapped PipeWire frame into owned screen sample"
+    );
+    Ok(ScreenSample::from_pixels(
+        width,
+        height,
+        stride,
+        format,
+        user_data.started_at.elapsed().as_millis() as u64,
+        mapped[offset..end].to_vec(),
+    ))
+}
+
+fn screen_pixel_format(format: spa::param::video::VideoFormat) -> Option<ScreenPixelFormat> {
+    match format {
+        value if value == spa::param::video::VideoFormat::GRAY8 => Some(ScreenPixelFormat::Luma8),
+        value if value == spa::param::video::VideoFormat::RGB => Some(ScreenPixelFormat::Rgb888),
+        value if value == spa::param::video::VideoFormat::BGR => Some(ScreenPixelFormat::Bgr888),
+        value if value == spa::param::video::VideoFormat::RGBA => Some(ScreenPixelFormat::Rgba8888),
+        value if value == spa::param::video::VideoFormat::BGRA => Some(ScreenPixelFormat::Bgra8888),
+        value if value == spa::param::video::VideoFormat::RGBx => Some(ScreenPixelFormat::Rgbx8888),
+        value if value == spa::param::video::VideoFormat::BGRx => Some(ScreenPixelFormat::Bgrx8888),
+        _ => None,
     }
 }
 
@@ -273,4 +676,38 @@ fn portal_error(error: ashpd::Error) -> DiagnosableError {
         .with_source(other.to_string())
         .with_remediation("grant RemoteDesktop keyboard control permission and retry"),
     }
+}
+
+fn screen_cast_error(error: ashpd::Error) -> DiagnosableError {
+    match error {
+        ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled)
+        | ashpd::Error::Portal(ashpd::PortalError::Cancelled(_)) => {
+            crate::diagnostics::denied_permission(Capability::ScreenRead)
+                .with_source("xdg-desktop-portal ScreenCast")
+        }
+        other => screen_read_error(
+            "KDE portal ScreenCast request failed",
+            other.to_string(),
+            "grant ScreenCast permission and retry",
+        ),
+    }
+}
+
+fn pipewire_screen_cast_error(error: pw::Error) -> DiagnosableError {
+    screen_read_error(
+        "PipeWire screen_read stream setup failed",
+        error.to_string(),
+        "ensure PipeWire is running and the selected ScreenCast source is readable",
+    )
+}
+
+fn screen_read_error(
+    message: impl Into<String>,
+    source: impl Into<String>,
+    remediation: impl Into<String>,
+) -> DiagnosableError {
+    DiagnosableError::new(ErrorPhase::CapabilityProbe, message)
+        .with_capability(Capability::ScreenRead)
+        .with_source(source)
+        .with_remediation(remediation)
 }

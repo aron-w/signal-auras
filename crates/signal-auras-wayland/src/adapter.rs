@@ -2,8 +2,8 @@ use signal_auras_core::{
     ActiveProcessContext, ActiveProcessProvider, Capability, CapabilityKind, CapabilityReport,
     CapabilitySet, CapabilityStatus, CleanupReport, DiagnosableError, ErrorPhase, HotkeyBinding,
     HotkeyRegistrar, InputEmission, InputProviderBackend, InputProviderConfig, MacroAction,
-    MacroExecutor, MotionInputEvent, MotionToken, ProcessName, RegistrationId,
-    SynthesizedInputRequest,
+    MacroExecutor, MotionInputEvent, MotionToken, ProcessName, RegistrationId, ScreenSample,
+    ScreenSampleProvider, SynthesizedInputRequest,
 };
 use std::collections::BTreeSet;
 
@@ -99,6 +99,7 @@ pub struct RealWaylandAdapter {
     environment: Option<KdeEnvironment>,
     rejected_hotkeys: BTreeSet<String>,
     portal_session: Option<crate::portal::PortalInputSession>,
+    screen_cast_session: Option<crate::portal::PortalScreenCastSession>,
     uinput_session: Option<crate::uinput::UinputOutputSession>,
     shortcut_bridge: Option<crate::kde_bridge::KwinShortcutBridge>,
     evdev_provider: Option<crate::evdev::EvdevObservationProvider>,
@@ -115,6 +116,7 @@ impl RealWaylandAdapter {
             environment: Some(environment),
             rejected_hotkeys: BTreeSet::new(),
             portal_session: None,
+            screen_cast_session: None,
             uinput_session: None,
             shortcut_bridge: None,
             evdev_provider: None,
@@ -279,6 +281,13 @@ impl RealWaylandAdapter {
 
     pub fn cleanup_report(&self) -> CleanupReport {
         CleanupReport::all_succeeded(self.registrations.len())
+    }
+
+    pub fn close_screen_cast_session(&mut self) -> CleanupReport {
+        self.screen_cast_session
+            .as_mut()
+            .map(crate::portal::PortalScreenCastSession::close)
+            .unwrap_or_else(CleanupReport::empty)
     }
 
     pub fn callback_wake_fd(&self) -> Option<std::os::fd::RawFd> {
@@ -563,9 +572,40 @@ impl MacroExecutor for RealWaylandAdapter {
         if let Some(session) = &mut self.portal_session {
             let _ = session.close();
         }
+        if let Some(session) = &mut self.screen_cast_session {
+            let _ = session.close();
+        }
         self.portal_session = None;
+        self.screen_cast_session = None;
         self.uinput_session = None;
         Ok(())
+    }
+}
+
+impl ScreenSampleProvider for RealWaylandAdapter {
+    fn capture_screen_sample(&mut self) -> Result<ScreenSample, DiagnosableError> {
+        if self.screen_cast_session.is_none() {
+            tracing::trace!(
+                event = "screen_read_capture",
+                phase = "session_open",
+                "opening xdg-desktop-portal ScreenCast session"
+            );
+            self.screen_cast_session = Some(crate::portal::PortalScreenCastSession::open_live()?);
+            tracing::trace!(
+                event = "screen_read_capture",
+                phase = "session_ready",
+                "xdg-desktop-portal ScreenCast session is ready"
+            );
+        }
+        tracing::trace!(
+            event = "screen_read_capture",
+            phase = "frame_request",
+            "requesting latest readable screen frame"
+        );
+        self.screen_cast_session
+            .as_mut()
+            .expect("screen cast session was initialized")
+            .capture_latest()
     }
 }
 

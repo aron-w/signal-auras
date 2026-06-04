@@ -9,7 +9,33 @@ input_provider = {
   },
 }
 
+poe = { processes = { "steam_app_2694490", "PathOfExileSteam.exe" } }
+
 leader = "F9"
+
+sa.state.track({
+  id = "refutation_cooldown",
+  scope = poe,
+  capabilities = { "screen_read" },
+  poll_ms = 500,
+  detector = {
+    kind = "radial_cooldown",
+    roi = { x = 2850, y = 2030, w = 96, h = 92 },
+    mask = { shape = "circle", inset = 10 },
+  },
+})
+
+sa.state.track({
+  id = "heavy_stun",
+  scope = poe,
+  capabilities = { "screen_read" },
+  poll_ms = 500,
+  detector = {
+    kind = "horizontal_progress_bar",
+    roi = { x = 1828, y = 702, w = 190, h = 58 },
+    fill = { direction = "left_to_right" },
+  },
+})
 
 sa.press({
   trigger = "F5",
@@ -40,7 +66,7 @@ sa.motion({
     while_held = { "<LClick>" },
     before = "ctrl_down",
     repeat = {
-      every_ms = 40,
+      every_ms = 65,
       callback = "click_left",
     },
     after = "ctrl_up",

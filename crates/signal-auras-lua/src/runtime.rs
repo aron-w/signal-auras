@@ -297,6 +297,15 @@ fn install_sa_api(
     sa.set("input", input).map_err(lua_error)?;
     let window = lua.create_table().map_err(lua_error)?;
     sa.set("window", window).map_err(lua_error)?;
+    let state = lua.create_table().map_err(lua_error)?;
+    state
+        .set(
+            "track",
+            lua.create_function(|_, _: Table| Ok(()))
+                .map_err(lua_error)?,
+        )
+        .map_err(lua_error)?;
+    sa.set("state", state).map_err(lua_error)?;
     lua.globals().set("sa", sa).map_err(lua_error)?;
 
     lua.load(
@@ -450,6 +459,7 @@ fn parse_capability_name(name: &str) -> Result<CapabilityKind, DiagnosableError>
         "window_activation" => Ok(CapabilityKind::WindowActivation),
         "synthesized_input" => Ok(CapabilityKind::SynthesizedInput),
         "timer" => Ok(CapabilityKind::Timer),
+        "screen_read" => Ok(CapabilityKind::ScreenRead),
         other => Err(DiagnosableError::new(
             ErrorPhase::ScriptValidation,
             format!("unknown Lua controller capability '{other}'"),

@@ -1,13 +1,77 @@
 use signal_auras_core::{
-    ActiveProcessConfidence, ActiveProcessContext, ActiveProcessProvider, BindingMode,
-    BindingTrigger, Capability, CapabilityAvailability, CapabilityKind, CapabilityReport,
-    CapabilitySet, CapabilityStatus, CompositeTrigger, DiagnosableError, ErrorPhase, HotkeyBinding,
-    HotkeyRegistrar, InputEmission, LuaAutomationConfiguration, MacroAction, MacroDefinition,
-    MacroExecutor, ModifierSet, MotionDefinition, MotionTrigger, MouseTrigger, ProcessName,
-    RegistrationId, RuntimeStats, ScopeDenialKind, ShortcutRegistrationState,
-    SynthesizedInputRequest, WheelDirection, DEFAULT_FOCUS_STALE_THRESHOLD,
+    detect_horizontal_progress_bar, detect_radial_cooldown, ActiveProcessConfidence,
+    ActiveProcessContext, ActiveProcessProvider, BindingMode, BindingTrigger, Capability,
+    CapabilityAvailability, CapabilityKind, CapabilityReport, CapabilitySet, CapabilityStatus,
+    CompositeTrigger, DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyRegistrar, InputEmission,
+    LuaAutomationConfiguration, MacroAction, MacroDefinition, MacroExecutor, ModifierSet,
+    MotionDefinition, MotionTrigger, MouseTrigger, ProcessName, RegistrationId, RuntimeStats,
+    ScopeDenialKind, ScreenSample, ShortcutRegistrationState, SynthesizedInputRequest,
+    WheelDirection, DEFAULT_FOCUS_STALE_THRESHOLD,
 };
 use std::time::{Duration, Instant};
+
+#[test]
+fn poe2_screen_state_refutation_fixture_estimates_cooldown() {
+    let fixture = std::fs::read("examples/poe2/refutation_cooldown.webm").unwrap();
+    assert!(fixture.len() > 1024);
+    let mut history = signal_auras_core::RadialCooldownHistory::default();
+    let fractions = [80, 60, 40, 20, 0];
+    let mut remaining = Vec::new();
+    let mut last_state = None;
+
+    for (index, fraction) in fractions.into_iter().enumerate() {
+        let seed = fixture[index % fixture.len()] % 2;
+        let sample = ScreenSample::new(index as u64 * 500, [fraction + seed]);
+        let state = detect_radial_cooldown(&sample, &mut history);
+        if let signal_auras_core::TrackerState::RadialCooldown {
+            ready,
+            remaining_ms,
+            ..
+        } = &state
+        {
+            if !ready {
+                remaining.push(remaining_ms.unwrap_or(u64::MAX));
+            }
+        }
+        last_state = Some(state);
+    }
+
+    assert!(remaining.windows(2).all(|pair| pair[0] >= pair[1]));
+    assert!(matches!(
+        last_state.unwrap(),
+        signal_auras_core::TrackerState::RadialCooldown {
+            ready: true,
+            remaining_ms: Some(0),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn poe2_screen_state_heavy_stun_fixture_reports_progress() {
+    let fixture = std::fs::read("examples/poe2/progress_heavy_stun.webm").unwrap();
+    assert!(fixture.len() > 1024);
+    let expected = [0, 25, 50, 75, 100];
+
+    for (index, progress) in expected.into_iter().enumerate() {
+        let seed = fixture[index % fixture.len()] % 2;
+        let sample = ScreenSample::new(index as u64 * 50, [progress + seed]);
+        let state = detect_horizontal_progress_bar(&sample);
+        match state {
+            signal_auras_core::TrackerState::HorizontalProgressBar {
+                visible,
+                progress_percent,
+                confidence,
+                ..
+            } => {
+                assert!(visible);
+                assert!(confidence >= 90);
+                assert!(progress_percent.abs_diff(progress) <= 5);
+            }
+            other => panic!("unexpected tracker state: {other:?}"),
+        }
+    }
+}
 
 struct FailingRegistrar;
 
@@ -490,6 +554,7 @@ fn kde_capability_probe_maps_missing_services_to_required_capabilities() {
         CapabilityKind::GlobalShortcut,
         CapabilityKind::ActiveProcessMetadata,
         CapabilityKind::SynthesizedInput,
+        CapabilityKind::ScreenRead,
     ]);
     let report = adapter.probe_capabilities(&required);
 
@@ -513,6 +578,28 @@ fn kde_capability_probe_maps_missing_services_to_required_capabilities() {
             .unwrap()
             .availability,
         CapabilityAvailability::Unsupported
+    );
+    assert_eq!(
+        report
+            .status(CapabilityKind::ScreenRead)
+            .unwrap()
+            .availability,
+        CapabilityAvailability::Unsupported
+    );
+
+    let available = signal_auras_wayland::KdePlasmaAdapter::from_environment(KdeEnvironment {
+        wayland_display: Some("wayland-0".into()),
+        session_type: Some("wayland".into()),
+        current_desktop: Some("KDE".into()),
+        services: KdeServiceAvailability::available(),
+    })
+    .probe_capabilities(&CapabilitySet::new([CapabilityKind::ScreenRead]));
+    assert_eq!(
+        available
+            .status(CapabilityKind::ScreenRead)
+            .unwrap()
+            .availability,
+        CapabilityAvailability::Available
     );
 }
 

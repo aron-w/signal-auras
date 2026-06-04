@@ -2,7 +2,7 @@ use crate::{
     AdapterDiagnostic, BindingMode, Capability, CapabilityAvailability, CapabilityKind,
     CapabilityReport, CapabilitySet, CapabilityStatus, DiagnosableError, ErrorPhase, HeldCondition,
     InputProviderConfig, MacroAction, MotionToken, MotionTrigger, ScopeSelection,
-    SynthesizedInputRequest,
+    StateTrackerDefinitionSet, SynthesizedInputRequest,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -147,13 +147,6 @@ impl ControllerRegistrationSet {
         registrations: impl IntoIterator<Item = ControllerRegistration>,
     ) -> Result<Self, DiagnosableError> {
         let registrations = registrations.into_iter().collect::<Vec<_>>();
-        if registrations.is_empty() {
-            return Err(DiagnosableError::new(
-                ErrorPhase::ScriptValidation,
-                "controller must register at least one handler",
-            ));
-        }
-
         let mut seen = BTreeSet::new();
         let mut required = Vec::new();
         for registration in &registrations {
@@ -229,6 +222,7 @@ pub struct ControllerProgram {
     required_capabilities: CapabilitySet,
     pub input_provider: Option<InputProviderConfig>,
     pub leader: Option<MotionToken>,
+    state_trackers: StateTrackerDefinitionSet,
 }
 
 impl ControllerProgram {
@@ -283,6 +277,7 @@ impl ControllerProgram {
             required_capabilities: CapabilitySet::new(required),
             input_provider: None,
             leader: None,
+            state_trackers: StateTrackerDefinitionSet::default(),
         })
     }
 
@@ -296,12 +291,24 @@ impl ControllerProgram {
         self
     }
 
+    pub fn with_state_trackers(mut self, state_trackers: StateTrackerDefinitionSet) -> Self {
+        let mut required = self.required_capabilities.iter().collect::<Vec<_>>();
+        required.extend(state_trackers.required_capabilities().iter());
+        self.required_capabilities = CapabilitySet::new(required);
+        self.state_trackers = state_trackers;
+        self
+    }
+
     pub fn registrations(&self) -> &ControllerRegistrationSet {
         &self.registrations
     }
 
     pub fn callbacks(&self) -> impl Iterator<Item = &ControllerCallback> {
         self.callbacks.values()
+    }
+
+    pub fn state_trackers(&self) -> &StateTrackerDefinitionSet {
+        &self.state_trackers
     }
 
     pub fn callback(&self, name: &str) -> Option<&ControllerCallback> {
@@ -508,6 +515,7 @@ fn capability_to_kind(capability: Capability) -> CapabilityKind {
         Capability::WindowActivation => CapabilityKind::WindowActivation,
         Capability::SynthesizedInput => CapabilityKind::SynthesizedInput,
         Capability::Timer => CapabilityKind::Timer,
+        Capability::ScreenRead => CapabilityKind::ScreenRead,
     }
 }
 

@@ -1,12 +1,13 @@
 use signal_auras_core::{
     AutomationDefaults, BindingDefinition, BindingMode, BindingTrigger, CapabilityKind,
-    CapabilitySet, CompositeTrigger, ControllerCallback, ControllerLoopPolicy, ControllerProgram,
-    ControllerRegistration, ControllerRegistrationKind, ControllerRegistrationSet,
-    DiagnosableError, ErrorPhase, HeldCondition, HotkeyId, InputProviderBackend,
-    InputProviderConfig, InputProviderMode, InputProviderOutput, LoopBody, LoopDefinition,
-    LoopInterval, LoopRepeat, LuaAutomationConfiguration, MacroAction, MacroDefinition,
-    ModifierSet, MotionDefinition, MotionToken, MotionTrigger, MouseButton, MouseTrigger,
-    PressDefinition, ProcessName, ScopeSelection, ScriptScope, WheelDirection,
+    CapabilitySet, CircularMask, CompositeTrigger, ControllerCallback, ControllerLoopPolicy,
+    ControllerProgram, ControllerRegistration, ControllerRegistrationKind,
+    ControllerRegistrationSet, DetectorDefinition, DiagnosableError, ErrorPhase, HeldCondition,
+    HotkeyId, InputProviderBackend, InputProviderConfig, InputProviderMode, InputProviderOutput,
+    LoopBody, LoopDefinition, LoopInterval, LoopRepeat, LuaAutomationConfiguration, MacroAction,
+    MacroDefinition, ModifierSet, MotionDefinition, MotionToken, MotionTrigger, MouseButton,
+    MouseTrigger, PressDefinition, ProcessName, ProgressFillDirection, Roi, ScopeSelection,
+    ScriptScope, StateTrackerDefinition, StateTrackerDefinitionSet, WheelDirection,
 };
 use std::{
     collections::BTreeSet,
@@ -108,8 +109,10 @@ pub fn load_lua_controller_program_source(
 ) -> Result<ControllerProgram, DiagnosableError> {
     validate_controller_sandbox(source)?;
     let registrations = parse_controller_registration_set(source)?;
+    let state_trackers = parse_state_tracker_definition_set(source)?;
     Ok(
         ControllerProgram::new(registrations, parse_controller_callbacks(source)?)?
+            .with_state_trackers(state_trackers)
             .with_runtime_options(parse_input_provider(source)?, parse_leader(source)?),
     )
 }
@@ -162,6 +165,165 @@ fn parse_controller_registration_set(
         ControllerRegistrationKind::Shutdown,
     )?);
     ControllerRegistrationSet::new(registrations)
+}
+
+fn parse_state_tracker_definition_set(
+    source: &str,
+) -> Result<StateTrackerDefinitionSet, DiagnosableError> {
+    let mut trackers = Vec::new();
+    let mut cursor = source;
+    while let Some(start) = cursor.find("sa.state.track") {
+        cursor = &cursor[start + "sa.state.track".len()..];
+        let Some(paren) = cursor.find('(') else {
+            break;
+        };
+        cursor = &cursor[paren + 1..];
+        let Some(block_start) = cursor.find('{') else {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                "sa.state.track requires a table argument",
+            ));
+        };
+        let block = &cursor[block_start..];
+        let Some(block_end) = matching_table_end(block) else {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                "sa.state.track table is not closed",
+            ));
+        };
+        trackers.push(parse_state_tracker_definition(
+            &block[1..block_end],
+            source,
+        )?);
+        cursor = &block[block_end + 1..];
+    }
+    StateTrackerDefinitionSet::new(trackers)
+}
+
+fn parse_state_tracker_definition(
+    source: &str,
+    full_source: &str,
+) -> Result<StateTrackerDefinition, DiagnosableError> {
+    for forbidden in ["emits", "fixture", "source", "callback", "macro"] {
+        if top_level_field_index(source, forbidden).is_some() {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                format!("state tracker field '{forbidden}' is not accepted"),
+            ));
+        }
+    }
+    let id = field_string(source, "id").ok_or_else(|| {
+        DiagnosableError::new(ErrorPhase::ScriptValidation, "state tracker requires id")
+    })?;
+    let capabilities = parse_controller_capabilities(source)?
+        .unwrap_or_else(|| CapabilitySet::new([signal_auras_core::CapabilityKind::ScreenRead]));
+    let poll_ms = field_u64(source, "poll_ms")?.ok_or_else(|| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "state tracker requires poll_ms",
+        )
+    })?;
+    let scope = parse_state_tracker_scope(source, full_source)?;
+    let detector_body = table_body_field_after(source, "detector")?.ok_or_else(|| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "state tracker requires detector",
+        )
+    })?;
+    let detector = parse_state_detector(detector_body)?;
+    StateTrackerDefinition::new(id, scope, capabilities, poll_ms, detector)
+}
+
+fn parse_state_tracker_scope(
+    source: &str,
+    full_source: &str,
+) -> Result<ScopeSelection, DiagnosableError> {
+    if top_level_field_uses_table(source, "scope") {
+        return parse_controller_scope(source);
+    }
+    if let Some(identifier) = field_identifier(source, "scope") {
+        let scope_body = top_level_table_body(full_source, identifier)?.ok_or_else(|| {
+            DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                format!("state tracker scope variable '{identifier}' is not defined"),
+            )
+        })?;
+        return parse_process_scope_body(scope_body);
+    }
+    Ok(ScopeSelection::ExplicitGlobal)
+}
+
+fn parse_state_detector(source: &str) -> Result<DetectorDefinition, DiagnosableError> {
+    let kind = field_string(source, "kind").ok_or_else(|| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "state tracker detector requires kind",
+        )
+    })?;
+    let roi = parse_roi(table_body_field_after(source, "roi")?.ok_or_else(|| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "state tracker detector requires roi",
+        )
+    })?)?;
+    match kind {
+        "radial_cooldown" => {
+            let mask = table_body_field_after(source, "mask")?
+                .map(parse_circular_mask)
+                .transpose()?;
+            Ok(DetectorDefinition::RadialCooldown { roi, mask })
+        }
+        "horizontal_progress_bar" => {
+            let fill_body = table_body_field_after(source, "fill")?.ok_or_else(|| {
+                DiagnosableError::new(
+                    ErrorPhase::ScriptValidation,
+                    "horizontal_progress_bar detector requires fill",
+                )
+            })?;
+            let direction = match field_string(fill_body, "direction").unwrap_or("left_to_right") {
+                "left_to_right" => ProgressFillDirection::LeftToRight,
+                other => {
+                    return Err(DiagnosableError::new(
+                        ErrorPhase::ScriptValidation,
+                        format!("unsupported progress fill direction '{other}'"),
+                    ));
+                }
+            };
+            Ok(DetectorDefinition::HorizontalProgressBar {
+                roi,
+                fill_direction: direction,
+            })
+        }
+        other => Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!("unknown state tracker detector kind '{other}'"),
+        )),
+    }
+}
+
+fn parse_roi(source: &str) -> Result<Roi, DiagnosableError> {
+    Roi::new(
+        field_u64(source, "x")?.unwrap_or(0) as u32,
+        field_u64(source, "y")?.unwrap_or(0) as u32,
+        field_u64(source, "w")?
+            .ok_or_else(|| DiagnosableError::new(ErrorPhase::ScriptValidation, "ROI requires w"))?
+            as u32,
+        field_u64(source, "h")?
+            .ok_or_else(|| DiagnosableError::new(ErrorPhase::ScriptValidation, "ROI requires h"))?
+            as u32,
+    )
+}
+
+fn parse_circular_mask(source: &str) -> Result<CircularMask, DiagnosableError> {
+    if field_string(source, "shape").unwrap_or("circle") != "circle" {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "radial_cooldown mask shape must be circle",
+        ));
+    }
+    Ok(CircularMask::new(
+        field_u64(source, "inset")?.unwrap_or(0) as u32
+    ))
 }
 
 fn parse_controller_callbacks(source: &str) -> Result<Vec<ControllerCallback>, DiagnosableError> {
@@ -482,6 +644,7 @@ fn parse_controller_capability(name: &str) -> Result<CapabilityKind, Diagnosable
         "window_activation" => Ok(CapabilityKind::WindowActivation),
         "synthesized_input" => Ok(CapabilityKind::SynthesizedInput),
         "timer" => Ok(CapabilityKind::Timer),
+        "screen_read" => Ok(CapabilityKind::ScreenRead),
         other => Err(DiagnosableError::new(
             ErrorPhase::ScriptValidation,
             format!("unknown Lua controller capability '{other}'"),
@@ -540,6 +703,10 @@ fn parse_controller_scope(source: &str) -> Result<ScopeSelection, DiagnosableErr
     let Some(scope_body) = table_body_after(source, "scope")? else {
         return Ok(ScopeSelection::ExplicitGlobal);
     };
+    parse_process_scope_body(scope_body)
+}
+
+fn parse_process_scope_body(scope_body: &str) -> Result<ScopeSelection, DiagnosableError> {
     if scope_body.contains("global") {
         return Ok(ScopeSelection::ExplicitGlobal);
     }
@@ -1133,6 +1300,50 @@ fn field_string<'a>(source: &'a str, field: &str) -> Option<&'a str> {
     first_quoted(&after_field[equals + 1..])
 }
 
+fn field_identifier<'a>(source: &'a str, field: &str) -> Option<&'a str> {
+    let index = top_level_field_index(source, field)?;
+    let after_field = &source[index + field.len()..];
+    let equals = after_field.find('=')?;
+    let value = after_field[equals + 1..].trim_start();
+    if value.starts_with('{') || value.starts_with('"') {
+        return None;
+    }
+    let end = value
+        .find(|character: char| {
+            !(character.is_ascii_alphanumeric() || character == '_' || character == '-')
+        })
+        .unwrap_or(value.len());
+    let identifier = &value[..end];
+    if identifier.is_empty() {
+        None
+    } else {
+        Some(identifier)
+    }
+}
+
+fn top_level_table_body<'a>(
+    source: &'a str,
+    field: &str,
+) -> Result<Option<&'a str>, DiagnosableError> {
+    let Some(field_index) = top_level_field_index(source, field) else {
+        return Ok(None);
+    };
+    let after_field = &source[field_index + field.len()..];
+    let Some(block_start) = after_field.find('{') else {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!("{field} must use table constructor"),
+        ));
+    };
+    let Some(block_end) = matching_brace(after_field, block_start) else {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!("{field} table is not closed"),
+        ));
+    };
+    Ok(Some(&after_field[block_start + 1..block_end]))
+}
+
 fn table_body_after<'a>(source: &'a str, field: &str) -> Result<Option<&'a str>, DiagnosableError> {
     let Some(field_index) = source.find(field) else {
         return Ok(None);
@@ -1301,6 +1512,37 @@ mod tests {
         assert!(!controller
             .required_capabilities()
             .contains(CapabilityKind::CompositePointerConsumption));
+    }
+
+    #[test]
+    fn parses_state_trackers_without_callbacks_or_input_capabilities() {
+        let program = load_lua_controller_program_source(
+            r#"
+            poe = { processes = { "steam_app_2694490", "PathOfExileSteam.exe" } }
+
+            sa.state.track({
+              id = "refutation_cooldown",
+              scope = poe,
+              capabilities = { "screen_read" },
+              poll_ms = 50,
+              detector = {
+                kind = "radial_cooldown",
+                roi = { x = 2850, y = 2030, w = 96, h = 92 },
+                mask = { shape = "circle", inset = 10 },
+              },
+            })
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(program.registrations().registrations().len(), 0);
+        assert_eq!(program.state_trackers().trackers().len(), 1);
+        assert!(program
+            .required_capabilities()
+            .contains(CapabilityKind::ScreenRead));
+        assert!(!program
+            .required_capabilities()
+            .contains(CapabilityKind::SynthesizedInput));
     }
 
     #[test]

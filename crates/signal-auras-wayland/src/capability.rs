@@ -218,6 +218,14 @@ pub fn kde_capability_report(
             CapabilityStatus::available(kind, "xdg-desktop-portal-kde")
         }
         CapabilityKind::Timer => CapabilityStatus::available(kind, "runtime-scheduler"),
+        CapabilityKind::ScreenRead if environment.services.portal => {
+            CapabilityStatus::available(kind, "xdg-desktop-portal ScreenCast")
+        }
+        CapabilityKind::ScreenRead => unavailable_kind(
+            kind,
+            "KDE ScreenCast portal is unavailable",
+            "xdg-desktop-portal-kde",
+        ),
         CapabilityKind::GlobalShortcut => unavailable_kind(
             kind,
             "KDE global shortcut service KGlobalAccel is unavailable",

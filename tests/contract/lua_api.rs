@@ -1,7 +1,8 @@
-use signal_auras_core::{CapabilityKind, CapabilitySet, MacroAction};
+use signal_auras_core::{CapabilityKind, CapabilitySet, DetectorDefinition, MacroAction};
 use signal_auras_lua::{
-    load_lua_controller_program_file, load_lua_file, load_lua_source, ActiveWindowMetadata,
-    ImperativeLuaController, LuaCallbackStep, LuaHostRequest, LuaHostResponse, LuaLogLevel,
+    load_lua_controller_program_file, load_lua_controller_program_source, load_lua_file,
+    load_lua_source, ActiveWindowMetadata, ImperativeLuaController, LuaCallbackStep,
+    LuaHostRequest, LuaHostResponse, LuaLogLevel,
 };
 use std::{fs, path::Path};
 
@@ -39,6 +40,7 @@ fn lua_api_accepts_poe2_controller_example() {
     let program = load_lua_controller_program_file(Path::new("examples/poe2.lua")).unwrap();
 
     assert_eq!(program.registrations().registrations().len(), 7);
+    assert_eq!(program.state_trackers().trackers().len(), 2);
     assert!(program.input_provider.is_some());
     assert!(program.leader.is_some());
     assert!(!program
@@ -56,6 +58,9 @@ fn lua_api_accepts_poe2_controller_example() {
     assert!(program
         .required_capabilities()
         .contains(signal_auras_core::CapabilityKind::Timer));
+    assert!(program
+        .required_capabilities()
+        .contains(signal_auras_core::CapabilityKind::ScreenRead));
     assert!(program.callback("go_home").is_some());
     assert!(program
         .callback("reload_filterblade")
@@ -70,6 +75,64 @@ fn lua_api_accepts_poe2_controller_example() {
     assert_eq!(loop_motion.repeat_every_ms, 65);
     assert_eq!(loop_motion.repeat_callback, "click_left");
     assert!(program.callback("ctrl_click").is_some());
+}
+
+#[test]
+fn state_trackers_accept_poe2_example_without_tracker_callbacks() {
+    let program = load_lua_controller_program_file(Path::new("examples/poe2.lua")).unwrap();
+    let trackers = program.state_trackers().trackers();
+
+    let refutation = trackers
+        .iter()
+        .find(|tracker| tracker.id == "refutation_cooldown")
+        .unwrap();
+    assert_eq!(refutation.poll_ms, 50);
+    assert!(matches!(
+        refutation.detector,
+        DetectorDefinition::RadialCooldown { .. }
+    ));
+
+    let heavy_stun = trackers
+        .iter()
+        .find(|tracker| tracker.id == "heavy_stun")
+        .unwrap();
+    assert_eq!(heavy_stun.poll_ms, 50);
+    assert!(matches!(
+        heavy_stun.detector,
+        DetectorDefinition::HorizontalProgressBar { .. }
+    ));
+
+    assert!(program.callback("refutation_cooldown").is_none());
+    assert!(program.callback("heavy_stun").is_none());
+    assert!(program
+        .state_trackers()
+        .required_capabilities()
+        .contains(CapabilityKind::ScreenRead));
+}
+
+#[test]
+fn state_trackers_reject_user_declared_emits_and_fixture_fields() {
+    for field in [
+        "emits = { \"ready\" }",
+        "fixture = \"examples/poe2/refutation_cooldown.webm\"",
+    ] {
+        let source = format!(
+            r#"
+            sa.state.track({{
+              id = "bad",
+              capabilities = {{ "screen_read" }},
+              poll_ms = 50,
+              {field},
+              detector = {{
+                kind = "horizontal_progress_bar",
+                roi = {{ x = 0, y = 0, w = 10, h = 10 }},
+                fill = {{ direction = "left_to_right" }},
+              }},
+            }})
+            "#
+        );
+        assert!(load_lua_controller_program_source(&source).is_err());
+    }
 }
 
 #[test]
