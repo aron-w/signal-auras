@@ -356,7 +356,7 @@ impl RealWaylandAdapter {
             .expect("shortcut bridge was initialized")
             .configure_overlay_window(&placement)?;
         if placed {
-            tracing::debug!(
+            tracing::info!(
                 event = "overlay_window_placed",
                 overlay_id = %placement.overlay_id,
                 title = %placement.title,

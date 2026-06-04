@@ -459,7 +459,7 @@ impl QmlOverlayProcess {
             .stderr(Stdio::from(stderr))
             .spawn()
             .map_err(overlay_io_error)?;
-        tracing::debug!(
+        tracing::info!(
             event = "overlay_qml_spawn",
             overlay_id = %self.overlay_id,
             qml_path = %self.qml_path.display(),
@@ -568,7 +568,6 @@ Window {{
             width: modelData.w
             height: modelData.h
             opacity: modelData.opacity
-            visible: modelData.active
 
             Rectangle {{
                 anchors.fill: parent
@@ -838,6 +837,7 @@ mod tests {
         assert!(qml.contains("root.x = parsed.x"));
         assert!(qml.contains("root.opacity = bars.length > 0 ? 1 : 0"));
         assert!(qml.contains("Signal Auras Overlay poe2-bars"));
+        assert!(!qml.contains("visible: modelData.active"));
         assert!(!qml.contains("width: Screen.width"));
         assert!(!qml.contains("height: Screen.height"));
     }
