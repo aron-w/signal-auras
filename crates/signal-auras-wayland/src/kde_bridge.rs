@@ -819,18 +819,23 @@ fn kwin_configure_overlay_window_script(
              var pid = signalAurasValue(window.pid);\n\
              if (caption === title || caption.indexOf(title) === 0 || (overlayPid !== null && pid === overlayPid.toString())) {{ target = window; break; }}\n\
          }}\n\
+         var configured = false;\n\
          if (target) {{\n\
              try {{ target.frameGeometry = {{ x: {x}, y: {y}, width: {w}, height: {h} }}; }} catch (error) {{}}\n\
+             try {{ target.keepBelow = false; }} catch (error) {{}}\n\
+             try {{ target.setKeepBelow(false); }} catch (error) {{}}\n\
              try {{ target.keepAbove = false; }} catch (error) {{}}\n\
              try {{ target.keepAbove = true; }} catch (error) {{}}\n\
+             try {{ target.setKeepAbove(true); }} catch (error) {{}}\n\
              try {{ workspace.raiseWindow(target); }} catch (error) {{}}\n\
              try {{ target.skipTaskbar = true; }} catch (error) {{}}\n\
              try {{ target.skipPager = true; }} catch (error) {{}}\n\
              try {{ target.skipSwitcher = true; }} catch (error) {{}}\n\
              try {{ target.noBorder = true; }} catch (error) {{}}\n\
              try {{ target.minimized = false; }} catch (error) {{}}\n\
+             configured = target.keepAbove === true;\n\
          }}\n\
-         callDBus({bus:?}, {path:?}, \"org.signalAuras.KWinBridge\", \"windowResult\", {request:?}, target !== null, \"\");\n",
+         callDBus({bus:?}, {path:?}, \"org.signalAuras.KWinBridge\", \"windowResult\", {request:?}, configured, \"\");\n",
         kwin_window_helpers(),
         title = placement.title.as_str(),
         pid = js_optional_u32(placement.process_id),
@@ -1018,12 +1023,16 @@ mod tests {
         assert!(
             script.contains("target.frameGeometry = { x: 120, y: 140, width: 320, height: 48 }")
         );
+        assert!(script.contains("target.keepBelow = false"));
+        assert!(script.contains("target.setKeepBelow(false)"));
         assert!(script.contains("target.keepAbove = false"));
         assert!(script.contains("target.keepAbove = true"));
+        assert!(script.contains("target.setKeepAbove(true)"));
         assert!(script.contains("workspace.raiseWindow(target)"));
+        assert!(script.contains("configured = target.keepAbove === true"));
+        assert!(script.contains("\"windowResult\", \"request-overlay\", configured"));
         assert!(script.contains("target.skipTaskbar = true"));
         assert!(script.contains("target.noBorder = true"));
-        assert!(script.contains("\"windowResult\""));
         assert!(!script.contains("moveResize"));
         assert!(!script.contains("registerShortcut"));
         assert!(!script.contains("capture"));

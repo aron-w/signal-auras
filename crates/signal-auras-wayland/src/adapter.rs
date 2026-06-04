@@ -360,13 +360,13 @@ impl RealWaylandAdapter {
             return Err(DiagnosableError::new(
                 ErrorPhase::Registration,
                 format!(
-                    "native overlay window '{}' was not found by KWin after QML startup{}",
+                    "native overlay window '{}' was not found or could not be kept above by KWin after QML startup{}",
                     placement.title, runtime_diagnostic
                 ),
             )
             .with_source("kwin-scripting")
             .with_remediation(
-                "verify the Qt qml runtime can create windows and KWin scripting can enumerate them",
+                "verify the Qt qml runtime can create windows and KWin scripting can enumerate and restack them",
             ));
         }
         if self.shortcut_bridge.is_none() {

@@ -494,6 +494,7 @@ impl QmlOverlayProcess {
         // group and restore the normal signal mask/handlers before exec.
         unsafe {
             command.pre_exec(|| {
+                install_parent_death_signal()?;
                 reset_child_shutdown_signals()?;
                 if libc::setpgid(0, 0) != 0 {
                     return Err(std::io::Error::last_os_error());
@@ -586,7 +587,7 @@ Window {{
     color: "transparent"
     visible: true
     opacity: 0
-    flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus
+    flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus
     property url stateUrl: Qt.resolvedUrl({state_name:?})
     property string grabPath: {grab_path:?}
     property bool grabSaved: false
@@ -963,6 +964,21 @@ fn reset_child_shutdown_signals() -> std::io::Result<()> {
     Ok(())
 }
 
+fn install_parent_death_signal() -> std::io::Result<()> {
+    unsafe {
+        if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::getppid() == 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "parent process exited before overlay child could install shutdown signal",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn terminate_process_group(pid: u32) {
     signal_process_group(pid, libc::SIGTERM);
 }
@@ -1103,6 +1119,7 @@ mod tests {
         assert!(qml.contains("WindowTransparentForInput"));
         assert!(qml.contains("WindowDoesNotAcceptFocus"));
         assert!(qml.contains("WindowStaysOnTopHint"));
+        assert!(!qml.contains("Qt.Tool"));
         assert!(qml.contains("color: \"transparent\""));
         assert!(qml.contains("visible: true"));
         assert!(qml.contains("x: 10"));
