@@ -1,8 +1,8 @@
 use crate::{
     AdapterDiagnostic, BindingMode, Capability, CapabilityAvailability, CapabilityKind,
     CapabilityReport, CapabilitySet, CapabilityStatus, DiagnosableError, ErrorPhase, HeldCondition,
-    InputProviderConfig, MacroAction, MotionToken, MotionTrigger, ScopeSelection,
-    StateTrackerDefinitionSet, SynthesizedInputRequest,
+    InputProviderConfig, MacroAction, MotionToken, MotionTrigger, OverlayDefinitionSet,
+    ScopeSelection, StateTrackerDefinitionSet, SynthesizedInputRequest,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -215,7 +215,7 @@ impl ControllerCallback {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ControllerProgram {
     registrations: ControllerRegistrationSet,
     callbacks: BTreeMap<String, ControllerCallback>,
@@ -223,6 +223,7 @@ pub struct ControllerProgram {
     pub input_provider: Option<InputProviderConfig>,
     pub leader: Option<MotionToken>,
     state_trackers: StateTrackerDefinitionSet,
+    overlays: OverlayDefinitionSet,
 }
 
 impl ControllerProgram {
@@ -278,6 +279,7 @@ impl ControllerProgram {
             input_provider: None,
             leader: None,
             state_trackers: StateTrackerDefinitionSet::default(),
+            overlays: OverlayDefinitionSet::default(),
         })
     }
 
@@ -309,6 +311,20 @@ impl ControllerProgram {
 
     pub fn state_trackers(&self) -> &StateTrackerDefinitionSet {
         &self.state_trackers
+    }
+
+    pub fn with_overlay_definitions(mut self, overlays: OverlayDefinitionSet) -> Self {
+        self.required_capabilities = CapabilitySet::new(
+            self.required_capabilities
+                .iter()
+                .chain(overlays.required_capabilities().iter()),
+        );
+        self.overlays = overlays;
+        self
+    }
+
+    pub fn overlays(&self) -> &OverlayDefinitionSet {
+        &self.overlays
     }
 
     pub fn callback(&self, name: &str) -> Option<&ControllerCallback> {

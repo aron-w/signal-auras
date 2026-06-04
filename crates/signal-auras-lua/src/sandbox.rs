@@ -6,8 +6,11 @@ use signal_auras_core::{
     HotkeyId, InputProviderBackend, InputProviderConfig, InputProviderMode, InputProviderOutput,
     LoopBody, LoopDefinition, LoopInterval, LoopRepeat, LuaAutomationConfiguration, MacroAction,
     MacroDefinition, ModifierSet, MotionDefinition, MotionToken, MotionTrigger, MouseButton,
-    MouseTrigger, PressDefinition, ProcessName, ProgressFillDirection, Roi, ScopeSelection,
-    ScriptScope, StateTrackerDefinition, StateTrackerDefinitionSet, WheelDirection,
+    MouseTrigger, OverlayDefinition, OverlayDefinitionSet, OverlayRect, OverlayStyle,
+    OverlaySurfaceKind, PressDefinition, ProcessName, ProgressBarVisualDefinition,
+    ProgressFillDirection, RendererProviderId, Roi, ScopeSelection, ScriptScope, StateBinding,
+    StateField, StateTrackerDefinition, StateTrackerDefinitionSet, VisualDefinition,
+    WheelDirection,
 };
 use std::{
     collections::BTreeSet,
@@ -110,9 +113,11 @@ pub fn load_lua_controller_program_source(
     validate_controller_sandbox(source)?;
     let registrations = parse_controller_registration_set(source)?;
     let state_trackers = parse_state_tracker_definition_set(source)?;
+    let overlays = parse_overlay_definition_set(source, &state_trackers)?;
     Ok(
         ControllerProgram::new(registrations, parse_controller_callbacks(source)?)?
             .with_state_trackers(state_trackers)
+            .with_overlay_definitions(overlays)
             .with_runtime_options(parse_input_provider(source)?, parse_leader(source)?),
     )
 }
@@ -232,6 +237,208 @@ fn parse_state_tracker_definition(
     })?;
     let detector = parse_state_detector(detector_body)?;
     StateTrackerDefinition::new(id, scope, capabilities, poll_ms, detector)
+}
+
+fn parse_overlay_definition_set(
+    source: &str,
+    trackers: &StateTrackerDefinitionSet,
+) -> Result<OverlayDefinitionSet, DiagnosableError> {
+    let mut overlays = Vec::new();
+    let mut cursor = source;
+    while let Some(start) = cursor.find("sa.overlay.mount") {
+        cursor = &cursor[start + "sa.overlay.mount".len()..];
+        let Some(paren) = cursor.find('(') else {
+            break;
+        };
+        cursor = &cursor[paren + 1..];
+        let Some(block_start) = cursor.find('{') else {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                "sa.overlay.mount requires a table argument",
+            ));
+        };
+        let block = &cursor[block_start..];
+        let Some(block_end) = matching_table_end(block) else {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                "sa.overlay.mount table is not closed",
+            ));
+        };
+        overlays.push(parse_overlay_definition(&block[1..block_end], source)?);
+        cursor = &block[block_end + 1..];
+    }
+    OverlayDefinitionSet::new(overlays, trackers)
+}
+
+fn parse_overlay_definition(
+    source: &str,
+    full_source: &str,
+) -> Result<OverlayDefinition, DiagnosableError> {
+    for forbidden in [
+        "callback",
+        "macro",
+        "screen",
+        "screen_buffer",
+        "input",
+        "device",
+        "compositor",
+        "portal",
+        "permission",
+        "filesystem",
+        "network",
+    ] {
+        if top_level_field_index(source, forbidden).is_some() {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                format!("overlay field '{forbidden}' is not accepted"),
+            ));
+        }
+    }
+    let id = field_string(source, "id").ok_or_else(|| {
+        DiagnosableError::new(ErrorPhase::ScriptValidation, "overlay requires id")
+    })?;
+    let provider =
+        RendererProviderId::parse(field_string(source, "provider").ok_or_else(|| {
+            DiagnosableError::new(ErrorPhase::ScriptValidation, "overlay requires provider")
+        })?)?;
+    let surface_kind = OverlaySurfaceKind::parse(field_string(source, "surface"))?;
+    let scope = parse_overlay_scope(source, full_source)?;
+    let visuals_body = table_body_field_after(source, "visuals")?.ok_or_else(|| {
+        DiagnosableError::new(ErrorPhase::ScriptValidation, "overlay requires visuals")
+    })?;
+    let visuals = top_level_tables(visuals_body)
+        .into_iter()
+        .map(parse_overlay_visual)
+        .collect::<Result<Vec<_>, _>>()?;
+    OverlayDefinition::new(id, scope, surface_kind, provider, visuals)
+}
+
+fn parse_overlay_scope(
+    source: &str,
+    full_source: &str,
+) -> Result<ScopeSelection, DiagnosableError> {
+    if top_level_field_uses_table(source, "scope") {
+        return parse_controller_scope(source);
+    }
+    if let Some(identifier) = field_identifier(source, "scope") {
+        let scope_body = top_level_table_body(full_source, identifier)?.ok_or_else(|| {
+            DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                format!("overlay scope variable '{identifier}' is not defined"),
+            )
+        })?;
+        return parse_process_scope_body(scope_body);
+    }
+    Ok(ScopeSelection::ExplicitGlobal)
+}
+
+fn parse_overlay_visual(source: &str) -> Result<VisualDefinition, DiagnosableError> {
+    for forbidden in [
+        "callback",
+        "macro",
+        "screen",
+        "input",
+        "compositor",
+        "network",
+    ] {
+        if top_level_field_index(source, forbidden).is_some() {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                format!("overlay visual field '{forbidden}' is not accepted"),
+            ));
+        }
+    }
+    let kind = field_string(source, "kind").ok_or_else(|| {
+        DiagnosableError::new(ErrorPhase::ScriptValidation, "overlay visual requires kind")
+    })?;
+    match kind {
+        "progress_bar" => {
+            let bind_body = table_body_field_after(source, "bind")?.ok_or_else(|| {
+                DiagnosableError::new(
+                    ErrorPhase::ScriptValidation,
+                    "overlay progress_bar requires bind",
+                )
+            })?;
+            let tracker = field_string(bind_body, "tracker").ok_or_else(|| {
+                DiagnosableError::new(
+                    ErrorPhase::ScriptValidation,
+                    "overlay binding requires tracker",
+                )
+            })?;
+            let field = StateField::parse(field_string(bind_body, "field").ok_or_else(|| {
+                DiagnosableError::new(
+                    ErrorPhase::ScriptValidation,
+                    "overlay binding requires field",
+                )
+            })?)?;
+            let rect_body = table_body_field_after(source, "rect")?.ok_or_else(|| {
+                DiagnosableError::new(
+                    ErrorPhase::ScriptValidation,
+                    "overlay progress_bar requires rect",
+                )
+            })?;
+            Ok(VisualDefinition::ProgressBar(
+                ProgressBarVisualDefinition::new(
+                    field_string(source, "id").ok_or_else(|| {
+                        DiagnosableError::new(
+                            ErrorPhase::ScriptValidation,
+                            "overlay visual requires id",
+                        )
+                    })?,
+                    StateBinding::new(tracker, field)?,
+                    parse_overlay_rect(rect_body)?,
+                    field_f32(source, "opacity")?.unwrap_or(1.0),
+                    field_string(source, "fill").ok_or_else(|| {
+                        DiagnosableError::new(
+                            ErrorPhase::ScriptValidation,
+                            "overlay progress_bar requires fill",
+                        )
+                    })?,
+                    field_string(source, "background").ok_or_else(|| {
+                        DiagnosableError::new(
+                            ErrorPhase::ScriptValidation,
+                            "overlay progress_bar requires background",
+                        )
+                    })?,
+                    table_body_field_after(source, "label")?
+                        .and_then(|body| field_bool(body, "visible"))
+                        .unwrap_or(false),
+                    table_body_field_after(source, "ready")?
+                        .map(parse_overlay_style)
+                        .transpose()?,
+                    table_body_field_after(source, "inactive")?
+                        .map(parse_overlay_style)
+                        .transpose()?,
+                )?,
+            ))
+        }
+        other => Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!("unsupported overlay visual kind '{other}'"),
+        )),
+    }
+}
+
+fn parse_overlay_rect(source: &str) -> Result<OverlayRect, DiagnosableError> {
+    OverlayRect::new(
+        field_i64(source, "x")?.unwrap_or(0),
+        field_i64(source, "y")?.unwrap_or(0),
+        field_i64(source, "w")?.ok_or_else(|| {
+            DiagnosableError::new(ErrorPhase::ScriptValidation, "overlay rect requires w")
+        })?,
+        field_i64(source, "h")?.ok_or_else(|| {
+            DiagnosableError::new(ErrorPhase::ScriptValidation, "overlay rect requires h")
+        })?,
+    )
+}
+
+fn parse_overlay_style(source: &str) -> Result<OverlayStyle, DiagnosableError> {
+    OverlayStyle::new(
+        field_string(source, "fill"),
+        field_string(source, "background"),
+        field_f32(source, "opacity")?,
+        field_bool(source, "label_visible").or_else(|| field_bool(source, "visible")),
+    )
 }
 
 fn parse_state_tracker_scope(
@@ -1263,6 +1470,76 @@ fn field_u64(source: &str, field: &str) -> Result<Option<u64>, DiagnosableError>
         ));
     }
     Ok(Some(parsed as u64))
+}
+
+fn field_i64(source: &str, field: &str) -> Result<Option<i64>, DiagnosableError> {
+    let Some(index) = top_level_field_index(source, field) else {
+        return Ok(None);
+    };
+    let after_field = &source[index + field.len()..];
+    let Some(equals) = after_field.find('=') else {
+        return Ok(None);
+    };
+    let value = after_field[equals + 1..]
+        .trim_start()
+        .chars()
+        .take_while(|character| character.is_ascii_digit() || *character == '-')
+        .collect::<String>();
+    if value.is_empty() {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!("{field} needs an integer"),
+        ));
+    }
+    value.parse::<i64>().map(Some).map_err(|_| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!("{field} needs an integer"),
+        )
+    })
+}
+
+fn field_f32(source: &str, field: &str) -> Result<Option<f32>, DiagnosableError> {
+    let Some(index) = top_level_field_index(source, field) else {
+        return Ok(None);
+    };
+    let after_field = &source[index + field.len()..];
+    let Some(equals) = after_field.find('=') else {
+        return Ok(None);
+    };
+    let value = after_field[equals + 1..]
+        .trim_start()
+        .chars()
+        .take_while(|character| {
+            character.is_ascii_digit() || *character == '-' || *character == '.'
+        })
+        .collect::<String>();
+    if value.is_empty() {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!("{field} needs a number"),
+        ));
+    }
+    value.parse::<f32>().map(Some).map_err(|_| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!("{field} needs a number"),
+        )
+    })
+}
+
+fn field_bool(source: &str, field: &str) -> Option<bool> {
+    let index = top_level_field_index(source, field)?;
+    let after_field = &source[index + field.len()..];
+    let equals = after_field.find('=')?;
+    let value = after_field[equals + 1..].trim_start();
+    if value.starts_with("true") {
+        Some(true)
+    } else if value.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 fn parse_delay_milliseconds(source: &str) -> Result<u64, DiagnosableError> {

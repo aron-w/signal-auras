@@ -18,4 +18,6 @@ For the Lua controller runtime follow-up, also read
 `specs/016-lua-controller-runtime/plan.md`.
 For the PoE2 screen state tracking follow-up, also read
 `specs/017-poe2-state-tracking/plan.md`.
+For the overlay render providers follow-up, also read
+`specs/018-overlay-render-providers/plan.md`.
 <!-- SPECKIT END -->

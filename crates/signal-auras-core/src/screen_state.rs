@@ -562,6 +562,10 @@ impl StateTrackerPoller {
         self.latest.get(id)
     }
 
+    pub fn latest_states(&self) -> &BTreeMap<String, TrackerState> {
+        &self.latest
+    }
+
     pub fn next_due_in_ms(&self, now_ms: u64) -> Option<u64> {
         self.trackers
             .trackers()

@@ -12,9 +12,9 @@ use signal_auras_core::{
     LoopDefinition, LoopInterval, LoopRepeat, LuaCallbackScheduler, MacroAction, MacroDefinition,
     MacroExecutor, MacroRunId, MacroRunPoll, MacroRunState, MacroScheduler, MotionDefinition,
     MotionDiscardReason, MotionInputEvent, MotionInputState, MotionRuntime, MotionRuntimeEvent,
-    MotionToken, MotionTrigger, RegistrationState, RuntimeMotion, RuntimePress, RuntimeStats,
-    RustOperationBatch, ScopeSelection, ShutdownReason, StateTrackerPoller,
-    SynthesizedInputRequest, TrackerState,
+    MotionToken, MotionTrigger, OverlayProviderReport, RegistrationState, RuntimeMotion,
+    RuntimePress, RuntimeStats, RustOperationBatch, ScopeSelection, ShutdownReason,
+    StateTrackerPoller, SynthesizedInputRequest, TrackerState,
 };
 use signal_auras_lua::{
     load_lua_controller_program_file, load_lua_file, ActiveWindowMetadata, ImperativeLuaController,
@@ -2387,7 +2387,47 @@ fn poll_live_state_trackers(
             }
         }
     }
+    poll_live_overlays(program, runtime, capabilities, &active_context, log);
     Ok(())
+}
+
+fn poll_live_overlays(
+    program: &ControllerProgram,
+    runtime: &LiveStateTrackerRuntime,
+    capabilities: &CapabilityReport,
+    active_context: &signal_auras_core::ActiveProcessContext,
+    log: RuntimeLog,
+) {
+    if program.overlays().is_empty() {
+        return;
+    }
+    let snapshots = program.overlays().snapshots(
+        0,
+        capabilities,
+        active_context,
+        runtime.poller.latest_states(),
+        &OverlayProviderReport::native_available(),
+    );
+    for snapshot in snapshots {
+        if snapshot.is_active() {
+            log.trace(format!(
+                "event=overlay_snapshot id={} provider={} state=active visuals={}",
+                snapshot.overlay_id,
+                snapshot.provider.as_str(),
+                snapshot.visuals.len()
+            ));
+        } else if let Some(diagnostic) = snapshot.diagnostic {
+            log.debug(format!(
+                "event=overlay_snapshot id={} provider={} state={:?} reason={:?} tracker={:?} field={:?}",
+                diagnostic.overlay_id,
+                diagnostic.provider.as_str(),
+                diagnostic.lifecycle,
+                diagnostic.reason,
+                diagnostic.tracker_id,
+                diagnostic.field.map(|field| field.as_str())
+            ));
+        }
+    }
 }
 
 struct LiveStateTrackerRuntime {

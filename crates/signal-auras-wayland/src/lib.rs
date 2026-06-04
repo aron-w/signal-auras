@@ -6,6 +6,7 @@ pub mod event_loop;
 pub mod input;
 pub mod kde;
 pub mod kde_bridge;
+pub mod overlay;
 pub mod portal;
 pub mod process;
 pub mod shortcut;

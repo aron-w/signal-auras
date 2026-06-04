@@ -1,4 +1,6 @@
-use signal_auras_core::{CapabilityKind, CapabilitySet, DetectorDefinition, MacroAction};
+use signal_auras_core::{
+    CapabilityKind, CapabilitySet, DetectorDefinition, MacroAction, RendererProviderId, StateField,
+};
 use signal_auras_lua::{
     load_lua_controller_program_file, load_lua_controller_program_source, load_lua_file,
     load_lua_source, ActiveWindowMetadata, ImperativeLuaController, LuaCallbackStep,
@@ -72,7 +74,7 @@ fn lua_api_accepts_poe2_controller_example() {
         .find(|registration| registration.trigger == "<LClick> <LClick>")
         .and_then(|registration| registration.loop_policy.as_ref())
         .unwrap();
-    assert_eq!(loop_motion.repeat_every_ms, 65);
+    assert_eq!(loop_motion.repeat_every_ms, 40);
     assert_eq!(loop_motion.repeat_callback, "click_left");
     assert!(program.callback("ctrl_click").is_some());
 }
@@ -111,6 +113,165 @@ fn state_trackers_accept_poe2_example_without_tracker_callbacks() {
 }
 
 #[test]
+fn overlay_api_accepts_poe2_progress_bars_without_macro_reactions() {
+    let program = load_lua_controller_program_source(&overlay_source("native")).unwrap();
+
+    assert_eq!(program.state_trackers().trackers().len(), 2);
+    assert_eq!(program.overlays().overlays().len(), 1);
+    assert_eq!(
+        program.overlays().overlays()[0].provider,
+        RendererProviderId::Native
+    );
+    assert_eq!(program.overlays().overlays()[0].visuals.len(), 2);
+    assert!(program.callback("poe2_status").is_none());
+    assert!(!program
+        .required_capabilities()
+        .contains(CapabilityKind::SynthesizedInput));
+    assert!(program
+        .required_capabilities()
+        .contains(CapabilityKind::ScreenRead));
+    assert!(program
+        .required_capabilities()
+        .contains(CapabilityKind::ActiveProcessMetadata));
+}
+
+#[test]
+fn overlay_api_accepts_future_provider_ids_as_declarations() {
+    for provider in ["webview", "tauri_window", "tool_window"] {
+        let program = load_lua_controller_program_source(&overlay_source(provider)).unwrap();
+        assert_eq!(program.overlays().overlays().len(), 1);
+    }
+}
+
+#[test]
+fn overlay_api_rejects_invalid_provider_duplicate_visuals_rects_opacity_and_bindings() {
+    let cases = [
+        overlay_source("unknown_provider"),
+        overlay_source_with_visuals(
+            r##"
+            {
+              id = "dup",
+              kind = "progress_bar",
+              bind = { tracker = "heavy_stun", field = "progress_percent" },
+              rect = { x = 0, y = 0, w = 100, h = 20 },
+              opacity = 0.7,
+              fill = "#d8b84c",
+              background = "#101820",
+            },
+            {
+              id = "dup",
+              kind = "progress_bar",
+              bind = { tracker = "heavy_stun", field = "progress_percent" },
+              rect = { x = 0, y = 25, w = 100, h = 20 },
+              opacity = 0.7,
+              fill = "#d8b84c",
+              background = "#101820",
+            },
+            "##,
+        ),
+        overlay_source_with_visuals(
+            r##"
+            {
+              id = "bad_rect",
+              kind = "progress_bar",
+              bind = { tracker = "heavy_stun", field = "progress_percent" },
+              rect = { x = -1, y = 0, w = 100, h = 20 },
+              opacity = 0.7,
+              fill = "#d8b84c",
+              background = "#101820",
+            },
+            "##,
+        ),
+        overlay_source_with_visuals(
+            r##"
+            {
+              id = "bad_opacity",
+              kind = "progress_bar",
+              bind = { tracker = "heavy_stun", field = "progress_percent" },
+              rect = { x = 0, y = 0, w = 100, h = 20 },
+              opacity = 2.0,
+              fill = "#d8b84c",
+              background = "#101820",
+            },
+            "##,
+        ),
+        overlay_source_with_visuals(
+            r##"
+            {
+              id = "missing_bind",
+              kind = "progress_bar",
+              rect = { x = 0, y = 0, w = 100, h = 20 },
+              opacity = 0.7,
+              fill = "#d8b84c",
+              background = "#101820",
+            },
+            "##,
+        ),
+        overlay_source_with_visuals(
+            r##"
+            {
+              id = "wrong_field",
+              kind = "progress_bar",
+              bind = { tracker = "heavy_stun", field = "remaining_ms" },
+              rect = { x = 0, y = 0, w = 100, h = 20 },
+              opacity = 0.7,
+              fill = "#d8b84c",
+              background = "#101820",
+            },
+            "##,
+        ),
+    ];
+
+    for source in cases {
+        assert!(
+            load_lua_controller_program_source(&source).is_err(),
+            "source should be rejected: {source}"
+        );
+    }
+}
+
+#[test]
+fn overlay_api_rejects_authority_fields_and_sandbox_escape_attempts() {
+    for field in [
+        "callback = \"draw\"",
+        "macro = macro { key \"Enter\" }",
+        "screen = true",
+        "input = true",
+        "compositor = true",
+        "network = true",
+    ] {
+        let source = overlay_source_with_extra_overlay_field(field);
+        assert!(
+            load_lua_controller_program_source(&source).is_err(),
+            "field should be rejected: {field}"
+        );
+    }
+
+    for source in [
+        r#"sa.overlay.mount({ id = "bad", provider = "native", visuals = {} }); io.open("/tmp/x")"#,
+        r#"sa.overlay.mount({ id = "bad", provider = "native", visuals = {} }); require("socket")"#,
+        r#"sa.overlay.mount({ id = "bad", provider = "native", visuals = {} }); portal.remote_desktop()"#,
+    ] {
+        assert!(load_lua_controller_program_source(source).is_err());
+    }
+}
+
+#[test]
+fn overlay_api_preserves_typed_state_bindings() {
+    let program = load_lua_controller_program_source(&overlay_source("native")).unwrap();
+    let bindings = program.overlays().overlays()[0]
+        .visuals
+        .iter()
+        .map(|visual| visual.binding().field)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        bindings,
+        vec![StateField::ProgressPercent, StateField::RemainingMs]
+    );
+}
+
+#[test]
 fn state_trackers_reject_user_declared_emits_and_fixture_fields() {
     for field in [
         "emits = { \"ready\" }",
@@ -133,6 +294,109 @@ fn state_trackers_reject_user_declared_emits_and_fixture_fields() {
         );
         assert!(load_lua_controller_program_source(&source).is_err());
     }
+}
+
+fn overlay_source(provider: &str) -> String {
+    overlay_source_with_provider_and_visuals(provider, overlay_visuals())
+}
+
+fn overlay_source_with_visuals(visuals: &str) -> String {
+    overlay_source_with_provider_and_visuals("native", visuals.to_string())
+}
+
+fn overlay_source_with_extra_overlay_field(field: &str) -> String {
+    format!(
+        r##"
+        poe = {{ processes = {{ "PathOfExileSteam.exe" }} }}
+        {}
+        sa.overlay.mount({{
+          id = "poe2_status",
+          scope = poe,
+          provider = "native",
+          surface = "overlay",
+          {field},
+          visuals = {{
+            {}
+          }},
+        }})
+        "##,
+        overlay_trackers(),
+        overlay_visuals()
+    )
+}
+
+fn overlay_source_with_provider_and_visuals(provider: &str, visuals: String) -> String {
+    format!(
+        r##"
+        poe = {{ processes = {{ "PathOfExileSteam.exe" }} }}
+        {}
+        sa.overlay.mount({{
+          id = "poe2_status",
+          scope = poe,
+          provider = "{provider}",
+          surface = "overlay",
+          visuals = {{
+            {visuals}
+          }},
+        }})
+        "##,
+        overlay_trackers()
+    )
+}
+
+fn overlay_trackers() -> &'static str {
+    r#"
+        sa.state.track({
+          id = "heavy_stun",
+          scope = poe,
+          capabilities = { "screen_read" },
+          poll_ms = 50,
+          detector = {
+            kind = "horizontal_progress_bar",
+            roi = { x = 0, y = 0, w = 10, h = 10 },
+            fill = { direction = "left_to_right" },
+          },
+        })
+        sa.state.track({
+          id = "refutation_cooldown",
+          scope = poe,
+          capabilities = { "screen_read" },
+          poll_ms = 50,
+          detector = {
+            kind = "radial_cooldown",
+            roi = { x = 0, y = 0, w = 10, h = 10 },
+          },
+        })
+    "#
+}
+
+fn overlay_visuals() -> String {
+    r##"
+            {
+              id = "heavy_stun",
+              kind = "progress_bar",
+              bind = { tracker = "heavy_stun", field = "progress_percent" },
+              rect = { x = 1640, y = 1590, w = 600, h = 22 },
+              opacity = 0.72,
+              fill = "#d8b84c",
+              background = "#101820",
+              label = { visible = true },
+              inactive = { opacity = 0.25 },
+            },
+            {
+              id = "refutation",
+              kind = "progress_bar",
+              bind = { tracker = "refutation_cooldown", field = "remaining_ms" },
+              rect = { x = 1640, y = 1620, w = 600, h = 22 },
+              opacity = 0.72,
+              fill = "#5aa7ff",
+              background = "#101820",
+              label = { visible = true },
+              ready = { fill = "#4ade80", opacity = 0.85 },
+              inactive = { opacity = 0.25 },
+            },
+    "##
+    .to_string()
 }
 
 #[test]

@@ -6,6 +6,7 @@ mod hotkey;
 mod key;
 mod macro_plan;
 mod motion;
+mod overlay;
 mod scope;
 mod screen_state;
 mod stats;
@@ -41,6 +42,12 @@ pub use motion::{
     AutomationDefaults, HeldCondition, LoopBody, LoopDefinition, LoopInterval, LoopRepeat,
     MotionDefinition, MotionDiscardReason, MotionInputEvent, MotionInputState, MotionRuntime,
     MotionRuntimeEvent, MotionToken, MotionTrigger, PressDefinition, DEFAULT_MOTION_DURATION,
+};
+pub use overlay::{
+    OverlayDefinition, OverlayDefinitionSet, OverlayDiagnostic, OverlayDiagnosticReason,
+    OverlayLifecycleState, OverlayProviderReport, OverlayProviderStatus, OverlayRect,
+    OverlaySnapshot, OverlayStyle, OverlaySurfaceKind, ProgressBarVisualDefinition,
+    RendererProviderId, StateBinding, StateField, VisualDefinition, VisualSnapshot,
 };
 pub use scope::{
     ActiveProcessConfidence, ActiveProcessContext, FocusFreshness, FocusFreshnessPolicy,

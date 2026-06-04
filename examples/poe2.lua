@@ -17,7 +17,7 @@ sa.state.track({
   id = "refutation_cooldown",
   scope = poe,
   capabilities = { "screen_read" },
-  poll_ms = 500,
+  poll_ms = 50,
   detector = {
     kind = "radial_cooldown",
     roi = { x = 2850, y = 2030, w = 96, h = 92 },
@@ -29,11 +29,43 @@ sa.state.track({
   id = "heavy_stun",
   scope = poe,
   capabilities = { "screen_read" },
-  poll_ms = 500,
+  poll_ms = 50,
   detector = {
     kind = "horizontal_progress_bar",
-    roi = { x = 1828, y = 702, w = 190, h = 58 },
+    roi = { x = 1540, y = 1560, w = 820, h = 42 },
     fill = { direction = "left_to_right" },
+  },
+})
+
+sa.overlay.mount({
+  id = "poe2_status",
+  scope = poe,
+  provider = "native",
+  surface = "overlay",
+  visuals = {
+    {
+      id = "heavy_stun",
+      kind = "progress_bar",
+      bind = { tracker = "heavy_stun", field = "progress_percent" },
+      rect = { x = 1640, y = 1590, w = 600, h = 22 },
+      opacity = 0.72,
+      fill = "#d8b84c",
+      background = "#101820",
+      label = { visible = true },
+      inactive = { opacity = 0.25 },
+    },
+    {
+      id = "refutation",
+      kind = "progress_bar",
+      bind = { tracker = "refutation_cooldown", field = "remaining_ms" },
+      rect = { x = 1640, y = 1620, w = 600, h = 22 },
+      opacity = 0.72,
+      fill = "#5aa7ff",
+      background = "#101820",
+      label = { visible = true },
+      ready = { fill = "#4ade80", opacity = 0.85 },
+      inactive = { opacity = 0.25 },
+    },
   },
 })
 
@@ -66,7 +98,7 @@ sa.motion({
     while_held = { "<LClick>" },
     before = "ctrl_down",
     repeat = {
-      every_ms = 65,
+      every_ms = 40,
       callback = "click_left",
     },
     after = "ctrl_up",

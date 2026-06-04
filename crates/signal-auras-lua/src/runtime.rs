@@ -306,6 +306,15 @@ fn install_sa_api(
         )
         .map_err(lua_error)?;
     sa.set("state", state).map_err(lua_error)?;
+    let overlay = lua.create_table().map_err(lua_error)?;
+    overlay
+        .set(
+            "mount",
+            lua.create_function(|_, _: Table| Ok(()))
+                .map_err(lua_error)?,
+        )
+        .map_err(lua_error)?;
+    sa.set("overlay", overlay).map_err(lua_error)?;
     lua.globals().set("sa", sa).map_err(lua_error)?;
 
     lua.load(

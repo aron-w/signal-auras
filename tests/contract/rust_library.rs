@@ -2,12 +2,17 @@ use signal_auras_core::{
     detect_horizontal_progress_bar, detect_radial_cooldown, ActiveProcessConfidence,
     ActiveProcessContext, ActiveProcessProvider, BindingMode, BindingTrigger, Capability,
     CapabilityAvailability, CapabilityKind, CapabilityReport, CapabilitySet, CapabilityStatus,
-    CompositeTrigger, DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyRegistrar, InputEmission,
-    LuaAutomationConfiguration, MacroAction, MacroDefinition, MacroExecutor, ModifierSet,
-    MotionDefinition, MotionTrigger, MouseTrigger, ProcessName, RegistrationId, RuntimeStats,
-    ScopeDenialKind, ScreenSample, ShortcutRegistrationState, SynthesizedInputRequest,
-    WheelDirection, DEFAULT_FOCUS_STALE_THRESHOLD,
+    CompositeTrigger, DetectorDefinition, DiagnosableError, ErrorPhase, HotkeyBinding,
+    HotkeyRegistrar, InputEmission, LuaAutomationConfiguration, MacroAction, MacroDefinition,
+    MacroExecutor, ModifierSet, MotionDefinition, MotionTrigger, MouseTrigger, OverlayDefinition,
+    OverlayDefinitionSet, OverlayDiagnosticReason, OverlayLifecycleState, OverlayProviderReport,
+    OverlayRect, OverlayStyle, OverlaySurfaceKind, ProcessName, ProgressBarVisualDefinition,
+    ProgressFillDirection, RegistrationId, RendererProviderId, Roi, RuntimeStats, ScopeDenialKind,
+    ScopeSelection, ScreenSample, ShortcutRegistrationState, StateBinding, StateField,
+    StateTrackerDefinition, StateTrackerDefinitionSet, SynthesizedInputRequest, TrackerState,
+    VisualDefinition, WheelDirection, DEFAULT_FOCUS_STALE_THRESHOLD,
 };
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 #[test]
@@ -71,6 +76,398 @@ fn poe2_screen_state_heavy_stun_fixture_reports_progress() {
             other => panic!("unexpected tracker state: {other:?}"),
         }
     }
+}
+
+#[test]
+fn overlay_definitions_validate_duplicate_visuals_and_bindings() {
+    let trackers = overlay_test_trackers();
+    let duplicate = OverlayDefinition::new(
+        "poe2_status",
+        overlay_scope(),
+        OverlaySurfaceKind::Overlay,
+        RendererProviderId::Native,
+        [
+            overlay_progress_visual(
+                "bar",
+                "heavy_stun",
+                StateField::ProgressPercent,
+                0,
+                "#d8b84c",
+            ),
+            overlay_progress_visual(
+                "bar",
+                "refutation_cooldown",
+                StateField::RemainingMs,
+                30,
+                "#5aa7ff",
+            ),
+        ],
+    )
+    .unwrap_err();
+    assert!(duplicate.message.contains("duplicate overlay visual id"));
+
+    let overlay = OverlayDefinition::new(
+        "poe2_status",
+        overlay_scope(),
+        OverlaySurfaceKind::Overlay,
+        RendererProviderId::Native,
+        [overlay_progress_visual(
+            "bad",
+            "missing_tracker",
+            StateField::ProgressPercent,
+            0,
+            "#d8b84c",
+        )],
+    )
+    .unwrap();
+    let error = OverlayDefinitionSet::new([overlay], &trackers).unwrap_err();
+    assert!(error.message.contains("missing state tracker"));
+}
+
+#[test]
+fn overlay_state_maps_heavy_stun_and_refutation_progress_bars() {
+    let overlays = overlay_definition_set();
+    let mut states = BTreeMap::new();
+    states.insert(
+        "heavy_stun".to_string(),
+        TrackerState::HorizontalProgressBar {
+            visible: true,
+            progress_percent: 73,
+            confidence: 95,
+            freshness_ms: 0,
+        },
+    );
+    states.insert(
+        "refutation_cooldown".to_string(),
+        TrackerState::RadialCooldown {
+            ready: false,
+            cooldown_fraction: 25,
+            remaining_ms: Some(1_000),
+            total_estimated_ms: Some(4_000),
+            confidence: 95,
+            freshness_ms: 0,
+        },
+    );
+
+    let snapshots = overlays.snapshots(
+        10,
+        &signal_auras_core::available_capability_report(overlays.required_capabilities(), "test"),
+        &ActiveProcessContext::name_only(ProcessName::parse("PathOfExileSteam.exe").unwrap()),
+        &states,
+        &OverlayProviderReport::native_available(),
+    );
+
+    let snapshot = &snapshots[0];
+    assert_eq!(snapshot.lifecycle, OverlayLifecycleState::Active);
+    assert_eq!(snapshot.visuals.len(), 2);
+    assert_eq!(snapshot.visuals[0].visual_id, "heavy_stun");
+    assert!((snapshot.visuals[0].fill_fraction - 0.73).abs() < 0.001);
+    assert_eq!(snapshot.visuals[1].visual_id, "refutation");
+    assert!((snapshot.visuals[1].fill_fraction - 0.75).abs() < 0.001);
+}
+
+#[test]
+fn overlay_state_applies_refutation_ready_style() {
+    let overlays = overlay_definition_set();
+    let mut states = BTreeMap::new();
+    states.insert(
+        "heavy_stun".to_string(),
+        TrackerState::HorizontalProgressBar {
+            visible: true,
+            progress_percent: 10,
+            confidence: 95,
+            freshness_ms: 0,
+        },
+    );
+    states.insert(
+        "refutation_cooldown".to_string(),
+        TrackerState::RadialCooldown {
+            ready: true,
+            cooldown_fraction: 0,
+            remaining_ms: Some(0),
+            total_estimated_ms: Some(4_000),
+            confidence: 95,
+            freshness_ms: 0,
+        },
+    );
+
+    let snapshot = overlays
+        .snapshots(
+            10,
+            &signal_auras_core::available_capability_report(
+                overlays.required_capabilities(),
+                "test",
+            ),
+            &ActiveProcessContext::name_only(ProcessName::parse("PathOfExileSteam.exe").unwrap()),
+            &states,
+            &OverlayProviderReport::native_available(),
+        )
+        .remove(0);
+    let refutation = snapshot
+        .visuals
+        .iter()
+        .find(|visual| visual.visual_id == "refutation")
+        .unwrap();
+
+    assert!(refutation.ready);
+    assert_eq!(refutation.fill, "#4ade80");
+    assert!((refutation.fill_fraction - 1.0).abs() < 0.001);
+}
+
+#[test]
+fn overlay_state_fails_closed_for_inactive_focus_stale_and_missing_source() {
+    let overlays = overlay_definition_set();
+    let capabilities =
+        signal_auras_core::available_capability_report(overlays.required_capabilities(), "test");
+    let mut states = BTreeMap::new();
+    states.insert(
+        "heavy_stun".to_string(),
+        TrackerState::HorizontalProgressBar {
+            visible: true,
+            progress_percent: 50,
+            confidence: 95,
+            freshness_ms: 0,
+        },
+    );
+    states.insert(
+        "refutation_cooldown".to_string(),
+        TrackerState::RadialCooldown {
+            ready: false,
+            cooldown_fraction: 50,
+            remaining_ms: Some(2_000),
+            total_estimated_ms: Some(4_000),
+            confidence: 95,
+            freshness_ms: 0,
+        },
+    );
+
+    let inactive = overlays.snapshots(
+        10,
+        &capabilities,
+        &ActiveProcessContext::name_only(ProcessName::parse("kate").unwrap()),
+        &states,
+        &OverlayProviderReport::native_available(),
+    );
+    assert_eq!(inactive[0].lifecycle, OverlayLifecycleState::Inactive);
+    assert_eq!(
+        inactive[0].diagnostic.as_ref().unwrap().reason,
+        OverlayDiagnosticReason::FocusInactive
+    );
+
+    states.insert(
+        "heavy_stun".to_string(),
+        TrackerState::HorizontalProgressBar {
+            visible: true,
+            progress_percent: 50,
+            confidence: 95,
+            freshness_ms: 1_000,
+        },
+    );
+    let stale = overlays.snapshots(
+        10,
+        &capabilities,
+        &ActiveProcessContext::name_only(ProcessName::parse("PathOfExileSteam.exe").unwrap()),
+        &states,
+        &OverlayProviderReport::native_available(),
+    );
+    assert_eq!(stale[0].lifecycle, OverlayLifecycleState::Stale);
+    assert_eq!(
+        stale[0].diagnostic.as_ref().unwrap().reason,
+        OverlayDiagnosticReason::StaleStateSource
+    );
+
+    states.remove("heavy_stun");
+    let missing = overlays.snapshots(
+        10,
+        &capabilities,
+        &ActiveProcessContext::name_only(ProcessName::parse("PathOfExileSteam.exe").unwrap()),
+        &states,
+        &OverlayProviderReport::native_available(),
+    );
+    assert_eq!(
+        missing[0].diagnostic.as_ref().unwrap().reason,
+        OverlayDiagnosticReason::MissingStateSource
+    );
+}
+
+#[test]
+fn overlay_provider_selection_fails_closed_without_fallback() {
+    let trackers = overlay_test_trackers();
+    let overlay = OverlayDefinition::new(
+        "future_ui",
+        ScopeSelection::ExplicitGlobal,
+        OverlaySurfaceKind::Overlay,
+        RendererProviderId::WebView,
+        [overlay_progress_visual(
+            "heavy_stun",
+            "heavy_stun",
+            StateField::ProgressPercent,
+            0,
+            "#d8b84c",
+        )],
+    )
+    .unwrap();
+    let overlays = OverlayDefinitionSet::new([overlay], &trackers).unwrap();
+    let states = BTreeMap::from([(
+        "heavy_stun".to_string(),
+        TrackerState::HorizontalProgressBar {
+            visible: true,
+            progress_percent: 80,
+            confidence: 95,
+            freshness_ms: 0,
+        },
+    )]);
+
+    let snapshot = overlays
+        .snapshots(
+            0,
+            &signal_auras_core::available_capability_report(
+                overlays.required_capabilities(),
+                "test",
+            ),
+            &ActiveProcessContext::unavailable("global scope does not need focus"),
+            &states,
+            &OverlayProviderReport::native_available(),
+        )
+        .remove(0);
+
+    assert_eq!(snapshot.provider, RendererProviderId::WebView);
+    assert_eq!(snapshot.lifecycle, OverlayLifecycleState::Unavailable);
+    assert!(snapshot.visuals.is_empty());
+    assert_eq!(
+        snapshot.diagnostic.unwrap().reason,
+        OverlayDiagnosticReason::ProviderUnavailable
+    );
+}
+
+#[test]
+fn overlay_snapshots_are_sanitized_and_do_not_request_input_or_macros() {
+    let overlays = overlay_definition_set();
+    let states = BTreeMap::from([
+        (
+            "heavy_stun".to_string(),
+            TrackerState::HorizontalProgressBar {
+                visible: true,
+                progress_percent: 40,
+                confidence: 95,
+                freshness_ms: 0,
+            },
+        ),
+        (
+            "refutation_cooldown".to_string(),
+            TrackerState::RadialCooldown {
+                ready: false,
+                cooldown_fraction: 40,
+                remaining_ms: Some(1_600),
+                total_estimated_ms: Some(4_000),
+                confidence: 95,
+                freshness_ms: 0,
+            },
+        ),
+    ]);
+
+    let rendered = format!(
+        "{:?}",
+        overlays.snapshots(
+            10,
+            &signal_auras_core::available_capability_report(
+                overlays.required_capabilities(),
+                "test",
+            ),
+            &ActiveProcessContext::name_only(ProcessName::parse("PathOfExileSteam.exe").unwrap()),
+            &states,
+            &OverlayProviderReport::native_available(),
+        )
+    );
+
+    assert!(!rendered.contains("pixels"));
+    assert!(!rendered.contains("MacroAction"));
+    assert!(!rendered.contains("SynthesizedInput"));
+    assert!(!rendered.contains("window_title"));
+    assert!(!rendered.contains("compositor"));
+}
+
+fn overlay_definition_set() -> OverlayDefinitionSet {
+    let trackers = overlay_test_trackers();
+    let overlay = OverlayDefinition::new(
+        "poe2_status",
+        overlay_scope(),
+        OverlaySurfaceKind::Overlay,
+        RendererProviderId::Native,
+        [
+            overlay_progress_visual(
+                "heavy_stun",
+                "heavy_stun",
+                StateField::ProgressPercent,
+                0,
+                "#d8b84c",
+            ),
+            overlay_progress_visual(
+                "refutation",
+                "refutation_cooldown",
+                StateField::RemainingMs,
+                30,
+                "#5aa7ff",
+            ),
+        ],
+    )
+    .unwrap();
+    OverlayDefinitionSet::new([overlay], &trackers).unwrap()
+}
+
+fn overlay_progress_visual(
+    id: &str,
+    tracker_id: &str,
+    field: StateField,
+    y: i64,
+    fill: &str,
+) -> VisualDefinition {
+    VisualDefinition::ProgressBar(
+        ProgressBarVisualDefinition::new(
+            id,
+            StateBinding::new(tracker_id, field).unwrap(),
+            OverlayRect::new(10, y, 300, 20).unwrap(),
+            0.72,
+            fill,
+            "#101820",
+            true,
+            Some(OverlayStyle::new(Some("#4ade80"), None::<&str>, Some(0.85), None).unwrap()),
+            Some(OverlayStyle::new(None::<&str>, None::<&str>, Some(0.25), None).unwrap()),
+        )
+        .unwrap(),
+    )
+}
+
+fn overlay_test_trackers() -> StateTrackerDefinitionSet {
+    StateTrackerDefinitionSet::new([
+        StateTrackerDefinition::new(
+            "heavy_stun",
+            overlay_scope(),
+            CapabilitySet::new([CapabilityKind::ScreenRead]),
+            50,
+            DetectorDefinition::HorizontalProgressBar {
+                roi: Roi::new(0, 0, 10, 10).unwrap(),
+                fill_direction: ProgressFillDirection::LeftToRight,
+            },
+        )
+        .unwrap(),
+        StateTrackerDefinition::new(
+            "refutation_cooldown",
+            overlay_scope(),
+            CapabilitySet::new([CapabilityKind::ScreenRead]),
+            50,
+            DetectorDefinition::RadialCooldown {
+                roi: Roi::new(0, 0, 10, 10).unwrap(),
+                mask: None,
+            },
+        )
+        .unwrap(),
+    ])
+    .unwrap()
+}
+
+fn overlay_scope() -> ScopeSelection {
+    ScopeSelection::process_list(vec![ProcessName::parse("PathOfExileSteam.exe").unwrap()]).unwrap()
 }
 
 struct FailingRegistrar;

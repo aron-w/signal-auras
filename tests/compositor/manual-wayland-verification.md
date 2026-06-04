@@ -98,6 +98,24 @@ Record before the run:
 4. Switch the script to `devices = "all"` and confirm unreadable or self-generated devices are skipped, at least one eligible readable device allows startup, and no discovered paths persist after exit.
 5. Unplug and replug a selected stable device during the current run and confirm the runner reports removal/reopen and resumes observing only that selected path.
 
+## Overlay Render Provider Verification
+
+Automated tests cover overlay declaration validation and state-to-visual mapping.
+Use this procedure only in a real KDE Plasma Wayland session because safe
+pass-through overlay surface behavior depends on compositor support.
+
+1. Enter the development shell with `nix develop`.
+2. Start PoE2 in the configured fullscreen layout.
+3. Run `cargo run -p signal-auras-cli -- run ./examples/poe2.lua --verbose` or the equivalent runner command after CLI overlay wiring is active.
+4. Confirm startup diagnostics list the `native` overlay provider and the `poe2_status` overlay id.
+5. Confirm the Heavy Stun progress bar renders above the game and tracks `heavy_stun.progress_percent`.
+6. Confirm the Refutation bar renders as cooling down from `refutation_cooldown.remaining_ms`.
+7. Confirm the Refutation bar switches to the ready style when the tracker reports ready.
+8. Move and click through both bars and confirm mouse input reaches the game.
+9. Switch focus away from PoE2 and confirm the overlay hides or becomes inactive with a diagnostic.
+10. Stop the runner and confirm no overlay surface remains visible.
+11. Repeat with an unavailable future provider such as `webview` and confirm it fails closed without falling back to `native`.
+
 ## Results
 
 ### Run 2026-05-26: KDE Plasma Wayland live smoke test
