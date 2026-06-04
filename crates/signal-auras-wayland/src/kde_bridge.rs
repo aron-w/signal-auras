@@ -309,6 +309,17 @@ impl KwinShortcutBridge {
         .map(|result| result.found)
     }
 
+    pub fn configure_overlay_window(
+        &mut self,
+        placement: &crate::overlay::OverlayWindowPlacement,
+    ) -> Result<bool, DiagnosableError> {
+        let placement = placement.clone();
+        self.run_window_script(|request_id, bus, path| {
+            kwin_configure_overlay_window_script(request_id, bus, path, &placement)
+        })
+        .map(|result| result.found)
+    }
+
     fn run_window_script(
         &mut self,
         build_script: impl FnOnce(&str, &str, &str) -> String,
@@ -790,6 +801,49 @@ fn kwin_active_window_matches_script(
     )
 }
 
+fn kwin_configure_overlay_window_script(
+    request_id: &str,
+    bus_name: &str,
+    object_path: &str,
+    placement: &crate::overlay::OverlayWindowPlacement,
+) -> String {
+    format!(
+        "{}\
+         var title = {title:?};\n\
+         var windows = signalAurasWindows();\n\
+         var target = null;\n\
+         for (var i = 0; i < windows.length; i++) {{\n\
+             var window = windows[i];\n\
+             var caption = signalAurasWindowCaption(window);\n\
+             if (caption === title || caption.indexOf(title) === 0) {{ target = window; break; }}\n\
+         }}\n\
+         if (target) {{\n\
+             try {{ target.keepAbove = true; }} catch (error) {{}}\n\
+             try {{ target.skipTaskbar = true; }} catch (error) {{}}\n\
+             try {{ target.skipPager = true; }} catch (error) {{}}\n\
+             try {{ target.skipSwitcher = true; }} catch (error) {{}}\n\
+             try {{ target.noBorder = true; }} catch (error) {{}}\n\
+             try {{ target.minimized = false; }} catch (error) {{}}\n\
+             var geometry = {{ x: {x}, y: {y}, width: {w}, height: {h} }};\n\
+             try {{\n\
+                 target.frameGeometry = geometry;\n\
+             }} catch (error) {{\n\
+                 try {{ if (target.moveResize) {{ target.moveResize(geometry); }} }} catch (error2) {{}}\n\
+             }}\n\
+         }}\n\
+         callDBus({bus:?}, {path:?}, \"org.signalAuras.KWinBridge\", \"windowResult\", {request:?}, target !== null, \"\");\n",
+        kwin_window_helpers(),
+        title = placement.title.as_str(),
+        x = placement.x,
+        y = placement.y,
+        w = placement.w,
+        h = placement.h,
+        bus = bus_name,
+        path = object_path,
+        request = request_id,
+    )
+}
+
 fn bridge_error(error: impl std::fmt::Display) -> DiagnosableError {
     bridge_diagnostic(format!("{error}"))
 }
@@ -933,6 +987,39 @@ mod tests {
         );
         assert!(wait.contains("workspace.activeWindow"));
         assert!(wait.contains("signalAurasWindowMatches"));
+    }
+
+    #[test]
+    fn overlay_window_script_places_transparent_qml_window_without_input_ownership() {
+        let placement = crate::overlay::OverlayWindowPlacement {
+            overlay_id: "poe2-status".to_string(),
+            title: "Signal Auras Overlay poe2-status".to_string(),
+            x: 120,
+            y: 140,
+            w: 320,
+            h: 48,
+        };
+        let script = kwin_configure_overlay_window_script(
+            "request-overlay",
+            "org.signalAuras.Runner123",
+            "/org/signalAuras/Runner",
+            &placement,
+        );
+
+        assert!(script.contains("Signal Auras Overlay poe2-status"));
+        assert!(script.contains("caption === title || caption.indexOf(title) === 0"));
+        assert!(script.contains("target.keepAbove = true"));
+        assert!(script.contains("target.skipTaskbar = true"));
+        assert!(script.contains("target.noBorder = true"));
+        assert!(script.contains("target.frameGeometry = geometry"));
+        assert!(script.contains("target.moveResize(geometry)"));
+        assert!(script.contains("x: 120"));
+        assert!(script.contains("y: 140"));
+        assert!(script.contains("width: 320"));
+        assert!(script.contains("height: 48"));
+        assert!(script.contains("\"windowResult\""));
+        assert!(!script.contains("registerShortcut"));
+        assert!(!script.contains("capture"));
     }
 
     fn event(action_name: &str) -> KwinBridgeEvent {

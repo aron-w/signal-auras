@@ -5,7 +5,7 @@ use signal_auras_core::{
     MacroExecutor, MotionInputEvent, MotionToken, OverlayProviderReport, OverlaySnapshot,
     ProcessName, RegistrationId, ScreenSample, ScreenSampleProvider, SynthesizedInputRequest,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::capability::{environment_probe, KdeEnvironment};
 use crate::diagnostics::unsupported_protocol;
@@ -104,6 +104,8 @@ pub struct RealWaylandAdapter {
     shortcut_bridge: Option<crate::kde_bridge::KwinShortcutBridge>,
     evdev_provider: Option<crate::evdev::EvdevObservationProvider>,
     overlay_renderer: crate::overlay::NativeOverlayRenderer,
+    overlay_placements: BTreeMap<String, crate::overlay::OverlayWindowPlacement>,
+    overlay_placement_attempts: BTreeMap<String, (crate::overlay::OverlayWindowPlacement, u8)>,
 }
 
 impl RealWaylandAdapter {
@@ -118,6 +120,8 @@ impl RealWaylandAdapter {
             shortcut_bridge: None,
             evdev_provider: None,
             overlay_renderer: crate::overlay::NativeOverlayRenderer::live(),
+            overlay_placements: BTreeMap::new(),
+            overlay_placement_attempts: BTreeMap::new(),
         }
     }
 
@@ -132,6 +136,8 @@ impl RealWaylandAdapter {
             shortcut_bridge: None,
             evdev_provider: None,
             overlay_renderer: crate::overlay::NativeOverlayRenderer::in_memory(),
+            overlay_placements: BTreeMap::new(),
+            overlay_placement_attempts: BTreeMap::new(),
         }
     }
 
@@ -303,11 +309,77 @@ impl RealWaylandAdapter {
         &mut self,
         snapshot: OverlaySnapshot,
     ) -> Result<(), DiagnosableError> {
-        self.overlay_renderer.render_snapshot(snapshot)
+        let overlay_id = snapshot.overlay_id.clone();
+        let placement = crate::overlay::overlay_window_placement(&snapshot);
+        self.overlay_renderer.render_snapshot(snapshot)?;
+        if self.environment.is_some() {
+            return Ok(());
+        }
+        let Some(placement) = placement else {
+            self.overlay_placements.remove(&overlay_id);
+            self.overlay_placement_attempts.remove(&overlay_id);
+            return Ok(());
+        };
+        if self.overlay_placements.get(&overlay_id) == Some(&placement) {
+            return Ok(());
+        }
+        let attempts = self
+            .overlay_placement_attempts
+            .get(&overlay_id)
+            .and_then(|(pending, attempts)| (pending == &placement).then_some(*attempts))
+            .unwrap_or(0);
+        if attempts >= 20 {
+            return Err(DiagnosableError::new(
+                ErrorPhase::Registration,
+                format!(
+                    "native overlay window '{}' was not found by KWin after QML startup",
+                    placement.title
+                ),
+            )
+            .with_source("kwin-scripting")
+            .with_remediation(
+                "verify the Qt qml runtime can create windows and KWin scripting can enumerate them",
+            ));
+        }
+        if self.shortcut_bridge.is_none() {
+            self.shortcut_bridge = Some(crate::kde_bridge::KwinShortcutBridge::connect()?);
+        }
+        let placed = self
+            .shortcut_bridge
+            .as_mut()
+            .expect("shortcut bridge was initialized")
+            .configure_overlay_window(&placement)?;
+        if placed {
+            tracing::debug!(
+                event = "overlay_window_placed",
+                overlay_id = %placement.overlay_id,
+                title = %placement.title,
+                x = placement.x,
+                y = placement.y,
+                w = placement.w,
+                h = placement.h,
+            );
+            self.overlay_placements
+                .insert(overlay_id.clone(), placement);
+            self.overlay_placement_attempts.remove(&overlay_id);
+        } else {
+            tracing::debug!(
+                event = "overlay_window_not_found",
+                overlay_id = %placement.overlay_id,
+                title = %placement.title,
+                attempt = attempts + 1,
+            );
+            self.overlay_placement_attempts
+                .insert(overlay_id, (placement, attempts + 1));
+        }
+        Ok(())
     }
 
     pub fn cleanup_overlays(&mut self) -> Result<CleanupReport, DiagnosableError> {
-        self.overlay_renderer.cleanup_all()
+        let report = self.overlay_renderer.cleanup_all()?;
+        self.overlay_placements.clear();
+        self.overlay_placement_attempts.clear();
+        Ok(report)
     }
 
     pub fn active_overlay_snapshot_for_test(&self, overlay_id: &str) -> Option<&OverlaySnapshot> {

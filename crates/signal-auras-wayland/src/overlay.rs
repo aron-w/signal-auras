@@ -5,7 +5,7 @@ use signal_auras_core::{
 };
 use std::{
     collections::BTreeMap,
-    fs,
+    fs::{self, OpenOptions},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
 };
@@ -16,6 +16,16 @@ use crate::capability::KdeServiceAvailability;
 
 const QML_LAUNCHER: &str = "qml";
 const QML_POLL_INTERVAL_MS: u64 = 50;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayWindowPlacement {
+    pub overlay_id: String,
+    pub title: String,
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
 
 pub trait OverlayRendererAdapter {
     fn provider(&self) -> RendererProviderId;
@@ -342,6 +352,7 @@ struct QmlOverlayProcess {
     overlay_id: String,
     qml_path: PathBuf,
     state_path: PathBuf,
+    stderr_path: PathBuf,
     qml_written: bool,
     child: Option<Child>,
 }
@@ -357,6 +368,7 @@ impl QmlOverlayProcess {
             overlay_id: overlay_id.to_string(),
             qml_path: dir.join("overlay.qml"),
             state_path: dir.join("state.json"),
+            stderr_path: dir.join("stderr.log"),
             qml_written: false,
             child: None,
         }
@@ -392,25 +404,55 @@ impl QmlOverlayProcess {
 
     fn ensure_running(&mut self) -> Result<(), DiagnosableError> {
         if let Some(child) = &mut self.child {
-            if child.try_wait().map_err(overlay_io_error)?.is_none() {
+            if let Some(status) = child.try_wait().map_err(overlay_io_error)? {
+                let stderr = self.stderr_snippet();
+                self.child = None;
+                return Err(overlay_error(format!(
+                    "native QML overlay process exited with {status}: {stderr}"
+                )));
+            } else {
                 return Ok(());
             }
-            self.child = None;
         }
         if !command_in_path(QML_LAUNCHER) {
             return Err(overlay_error("Qt qml launcher is unavailable in PATH"));
         }
+        let stderr = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&self.stderr_path)
+            .map_err(overlay_io_error)?;
         let child = Command::new(QML_LAUNCHER)
             .arg("--transparent")
             .arg("-f")
             .arg(&self.qml_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(stderr))
             .spawn()
             .map_err(overlay_io_error)?;
+        tracing::debug!(
+            event = "overlay_qml_spawn",
+            overlay_id = %self.overlay_id,
+            qml_path = %self.qml_path.display(),
+            state_path = %self.state_path.display(),
+            stderr_path = %self.stderr_path.display(),
+        );
         self.child = Some(child);
         Ok(())
+    }
+
+    fn stderr_snippet(&self) -> String {
+        let Ok(stderr) = fs::read_to_string(&self.stderr_path) else {
+            return format!("stderr log unavailable at {}", self.stderr_path.display());
+        };
+        let trimmed = stderr.trim();
+        if trimmed.is_empty() {
+            return format!("stderr log is empty at {}", self.stderr_path.display());
+        }
+        let snippet = trimmed.chars().take(1_000).collect::<String>();
+        format!("{snippet} (stderr: {})", self.stderr_path.display())
     }
 
     fn stop(&mut self) {
@@ -423,10 +465,15 @@ impl QmlOverlayProcess {
     fn remove_files(&self) {
         let _ = fs::remove_file(&self.qml_path);
         let _ = fs::remove_file(&self.state_path);
+        let _ = fs::remove_file(&self.stderr_path);
         if let Some(dir) = self.qml_path.parent() {
             let _ = fs::remove_dir(dir);
         }
     }
+}
+
+pub fn qml_overlay_title(overlay_id: &str) -> String {
+    format!("Signal Auras Overlay {overlay_id}")
 }
 
 fn qml_overlay_source(overlay_id: &str, state_path: &Path) -> String {
@@ -510,7 +557,7 @@ Window {{
     }}
 }}
 "##,
-        title = format!("Signal Auras Overlay {overlay_id}"),
+        title = qml_overlay_title(overlay_id),
         state_url = state_url,
         interval_ms = QML_POLL_INTERVAL_MS,
     )
@@ -538,6 +585,21 @@ fn overlay_snapshot_json(snapshot: &OverlaySnapshot) -> String {
         bounds.h,
         visuals
     )
+}
+
+pub fn overlay_window_placement(snapshot: &OverlaySnapshot) -> Option<OverlayWindowPlacement> {
+    if snapshot.provider != RendererProviderId::Native || !snapshot.is_active() {
+        return None;
+    }
+    let bounds = overlay_bounds(&snapshot.visuals)?;
+    Some(OverlayWindowPlacement {
+        overlay_id: snapshot.overlay_id.clone(),
+        title: qml_overlay_title(&snapshot.overlay_id),
+        x: bounds.x,
+        y: bounds.y,
+        w: bounds.w,
+        h: bounds.h,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -730,6 +792,7 @@ mod tests {
         assert!(qml.contains("XMLHttpRequest"));
         assert!(qml.contains("modelData.fill_fraction"));
         assert!(qml.contains("root.x = parsed.x"));
+        assert!(qml.contains("Signal Auras Overlay poe2-bars"));
         assert!(!qml.contains("width: Screen.width"));
         assert!(!qml.contains("height: Screen.height"));
     }
@@ -751,6 +814,31 @@ mod tests {
         assert!(!json.contains("pixels"));
         assert!(!json.contains("compositor"));
         assert!(!json.contains("SynthesizedInput"));
+    }
+
+    #[test]
+    fn overlay_window_placement_uses_visual_bounds_and_stable_qml_title() {
+        let placement = overlay_window_placement(&active_snapshot("poe2-bars")).unwrap();
+
+        assert_eq!(placement.overlay_id, "poe2-bars");
+        assert_eq!(placement.title, "Signal Auras Overlay poe2-bars");
+        assert_eq!(placement.x, 10);
+        assert_eq!(placement.y, 20);
+        assert_eq!(placement.w, 160);
+        assert_eq!(placement.h, 12);
+
+        let inactive = OverlaySnapshot {
+            lifecycle: OverlayLifecycleState::Inactive,
+            ..active_snapshot("poe2-bars")
+        };
+        assert!(overlay_window_placement(&inactive).is_none());
+    }
+
+    #[test]
+    fn qml_process_keeps_stderr_path_for_runtime_diagnostics() {
+        let process = QmlOverlayProcess::new("poe2-test");
+
+        assert!(process.stderr_path.ends_with("stderr.log"));
     }
 
     #[test]
