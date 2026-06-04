@@ -312,8 +312,8 @@ impl QmlOverlayRenderer {
     ) -> Result<(), DiagnosableError> {
         let overlay_id = overlay_id.into();
         self.active.remove(&overlay_id);
-        if let Some(mut process) = self.processes.remove(&overlay_id) {
-            process.stop();
+        if let Some(process) = self.processes.get_mut(&overlay_id) {
+            process.write_hidden()?;
         }
         self.hidden.push(overlay_id);
         Ok(())
@@ -342,6 +342,7 @@ struct QmlOverlayProcess {
     overlay_id: String,
     qml_path: PathBuf,
     state_path: PathBuf,
+    qml_written: bool,
     child: Option<Child>,
 }
 
@@ -356,22 +357,37 @@ impl QmlOverlayProcess {
             overlay_id: overlay_id.to_string(),
             qml_path: dir.join("overlay.qml"),
             state_path: dir.join("state.json"),
+            qml_written: false,
             child: None,
         }
     }
 
-    fn write_snapshot(&self, snapshot: &OverlaySnapshot) -> Result<(), DiagnosableError> {
+    fn write_snapshot(&mut self, snapshot: &OverlaySnapshot) -> Result<(), DiagnosableError> {
         let Some(dir) = self.qml_path.parent() else {
             return Err(overlay_error("overlay temp directory is invalid"));
         };
         fs::create_dir_all(dir).map_err(overlay_io_error)?;
-        fs::write(
-            &self.qml_path,
-            qml_overlay_source(&self.overlay_id, &self.state_path),
-        )
-        .map_err(overlay_io_error)?;
+        if !self.qml_written {
+            fs::write(
+                &self.qml_path,
+                qml_overlay_source(&self.overlay_id, &self.state_path),
+            )
+            .map_err(overlay_io_error)?;
+            self.qml_written = true;
+        }
         fs::write(&self.state_path, overlay_snapshot_json(snapshot)).map_err(overlay_io_error)?;
         Ok(())
+    }
+
+    fn write_hidden(&self) -> Result<(), DiagnosableError> {
+        fs::write(
+            &self.state_path,
+            format!(
+                "{{\"overlay_id\":{},\"x\":0,\"y\":0,\"w\":1,\"h\":1,\"visuals\":[]}}",
+                json_string(&self.overlay_id)
+            ),
+        )
+        .map_err(overlay_io_error)
     }
 
     fn ensure_running(&mut self) -> Result<(), DiagnosableError> {
@@ -424,11 +440,11 @@ Window {{
     title: {title:?}
     x: 0
     y: 0
-    width: Screen.width
-    height: Screen.height
+    width: 1
+    height: 1
     color: "transparent"
-    visible: true
-    flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput
+    visible: false
+    flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus
     property string stateUrl: {state_url:?}
     property var bars: []
 
@@ -438,7 +454,12 @@ Window {{
         request.send()
         if (request.status === 0 || request.status === 200) {{
             var parsed = JSON.parse(request.responseText)
+            root.x = parsed.x || 0
+            root.y = parsed.y || 0
+            root.width = Math.max(1, parsed.w || 1)
+            root.height = Math.max(1, parsed.h || 1)
             bars = parsed.visuals || []
+            root.visible = bars.length > 0
         }}
     }}
 
@@ -496,20 +517,58 @@ Window {{
 }
 
 fn overlay_snapshot_json(snapshot: &OverlaySnapshot) -> String {
+    let bounds = overlay_bounds(&snapshot.visuals).unwrap_or(OverlayBounds {
+        x: 0,
+        y: 0,
+        w: 1,
+        h: 1,
+    });
     let visuals = snapshot
         .visuals
         .iter()
-        .map(visual_json)
+        .map(|visual| visual_json(visual, bounds.x, bounds.y))
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "{{\"overlay_id\":{},\"visuals\":[{}]}}",
+        "{{\"overlay_id\":{},\"x\":{},\"y\":{},\"w\":{},\"h\":{},\"visuals\":[{}]}}",
         json_string(&snapshot.overlay_id),
+        bounds.x,
+        bounds.y,
+        bounds.w,
+        bounds.h,
         visuals
     )
 }
 
-fn visual_json(visual: &VisualSnapshot) -> String {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OverlayBounds {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+}
+
+fn overlay_bounds(visuals: &[VisualSnapshot]) -> Option<OverlayBounds> {
+    let first = visuals.first()?;
+    let mut min_x = first.rect.x;
+    let mut min_y = first.rect.y;
+    let mut max_x = first.rect.x.saturating_add(first.rect.w);
+    let mut max_y = first.rect.y.saturating_add(first.rect.h);
+    for visual in &visuals[1..] {
+        min_x = min_x.min(visual.rect.x);
+        min_y = min_y.min(visual.rect.y);
+        max_x = max_x.max(visual.rect.x.saturating_add(visual.rect.w));
+        max_y = max_y.max(visual.rect.y.saturating_add(visual.rect.h));
+    }
+    Some(OverlayBounds {
+        x: min_x,
+        y: min_y,
+        w: max_x.saturating_sub(min_x).max(1),
+        h: max_y.saturating_sub(min_y).max(1),
+    })
+}
+
+fn visual_json(visual: &VisualSnapshot, origin_x: u32, origin_y: u32) -> String {
     format!(
         concat!(
             "{{",
@@ -525,8 +584,8 @@ fn visual_json(visual: &VisualSnapshot) -> String {
             "}}"
         ),
         json_string(&visual.visual_id),
-        visual.rect.x,
-        visual.rect.y,
+        visual.rect.x.saturating_sub(origin_x),
+        visual.rect.y.saturating_sub(origin_y),
         visual.rect.w,
         visual.rect.h,
         visual.opacity.clamp(0.0, 1.0),
@@ -665,23 +724,75 @@ mod tests {
         let qml = qml_overlay_source("poe2-bars", Path::new("/tmp/signal-auras-state.json"));
 
         assert!(qml.contains("WindowTransparentForInput"));
+        assert!(qml.contains("WindowDoesNotAcceptFocus"));
         assert!(qml.contains("WindowStaysOnTopHint"));
         assert!(qml.contains("color: \"transparent\""));
         assert!(qml.contains("XMLHttpRequest"));
         assert!(qml.contains("modelData.fill_fraction"));
+        assert!(qml.contains("root.x = parsed.x"));
+        assert!(!qml.contains("width: Screen.width"));
+        assert!(!qml.contains("height: Screen.height"));
     }
 
     #[test]
-    fn qml_renderer_serializes_only_sanitized_visual_snapshot_data() {
+    fn qml_renderer_serializes_bounded_sanitized_visual_snapshot_data() {
         let json = overlay_snapshot_json(&active_snapshot("poe2-bars"));
 
         assert!(json.contains("\"overlay_id\":\"poe2-bars\""));
+        assert!(json.contains("\"x\":10"));
+        assert!(json.contains("\"y\":20"));
+        assert!(json.contains("\"w\":160"));
+        assert!(json.contains("\"h\":12"));
         assert!(json.contains("\"visual_id\":\"heavy-stun\""));
+        assert!(json.contains("\"x\":0"));
+        assert!(json.contains("\"y\":0"));
         assert!(json.contains("\"fill\":\"#6ee7b7\""));
         assert!(json.contains("\"fill_fraction\":0.5"));
         assert!(!json.contains("pixels"));
         assert!(!json.contains("compositor"));
         assert!(!json.contains("SynthesizedInput"));
+    }
+
+    #[test]
+    fn qml_renderer_writes_program_once_and_state_each_update() {
+        let mut process = QmlOverlayProcess::new("poe2-test");
+        process.qml_path = std::env::temp_dir().join(format!(
+            "signal-auras-overlay-test-{}-{}.qml",
+            std::process::id(),
+            "program-once"
+        ));
+        process.state_path = std::env::temp_dir().join(format!(
+            "signal-auras-overlay-test-{}-{}.json",
+            std::process::id(),
+            "program-once"
+        ));
+        let _ = fs::remove_file(&process.qml_path);
+        let _ = fs::remove_file(&process.state_path);
+
+        process
+            .write_snapshot(&active_snapshot("poe2-bars"))
+            .unwrap();
+        let qml_metadata = fs::metadata(&process.qml_path).unwrap();
+        let first_state = fs::read_to_string(&process.state_path).unwrap();
+
+        let mut updated = active_snapshot("poe2-bars");
+        updated.visuals[0].fill_fraction = 0.75;
+        process.write_snapshot(&updated).unwrap();
+        let updated_qml_metadata = fs::metadata(&process.qml_path).unwrap();
+        let second_state = fs::read_to_string(&process.state_path).unwrap();
+
+        assert_eq!(
+            qml_metadata.modified().unwrap(),
+            updated_qml_metadata.modified().unwrap()
+        );
+        assert_ne!(first_state, second_state);
+
+        process.write_hidden().unwrap();
+        let hidden_state = fs::read_to_string(&process.state_path).unwrap();
+        assert!(hidden_state.contains("\"visuals\":[]"));
+
+        let _ = fs::remove_file(&process.qml_path);
+        let _ = fs::remove_file(&process.state_path);
     }
 
     #[test]
