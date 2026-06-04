@@ -572,7 +572,7 @@ pub fn qml_overlay_title(overlay_id: &str) -> String {
     format!("Signal Auras Overlay {overlay_id}")
 }
 
-fn qml_overlay_source(overlay_id: &str, state_path: &Path, bounds: OverlayBounds) -> String {
+fn qml_overlay_source(overlay_id: &str, state_path: &Path, _bounds: OverlayBounds) -> String {
     let state_name = state_path
         .file_name()
         .and_then(|name| name.to_str())
@@ -586,18 +586,18 @@ import org.kde.layershell 1.0 as LayerShell
 Window {{
     id: root
     title: {title:?}
-    x: {x}
-    y: {y}
-    width: {w}
-    height: {h}
+    x: 0
+    y: 0
+    width: Screen.width
+    height: Screen.height
     color: "transparent"
     visible: true
     opacity: 0
     flags: Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus
     LayerShell.Window.scope: "signal-auras-overlay"
     LayerShell.Window.layer: LayerShell.Window.LayerOverlay
-    LayerShell.Window.anchors: LayerShell.Window.AnchorTop | LayerShell.Window.AnchorLeft
-    LayerShell.Window.margins: Qt.margins({x}, {y}, 0, 0)
+    LayerShell.Window.anchors: LayerShell.Window.AnchorTop | LayerShell.Window.AnchorBottom | LayerShell.Window.AnchorLeft | LayerShell.Window.AnchorRight
+    LayerShell.Window.margins: Qt.margins(0, 0, 0, 0)
     LayerShell.Window.exclusionZone: -1
     LayerShell.Window.keyboardInteractivity: LayerShell.Window.KeyboardInteractivityNone
     LayerShell.Window.activateOnShow: false
@@ -647,10 +647,6 @@ Window {{
 }}
 "##,
         title = qml_overlay_title(overlay_id),
-        x = bounds.x,
-        y = bounds.y,
-        w = bounds.w,
-        h = bounds.h,
         state_name = state_name,
         grab_path = grab_path,
         interval_ms = QML_POLL_INTERVAL_MS,
@@ -692,7 +688,7 @@ fn overlay_snapshot_qml(snapshot: &OverlaySnapshot) -> String {
     let visuals = snapshot
         .visuals
         .iter()
-        .map(|visual| visual_qml(visual, bounds.x, bounds.y))
+        .map(|visual| visual_qml(visual, 0, 0))
         .collect::<Vec<_>>()
         .join("\n");
     format!(
@@ -1138,22 +1134,23 @@ mod tests {
         assert!(qml.contains(
             "LayerShell.Window.keyboardInteractivity: LayerShell.Window.KeyboardInteractivityNone"
         ));
-        assert!(qml.contains("LayerShell.Window.margins: Qt.margins(10, 20, 0, 0)"));
+        assert!(qml.contains("LayerShell.Window.AnchorBottom"));
+        assert!(qml.contains("LayerShell.Window.AnchorRight"));
+        assert!(qml.contains("LayerShell.Window.margins: Qt.margins(0, 0, 0, 0)"));
         assert!(!qml.contains("Qt.Tool"));
         assert!(qml.contains("color: \"transparent\""));
         assert!(qml.contains("visible: true"));
-        assert!(qml.contains("x: 10"));
-        assert!(qml.contains("y: 20"));
+        assert!(qml.contains("x: 0"));
+        assert!(qml.contains("y: 0"));
         assert!(qml.contains("opacity: 0"));
-        assert!(qml.contains("width: 160"));
-        assert!(qml.contains("height: 12"));
+        assert!(qml.contains("width: Screen.width"));
+        assert!(qml.contains("height: Screen.height"));
         assert!(qml.contains("Loader"));
         assert!(qml.contains("overlayLoader.source = stateUrl.toString() + \"?t=\" + Date.now()"));
         assert!(qml.contains("grabToImage"));
         assert!(qml.contains("Signal Auras Overlay poe2-bars"));
         assert!(!qml.contains("visible: modelData.active"));
         assert!(!qml.contains("Window.FullScreen"));
-        assert!(!qml.contains("Screen.width"));
     }
 
     #[test]
@@ -1179,8 +1176,8 @@ mod tests {
         let qml = overlay_snapshot_qml(&active_snapshot("poe2-bars"));
 
         assert!(qml.contains("import QtQuick"));
-        assert!(qml.contains("x: 0"));
-        assert!(qml.contains("y: 0"));
+        assert!(qml.contains("x: 10"));
+        assert!(qml.contains("y: 20"));
         assert!(qml.contains("width: parent.width * 0.5"));
         assert!(qml.contains("color: \"#6ee7b7\""));
         assert!(!qml.contains("pixels"));
