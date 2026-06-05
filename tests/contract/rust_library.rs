@@ -274,6 +274,8 @@ fn overlay_state_maps_heavy_stun_and_refutation_progress_bars() {
             cooldown_fraction: 25,
             remaining_ms: Some(1_000),
             total_estimated_ms: Some(4_000),
+            predicted_remaining_ms: None,
+            predicted_duration_ms: None,
             confidence: 95,
             freshness_ms: 0,
         },
@@ -297,7 +299,7 @@ fn overlay_state_maps_heavy_stun_and_refutation_progress_bars() {
 }
 
 #[test]
-fn overlay_state_keeps_refutation_active_empty_and_marks_activation() {
+fn overlay_state_uses_refutation_prediction_and_falls_back_for_unpredicted_active() {
     let overlays = overlay_definition_set();
     let capabilities =
         signal_auras_core::available_capability_report(overlays.required_capabilities(), "test");
@@ -321,6 +323,8 @@ fn overlay_state_keeps_refutation_active_empty_and_marks_activation() {
             cooldown_fraction: 80,
             remaining_ms: Some(3_200),
             total_estimated_ms: Some(4_000),
+            predicted_remaining_ms: None,
+            predicted_duration_ms: None,
             confidence: 95,
             freshness_ms: 0,
         },
@@ -347,11 +351,45 @@ fn overlay_state_keeps_refutation_active_empty_and_marks_activation() {
     states.insert(
         "refutation_cooldown".to_string(),
         TrackerState::RadialCooldown {
+            phase: signal_auras_core::RadialCooldownPhase::Active,
+            ready: false,
+            cooldown_fraction: 80,
+            remaining_ms: Some(3_200),
+            total_estimated_ms: Some(4_000),
+            predicted_remaining_ms: Some(7_000),
+            predicted_duration_ms: Some(8_000),
+            confidence: 95,
+            freshness_ms: 0,
+        },
+    );
+    let predicted_snapshot = overlays
+        .snapshots(
+            15,
+            &capabilities,
+            &active_context,
+            &states,
+            &OverlayProviderReport::native_available(),
+        )
+        .remove(0);
+    let predicted = predicted_snapshot
+        .visuals
+        .iter()
+        .find(|visual| visual.visual_id == "refutation")
+        .unwrap();
+    assert!((predicted.fill_fraction - 0.875).abs() < 0.001);
+    assert_eq!(predicted.fill, "#38bdf8");
+    assert_eq!(predicted.background, "#082f49");
+
+    states.insert(
+        "refutation_cooldown".to_string(),
+        TrackerState::RadialCooldown {
             phase: signal_auras_core::RadialCooldownPhase::Activated,
             ready: false,
             cooldown_fraction: 100,
             remaining_ms: Some(4_000),
             total_estimated_ms: Some(4_000),
+            predicted_remaining_ms: None,
+            predicted_duration_ms: None,
             confidence: 95,
             freshness_ms: 0,
         },
@@ -396,6 +434,8 @@ fn overlay_state_applies_refutation_ready_style() {
             cooldown_fraction: 0,
             remaining_ms: Some(0),
             total_estimated_ms: Some(4_000),
+            predicted_remaining_ms: None,
+            predicted_duration_ms: None,
             confidence: 95,
             freshness_ms: 0,
         },
@@ -447,6 +487,8 @@ fn overlay_state_fails_closed_for_inactive_focus_stale_and_missing_source() {
             cooldown_fraction: 50,
             remaining_ms: Some(2_000),
             total_estimated_ms: Some(4_000),
+            predicted_remaining_ms: None,
+            predicted_duration_ms: None,
             confidence: 95,
             freshness_ms: 0,
         },
@@ -572,6 +614,8 @@ fn overlay_snapshots_are_sanitized_and_do_not_request_input_or_macros() {
                 cooldown_fraction: 40,
                 remaining_ms: Some(1_600),
                 total_estimated_ms: Some(4_000),
+                predicted_remaining_ms: None,
+                predicted_duration_ms: None,
                 confidence: 95,
                 freshness_ms: 0,
             },

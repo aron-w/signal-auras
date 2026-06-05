@@ -8,9 +8,9 @@ use signal_auras_core::{
     MacroDefinition, ModifierSet, MotionDefinition, MotionToken, MotionTrigger, MouseButton,
     MouseTrigger, OverlayDefinition, OverlayDefinitionSet, OverlayRect, OverlayStyle,
     OverlaySurfaceKind, PressDefinition, ProcessName, ProgressBarVisualDefinition,
-    ProgressFillDirection, RadialCooldownPhase, RadialCooldownPhases, RadialPhaseRule,
-    RadialProgressFill, RadialRuleMetric, RadialSampleRegion, RendererProviderId, Roi,
-    ScopeSelection, ScriptScope, StateBinding, StateField, StateTrackerCondition,
+    ProgressFillDirection, RadialCooldownPhase, RadialCooldownPhases, RadialCooldownPrediction,
+    RadialPhaseRule, RadialProgressFill, RadialRuleMetric, RadialSampleRegion, RendererProviderId,
+    Roi, ScopeSelection, ScriptScope, StateBinding, StateField, StateTrackerCondition,
     StateTrackerDefinition, StateTrackerDefinitionSet, VisualDefinition, WheelDirection,
 };
 use std::{
@@ -506,7 +506,11 @@ fn parse_state_detector(source: &str) -> Result<DetectorDefinition, DiagnosableE
                     "radial_cooldown detector requires phases",
                 )
             })?;
-            let phases = parse_radial_cooldown_phases(phases_body)?;
+            let mut phases = parse_radial_cooldown_phases(phases_body)?;
+            if let Some(prediction_body) = table_body_field_after(source, "prediction")? {
+                phases =
+                    phases.with_prediction(parse_radial_cooldown_prediction(prediction_body)?)?;
+            }
             phases.validate_for_roi(&roi)?;
             Ok(DetectorDefinition::RadialCooldown { roi, mask, phases })
         }
@@ -536,6 +540,19 @@ fn parse_state_detector(source: &str) -> Result<DetectorDefinition, DiagnosableE
             format!("unknown state tracker detector kind '{other}'"),
         )),
     }
+}
+
+fn parse_radial_cooldown_prediction(
+    source: &str,
+) -> Result<RadialCooldownPrediction, DiagnosableError> {
+    let duration_ms = field_u64(source, "duration_ms")?.ok_or_else(|| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "radial_cooldown prediction requires duration_ms",
+        )
+    })?;
+    let stable_after_ms = field_u64(source, "stable_after_ms")?.unwrap_or(0);
+    RadialCooldownPrediction::new(duration_ms, stable_after_ms)
 }
 
 fn parse_radial_cooldown_phases(source: &str) -> Result<RadialCooldownPhases, DiagnosableError> {

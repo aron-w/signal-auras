@@ -150,6 +150,7 @@ impl DetectorDefinition {
 pub struct RadialCooldownPhases {
     pub order: Vec<RadialPhaseRule>,
     pub fallback: RadialCooldownPhase,
+    pub prediction: Option<RadialCooldownPrediction>,
 }
 
 impl RadialCooldownPhases {
@@ -170,7 +171,20 @@ impl RadialCooldownPhases {
                 "radial_cooldown phases fallback must be \"unknown\"",
             ));
         }
-        Ok(Self { order, fallback })
+        Ok(Self {
+            order,
+            fallback,
+            prediction: None,
+        })
+    }
+
+    pub fn with_prediction(
+        mut self,
+        prediction: RadialCooldownPrediction,
+    ) -> Result<Self, DiagnosableError> {
+        prediction.validate()?;
+        self.prediction = Some(prediction);
+        Ok(self)
     }
 
     pub fn refutation_default() -> Self {
@@ -266,12 +280,46 @@ impl RadialCooldownPhases {
         Self {
             order: self.order.iter().map(|rule| rule.scaled(scale)).collect(),
             fallback: self.fallback,
+            prediction: self.prediction,
         }
     }
 
     pub fn validate_for_roi(&self, roi: &Roi) -> Result<(), DiagnosableError> {
         for rule in &self.order {
             rule.validate_for_roi(roi)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RadialCooldownPrediction {
+    pub duration_ms: u64,
+    pub stable_after_ms: u64,
+}
+
+impl RadialCooldownPrediction {
+    pub fn new(duration_ms: u64, stable_after_ms: u64) -> Result<Self, DiagnosableError> {
+        let prediction = Self {
+            duration_ms,
+            stable_after_ms,
+        };
+        prediction.validate()?;
+        Ok(prediction)
+    }
+
+    fn validate(self) -> Result<(), DiagnosableError> {
+        if self.duration_ms == 0 {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                "radial_cooldown prediction duration_ms must be positive",
+            ));
+        }
+        if self.stable_after_ms > self.duration_ms {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                "radial_cooldown prediction stable_after_ms cannot exceed duration_ms",
+            ));
         }
         Ok(())
     }
@@ -735,6 +783,8 @@ pub enum TrackerState {
         cooldown_fraction: u8,
         remaining_ms: Option<u64>,
         total_estimated_ms: Option<u64>,
+        predicted_remaining_ms: Option<u64>,
+        predicted_duration_ms: Option<u64>,
         confidence: u8,
         freshness_ms: u64,
     },
@@ -776,10 +826,11 @@ impl TrackerState {
                 ready,
                 cooldown_fraction,
                 remaining_ms,
+                predicted_remaining_ms,
                 confidence,
                 ..
             } => format!(
-                "radial_cooldown phase={phase:?} ready={ready} fraction={cooldown_fraction} remaining_ms={remaining_ms:?} confidence={confidence}"
+                "radial_cooldown phase={phase:?} ready={ready} fraction={cooldown_fraction} remaining_ms={remaining_ms:?} predicted_remaining_ms={predicted_remaining_ms:?} confidence={confidence}"
             ),
             Self::HorizontalProgressBar {
                 visible,
@@ -811,6 +862,8 @@ pub enum TrackerInactiveReason {
 pub struct RadialCooldownHistory {
     observations: Vec<CooldownObservation>,
     last_total_estimate_ms: Option<u64>,
+    last_phase: Option<RadialCooldownPhase>,
+    active_started_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -831,6 +884,17 @@ impl RadialCooldownHistory {
         }
     }
 
+    fn observe_phase(&mut self, at_ms: u64, phase: RadialCooldownPhase) {
+        if phase == RadialCooldownPhase::Active {
+            if self.last_phase != Some(RadialCooldownPhase::Active) {
+                self.active_started_at_ms = Some(at_ms);
+            }
+        } else {
+            self.active_started_at_ms = None;
+        }
+        self.last_phase = Some(phase);
+    }
+
     fn estimate_total_ms(&mut self) -> Option<u64> {
         let latest = *self.observations.last()?;
         let earliest = self
@@ -846,6 +910,20 @@ impl RadialCooldownHistory {
         let estimate = elapsed.saturating_mul(100) / progressed;
         self.last_total_estimate_ms = Some(estimate);
         Some(estimate)
+    }
+
+    fn predicted_remaining_ms(
+        &self,
+        now_ms: u64,
+        prediction: Option<RadialCooldownPrediction>,
+    ) -> Option<u64> {
+        let prediction = prediction?;
+        let active_started_at_ms = self.active_started_at_ms?;
+        let elapsed = now_ms.checked_sub(active_started_at_ms)?;
+        if elapsed < prediction.stable_after_ms || elapsed > prediction.duration_ms {
+            return None;
+        }
+        Some(prediction.duration_ms.saturating_sub(elapsed))
     }
 }
 
@@ -870,8 +948,18 @@ fn detect_radial_cooldown_with_roi(
     };
     let phase = observation.phase;
     let fraction = observation.cooldown_fraction.min(100);
+    history.observe_phase(sample.captured_at_ms, phase);
     history.push(sample.captured_at_ms, fraction);
     let total_estimated_ms = history.estimate_total_ms();
+    let prediction = detector.and_then(|detector| match detector {
+        DetectorDefinition::RadialCooldown { phases, .. } => phases.prediction,
+        DetectorDefinition::HorizontalProgressBar { .. } => None,
+    });
+    let predicted_remaining_ms = if phase == RadialCooldownPhase::Active {
+        history.predicted_remaining_ms(sample.captured_at_ms, prediction)
+    } else {
+        None
+    };
     let ready = phase == RadialCooldownPhase::Ready;
     let remaining_ms = if ready {
         Some(0)
@@ -886,6 +974,9 @@ fn detect_radial_cooldown_with_roi(
         cooldown_fraction: if ready { 0 } else { fraction },
         remaining_ms,
         total_estimated_ms,
+        predicted_remaining_ms,
+        predicted_duration_ms: predicted_remaining_ms
+            .and_then(|_| prediction.map(|p| p.duration_ms)),
         confidence: confidence_for_sample(sample),
         freshness_ms: 0,
     }
@@ -1815,10 +1906,76 @@ mod tests {
                 cooldown_fraction: 20,
                 remaining_ms: Some(500),
                 total_estimated_ms: Some(2500),
+                predicted_remaining_ms: None,
+                predicted_duration_ms: None,
                 confidence: 90,
                 freshness_ms: 0,
             }
         );
+    }
+
+    #[test]
+    fn radial_cooldown_predicts_stable_active_duration_until_overstepped() {
+        let mut phases = RadialCooldownPhases::refutation_default();
+        phases = phases
+            .with_prediction(RadialCooldownPrediction::new(8_000, 1_000).unwrap())
+            .unwrap();
+        let detector = DetectorDefinition::RadialCooldown {
+            roi: Roi::new(0, 0, 36, 36).unwrap(),
+            mask: None,
+            phases,
+        };
+        let mut history = RadialCooldownHistory::default();
+
+        let early = detect_radial_cooldown_with_roi(
+            &active_refutation_sample_at(500),
+            Some(&detector),
+            &mut history,
+        );
+        assert!(matches!(
+            early,
+            TrackerState::RadialCooldown {
+                phase: RadialCooldownPhase::Active,
+                predicted_remaining_ms: None,
+                ..
+            }
+        ));
+
+        let stable = detect_radial_cooldown_with_roi(
+            &active_refutation_sample_at(1_500),
+            Some(&detector),
+            &mut history,
+        );
+        assert!(matches!(
+            stable,
+            TrackerState::RadialCooldown {
+                phase: RadialCooldownPhase::Active,
+                predicted_remaining_ms: Some(7_000),
+                predicted_duration_ms: Some(8_000),
+                ..
+            }
+        ));
+
+        let overstepped = detect_radial_cooldown_with_roi(
+            &active_refutation_sample_at(9_000),
+            Some(&detector),
+            &mut history,
+        );
+        assert!(matches!(
+            overstepped,
+            TrackerState::RadialCooldown {
+                phase: RadialCooldownPhase::Active,
+                predicted_remaining_ms: None,
+                predicted_duration_ms: None,
+                ..
+            }
+        ));
+    }
+
+    fn active_refutation_sample_at(captured_at_ms: u64) -> ScreenSample {
+        let mut sample = refutation_phase_sample(None, Some((65, 45, 35)), false);
+        sample.captured_at_ms = captured_at_ms;
+        sample
     }
 
     #[test]
@@ -1854,6 +2011,8 @@ mod tests {
                 cooldown_fraction: 0,
                 remaining_ms: Some(0),
                 total_estimated_ms: None,
+                predicted_remaining_ms: None,
+                predicted_duration_ms: None,
                 confidence: 95,
                 freshness_ms: 0,
             }

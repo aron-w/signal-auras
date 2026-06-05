@@ -63,11 +63,11 @@ pub use scope::{
 pub use screen_state::{
     detect_horizontal_progress_bar, detect_radial_cooldown, screen_read_denied_report,
     CircularMask, DetectorDefinition, PollOutcome, ProgressFillDirection, RadialCooldownHistory,
-    RadialCooldownPhase, RadialCooldownPhases, RadialPhaseRule, RadialProgressFill,
-    RadialRuleMetric, RadialSampleRegion, Roi, ScreenCoordinateScale, ScreenPixelFormat,
-    ScreenSample, ScreenSampleDiagnostic, ScreenSampleProvider, StateTrackerCondition,
-    StateTrackerDefinition, StateTrackerDefinitionSet, StateTrackerPoller, TrackerInactiveReason,
-    TrackerState,
+    RadialCooldownPhase, RadialCooldownPhases, RadialCooldownPrediction, RadialPhaseRule,
+    RadialProgressFill, RadialRuleMetric, RadialSampleRegion, Roi, ScreenCoordinateScale,
+    ScreenPixelFormat, ScreenSample, ScreenSampleDiagnostic, ScreenSampleProvider,
+    StateTrackerCondition, StateTrackerDefinition, StateTrackerDefinitionSet, StateTrackerPoller,
+    TrackerInactiveReason, TrackerState,
 };
 pub use stats::{RuntimeStats, ShutdownReason};
 

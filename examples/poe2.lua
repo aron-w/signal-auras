@@ -22,6 +22,10 @@ sa.state.track({
     kind = "radial_cooldown",
     roi = { x = 1923, y = 1370, w = 36, h = 36 },
     mask = { shape = "circle", inset = 10 },
+    prediction = {
+      duration_ms = 8000,
+      stable_after_ms = 1000,
+    },
     phases = {
       order = { "ready", "activated", "active", "recovering" },
       fallback = "unknown",
@@ -109,7 +113,7 @@ sa.overlay.mount({
       id = "heavy_stun",
       kind = "progress_bar",
       bind = { tracker = "heavy_stun", field = "progress_percent" },
-      rect = { x = 1124, y = 1040, w = 300, h = 22 },
+      rect = { x = 1200, y = 700, w = 150, h = 22 },
       opacity = 0.72,
       fill = "#d8b84c",
       background = "#101820",
@@ -120,7 +124,7 @@ sa.overlay.mount({
       id = "refutation",
       kind = "progress_bar",
       bind = { tracker = "refutation_cooldown", field = "remaining_ms" },
-      rect = { x = 1124, y = 1070, w = 300, h = 22 },
+      rect = { x = 1200, y = 730, w = 150, h = 22 },
       opacity = 0.72,
       fill = "#5aa7ff",
       background = "#101820",

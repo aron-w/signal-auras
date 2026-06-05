@@ -592,6 +592,8 @@ fn visual_snapshot(
                 phase,
                 ready,
                 cooldown_fraction,
+                predicted_remaining_ms,
+                predicted_duration_ms,
                 ..
             },
         ) if visual.binding.field == StateField::RemainingMs => {
@@ -600,9 +602,15 @@ fn visual_snapshot(
                 RadialCooldownPhase::Recovering => {
                     1.0 - (f32::from(*cooldown_fraction).clamp(0.0, 100.0) / 100.0)
                 }
-                RadialCooldownPhase::Activated
-                | RadialCooldownPhase::Active
-                | RadialCooldownPhase::Unknown => 0.0,
+                RadialCooldownPhase::Active => {
+                    match (predicted_remaining_ms, predicted_duration_ms) {
+                        (Some(remaining), Some(duration)) if *duration > 0 => {
+                            (*remaining as f32 / *duration as f32).clamp(0.0, 1.0)
+                        }
+                        _ => 0.0,
+                    }
+                }
+                RadialCooldownPhase::Activated | RadialCooldownPhase::Unknown => 0.0,
             };
             let mut snapshot = base_visual_snapshot(visual, fill_fraction, true, *ready);
             match phase {
