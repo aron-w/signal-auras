@@ -1200,6 +1200,7 @@ fn observed_percent(sample: &ScreenSample, detector: Option<&DetectorDefinition>
     }
 
     let mut sum = 0u64;
+    let mut filled = 0u64;
     let mut count = 0u64;
     for y in roi.y..y_end {
         for x in roi.x..x_end {
@@ -1208,14 +1209,22 @@ fn observed_percent(sample: &ScreenSample, detector: Option<&DetectorDefinition>
             }
             let offset = y as usize * stride + x as usize * bytes_per_pixel;
             let pixel = sample.pixels.get(offset..offset + bytes_per_pixel)?;
-            sum = sum.saturating_add(pixel_percent(pixel, sample.pixel_format)?);
+            if sample.pixel_format == ScreenPixelFormat::Luma8 {
+                sum = sum.saturating_add(pixel_percent(pixel, sample.pixel_format)?);
+            } else if horizontal_progress_pixel_filled(pixel, sample.pixel_format)? {
+                filled += 1;
+            }
             count += 1;
         }
     }
     if count == 0 {
         return None;
     }
-    Some((sum / count).min(100) as u8)
+    if sample.pixel_format == ScreenPixelFormat::Luma8 {
+        Some((sum / count).min(100) as u8)
+    } else {
+        Some(((filled * 100) / count).min(100) as u8)
+    }
 }
 
 fn confidence_for_sample(sample: &ScreenSample) -> u8 {
@@ -1359,6 +1368,13 @@ fn pixel_percent(pixel: &[u8], format: ScreenPixelFormat) -> Option<u64> {
     } else {
         Some((luminance * 100 / 255).min(100))
     }
+}
+
+fn horizontal_progress_pixel_filled(pixel: &[u8], format: ScreenPixelFormat) -> Option<bool> {
+    let (r, g, b) = pixel_rgb(pixel, format)?;
+    let luminance = rgb_luminance(r, g, b);
+    let warm_bias = ((u64::from(r) + u64::from(g)) / 2).saturating_sub(u64::from(b));
+    Some(luminance >= 220 || (luminance > 35 && warm_bias > 8))
 }
 
 fn pixel_rgb(pixel: &[u8], format: ScreenPixelFormat) -> Option<(u8, u8, u8)> {

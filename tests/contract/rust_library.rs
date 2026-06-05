@@ -134,6 +134,15 @@ impl ScreenSampleProvider for FixtureSampleProvider {
 
 fn webm_refutation_frame(captured_at_ms: u64, name: &str) -> ScreenSample {
     let path = format!("examples/poe2/refutation_cooldown_frames/{name}");
+    ppm_fixture_sample(captured_at_ms, &path, 107, 107)
+}
+
+fn webm_heavy_stun_frame(captured_at_ms: u64, name: &str) -> ScreenSample {
+    let path = format!("examples/poe2/progress_heavy_stun_frames/{name}");
+    ppm_fixture_sample(captured_at_ms, &path, 900, 2)
+}
+
+fn ppm_fixture_sample(captured_at_ms: u64, path: &str, width: u32, height: u32) -> ScreenSample {
     let bytes = std::fs::read(path).unwrap();
     let mut newline_count = 0;
     let mut data_start = None;
@@ -149,13 +158,17 @@ fn webm_refutation_frame(captured_at_ms: u64, name: &str) -> ScreenSample {
     let data_start = data_start.unwrap();
     let header = std::str::from_utf8(&bytes[..data_start]).unwrap();
     let fields = header.split_whitespace().collect::<Vec<_>>();
-    assert_eq!(fields, ["P6", "107", "107", "255"]);
+    assert_eq!(fields.len(), 4);
+    assert_eq!(fields[0], "P6");
+    assert_eq!(fields[1].parse::<u32>().unwrap(), width);
+    assert_eq!(fields[2].parse::<u32>().unwrap(), height);
+    assert_eq!(fields[3], "255");
     let pixels = bytes[data_start..].to_vec();
-    assert_eq!(pixels.len(), 107 * 107 * 3);
+    assert_eq!(pixels.len(), width as usize * height as usize * 3);
     ScreenSample::from_pixels(
-        107,
-        107,
-        107 * 3,
+        width,
+        height,
+        width * 3,
         ScreenPixelFormat::Rgb888,
         captured_at_ms,
         pixels,
@@ -164,13 +177,16 @@ fn webm_refutation_frame(captured_at_ms: u64, name: &str) -> ScreenSample {
 
 #[test]
 fn poe2_screen_state_heavy_stun_fixture_reports_progress() {
-    let fixture = std::fs::read("examples/poe2/progress_heavy_stun.webm").unwrap();
+    let fixture = std::fs::read("examples/poe2/progress_heavy_stun_example.webm").unwrap();
     assert!(fixture.len() > 1024);
-    let expected = [0, 25, 50, 75, 100];
+    let expected = [
+        ("start_empty.ppm", 0, 5),
+        ("early_fill.ppm", 6, 5),
+        ("quarter_fill.ppm", 27, 5),
+    ];
 
-    for (index, progress) in expected.into_iter().enumerate() {
-        let seed = fixture[index % fixture.len()] % 2;
-        let sample = ScreenSample::new(index as u64 * 50, [progress + seed]);
+    for (index, (name, progress, tolerance)) in expected.into_iter().enumerate() {
+        let sample = webm_heavy_stun_frame(index as u64 * 500, name);
         let state = detect_horizontal_progress_bar(&sample);
         match state {
             signal_auras_core::TrackerState::HorizontalProgressBar {
@@ -180,8 +196,11 @@ fn poe2_screen_state_heavy_stun_fixture_reports_progress() {
                 ..
             } => {
                 assert!(visible);
-                assert!(confidence >= 90);
-                assert!(progress_percent.abs_diff(progress) <= 5);
+                assert!(confidence >= 95);
+                assert!(
+                    progress_percent.abs_diff(progress) <= tolerance,
+                    "{name} reported {progress_percent}, expected {progress}"
+                );
             }
             other => panic!("unexpected tracker state: {other:?}"),
         }

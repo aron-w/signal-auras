@@ -117,7 +117,8 @@ fn state_trackers_accept_poe2_example_without_tracker_callbacks() {
     ));
     assert!(matches!(
         heavy_stun.detector,
-        DetectorDefinition::HorizontalProgressBar { .. }
+        DetectorDefinition::HorizontalProgressBar { ref roi, .. }
+            if roi.x == 315 && roi.y == 1250 && roi.w == 300 && roi.h == 2
     ));
 
     assert!(program.callback("refutation_cooldown").is_none());

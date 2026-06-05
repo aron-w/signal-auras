@@ -94,7 +94,7 @@ sa.state.track({
   when = { tracker = "refutation_cooldown", phase = "active" },
   detector = {
     kind = "horizontal_progress_bar",
-    roi = { x = 315, y = 1252, w = 312, h = 1 },
+    roi = { x = 315, y = 1250, w = 300, h = 2 },
     fill = { direction = "left_to_right" },
   },
 })
