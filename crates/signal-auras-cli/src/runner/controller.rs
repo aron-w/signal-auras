@@ -308,6 +308,11 @@ where
                 });
             }
             LuaCallbackStep::Yielded(request) => {
+                if remaining_budget.is_zero() {
+                    return Ok(ControllerTaskExecution::Preempted {
+                        execution_elapsed: active_elapsed,
+                    });
+                }
                 if let Some(required) = request.required_capability() {
                     let required = CapabilitySet::new([required]);
                     if let Some(error) = capabilities.first_blocking_error(&required) {
@@ -554,5 +559,53 @@ mod tests {
                 .disposition,
             CallbackDisposition::Accepted
         );
+    }
+
+    #[test]
+    fn drain_callbacks_preempts_before_executing_request_after_budget_exhaustion() {
+        let source = r#"
+        sa.hotkey({
+          trigger = "F5",
+          capabilities = { "global_shortcut", "synthesized_input" },
+          callback = "late_output",
+        })
+
+        sa.callback("late_output", function()
+          local sum = 0
+          for i = 1, 500 do
+            sum = sum + i
+          end
+          sa.input.text("after")
+        end)
+        "#;
+        let program = signal_auras_lua::load_lua_controller_program_source(source).unwrap();
+        let runtime = ImperativeLuaController::load_source(source).unwrap();
+        let registration = program.registrations().registrations()[0].clone();
+        let capabilities = available_capability_report(program.required_capabilities(), "test");
+        let mut scheduler = LuaCallbackScheduler::new(2, Duration::from_nanos(1)).unwrap();
+        let mut continuations = ControllerCallbackContinuations::default();
+        let mut host = RecordingHost::default();
+        let mut stats = RuntimeStats::new();
+
+        assert_eq!(
+            scheduler
+                .schedule(&registration, &capabilities, Instant::now())
+                .disposition,
+            CallbackDisposition::Accepted
+        );
+        drain_controller_callbacks(
+            &program,
+            Some(&runtime),
+            &mut scheduler,
+            &mut continuations,
+            &capabilities,
+            &mut host,
+            &mut stats,
+        )
+        .unwrap();
+
+        assert_eq!(host.input_calls, 0);
+        assert_eq!(stats.macro_success_count, 0);
+        assert_eq!(stats.lua_callback_preempted_count, 1);
     }
 }
