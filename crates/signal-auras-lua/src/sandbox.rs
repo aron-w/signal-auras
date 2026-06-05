@@ -8,9 +8,10 @@ use signal_auras_core::{
     MacroDefinition, ModifierSet, MotionDefinition, MotionToken, MotionTrigger, MouseButton,
     MouseTrigger, OverlayDefinition, OverlayDefinitionSet, OverlayRect, OverlayStyle,
     OverlaySurfaceKind, PressDefinition, ProcessName, ProgressBarVisualDefinition,
-    ProgressFillDirection, RendererProviderId, Roi, ScopeSelection, ScriptScope, StateBinding,
-    StateField, StateTrackerDefinition, StateTrackerDefinitionSet, VisualDefinition,
-    WheelDirection,
+    ProgressFillDirection, RadialCooldownPhase, RadialCooldownPhases, RadialPhaseRule,
+    RadialProgressFill, RadialRuleMetric, RadialSampleRegion, RendererProviderId, Roi,
+    ScopeSelection, ScriptScope, StateBinding, StateField, StateTrackerCondition,
+    StateTrackerDefinition, StateTrackerDefinitionSet, VisualDefinition, WheelDirection,
 };
 use std::{
     collections::BTreeSet,
@@ -236,7 +237,28 @@ fn parse_state_tracker_definition(
         )
     })?;
     let detector = parse_state_detector(detector_body)?;
-    StateTrackerDefinition::new(id, scope, capabilities, poll_ms, detector)
+    let tracker = StateTrackerDefinition::new(id, scope, capabilities, poll_ms, detector)?;
+    if let Some(condition_body) = table_body_field_after(source, "when")? {
+        Ok(tracker.only_when(parse_state_tracker_condition(condition_body)?))
+    } else {
+        Ok(tracker)
+    }
+}
+
+fn parse_state_tracker_condition(source: &str) -> Result<StateTrackerCondition, DiagnosableError> {
+    let tracker = field_string(source, "tracker").ok_or_else(|| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "state tracker condition requires tracker",
+        )
+    })?;
+    let phase = parse_radial_phase_name(field_string(source, "phase").ok_or_else(|| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "state tracker condition requires phase",
+        )
+    })?)?;
+    StateTrackerCondition::radial_phase(tracker, phase)
 }
 
 fn parse_overlay_definition_set(
@@ -478,7 +500,15 @@ fn parse_state_detector(source: &str) -> Result<DetectorDefinition, DiagnosableE
             let mask = table_body_field_after(source, "mask")?
                 .map(parse_circular_mask)
                 .transpose()?;
-            Ok(DetectorDefinition::RadialCooldown { roi, mask })
+            let phases_body = table_body_field_after(source, "phases")?.ok_or_else(|| {
+                DiagnosableError::new(
+                    ErrorPhase::ScriptValidation,
+                    "radial_cooldown detector requires phases",
+                )
+            })?;
+            let phases = parse_radial_cooldown_phases(phases_body)?;
+            phases.validate_for_roi(&roi)?;
+            Ok(DetectorDefinition::RadialCooldown { roi, mask, phases })
         }
         "horizontal_progress_bar" => {
             let fill_body = table_body_field_after(source, "fill")?.ok_or_else(|| {
@@ -506,6 +536,173 @@ fn parse_state_detector(source: &str) -> Result<DetectorDefinition, DiagnosableE
             format!("unknown state tracker detector kind '{other}'"),
         )),
     }
+}
+
+fn parse_radial_cooldown_phases(source: &str) -> Result<RadialCooldownPhases, DiagnosableError> {
+    let order_body = table_body_field_after(source, "order")?.ok_or_else(|| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "radial_cooldown phases requires order",
+        )
+    })?;
+    let fallback = match field_string(source, "fallback").unwrap_or("unknown") {
+        "unknown" => RadialCooldownPhase::Unknown,
+        other => {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                format!("unsupported radial_cooldown fallback '{other}'"),
+            ));
+        }
+    };
+
+    let mut rules = Vec::new();
+    for phase_name in quoted_strings(order_body) {
+        let phase = parse_radial_phase_name(phase_name)?;
+        let body = table_body_field_after(source, phase_name)?.ok_or_else(|| {
+            DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                format!("radial_cooldown phase '{phase_name}' is not defined"),
+            )
+        })?;
+        rules.push(parse_radial_phase_rule(phase, body)?);
+    }
+    RadialCooldownPhases::new(rules, fallback)
+}
+
+fn parse_radial_phase_name(value: &str) -> Result<RadialCooldownPhase, DiagnosableError> {
+    match value {
+        "ready" => Ok(RadialCooldownPhase::Ready),
+        "activated" => Ok(RadialCooldownPhase::Activated),
+        "active" => Ok(RadialCooldownPhase::Active),
+        "recovering" => Ok(RadialCooldownPhase::Recovering),
+        "unknown" => Ok(RadialCooldownPhase::Unknown),
+        other => Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!("unknown radial_cooldown phase '{other}'"),
+        )),
+    }
+}
+
+fn parse_radial_phase_rule(
+    phase: RadialCooldownPhase,
+    source: &str,
+) -> Result<RadialPhaseRule, DiagnosableError> {
+    let sample_body = table_body_field_after(source, "sample")?.ok_or_else(|| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "radial_cooldown phase requires sample",
+        )
+    })?;
+    Ok(RadialPhaseRule {
+        phase,
+        sample: parse_radial_sample_region(sample_body)?,
+        min_luminance_percent: parse_optional_u8(source, "min_luminance_percent", 100)?,
+        max_luminance_percent: parse_optional_u8(source, "max_luminance_percent", 100)?,
+        min_saturation: parse_optional_u8(source, "min_saturation", 255)?,
+        max_saturation: parse_optional_u8(source, "max_saturation", 255)?,
+        metric: match field_string(source, "metric").unwrap_or("average") {
+            "average" => RadialRuleMetric::Average,
+            "bright_ratio" => RadialRuleMetric::BrightRatio,
+            other => {
+                return Err(DiagnosableError::new(
+                    ErrorPhase::ScriptValidation,
+                    format!("unsupported radial_cooldown metric '{other}'"),
+                ));
+            }
+        },
+        metric_scale: field_f32(source, "metric_scale")?,
+        progress_fill: match field_string(source, "progress_fill").ok_or_else(|| {
+            DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                "radial_cooldown phase requires progress_fill",
+            )
+        })? {
+            "empty" => RadialProgressFill::Empty,
+            "fraction" => RadialProgressFill::Fraction,
+            "full" => RadialProgressFill::Full,
+            other => {
+                return Err(DiagnosableError::new(
+                    ErrorPhase::ScriptValidation,
+                    format!("unsupported radial_cooldown progress_fill '{other}'"),
+                ));
+            }
+        },
+        max_fill_until_ready: field_f32(source, "max_fill_until_ready")?,
+        fill: field_string(source, "fill").map(str::to_string),
+        background: field_string(source, "background").map(str::to_string),
+        opacity: field_f32(source, "opacity")?,
+    })
+}
+
+fn parse_radial_sample_region(source: &str) -> Result<RadialSampleRegion, DiagnosableError> {
+    match field_string(source, "kind").ok_or_else(|| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "radial_cooldown sample requires kind",
+        )
+    })? {
+        "clock_probe" => Ok(RadialSampleRegion::ClockProbe {
+            angle_deg: field_f32(source, "angle_deg")?.ok_or_else(|| {
+                DiagnosableError::new(
+                    ErrorPhase::ScriptValidation,
+                    "clock_probe requires angle_deg",
+                )
+            })?,
+            radius_px: parse_required_u32(source, "radius_px")?,
+            w: parse_required_u32(source, "w")?,
+            h: parse_required_u32(source, "h")?,
+        }),
+        "annulus_arc" => Ok(RadialSampleRegion::AnnulusArc {
+            inner_radius_px: parse_required_u32(source, "inner_radius_px")?,
+            outer_radius_px: parse_required_u32(source, "outer_radius_px")?,
+            start_deg: field_f32(source, "start_deg")?.ok_or_else(|| {
+                DiagnosableError::new(
+                    ErrorPhase::ScriptValidation,
+                    "annulus_arc requires start_deg",
+                )
+            })?,
+            end_deg: field_f32(source, "end_deg")?.ok_or_else(|| {
+                DiagnosableError::new(ErrorPhase::ScriptValidation, "annulus_arc requires end_deg")
+            })?,
+        }),
+        "aggregate_mask" => Ok(RadialSampleRegion::AggregateMask),
+        other => Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!("unknown radial_cooldown sample kind '{other}'"),
+        )),
+    }
+}
+
+fn parse_required_u32(source: &str, field: &str) -> Result<u32, DiagnosableError> {
+    let value = field_u64(source, field)?.ok_or_else(|| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!("radial_cooldown sample requires {field}"),
+        )
+    })?;
+    u32::try_from(value).map_err(|_| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!("{field} must fit in u32"),
+        )
+    })
+}
+
+fn parse_optional_u8(
+    source: &str,
+    field: &str,
+    maximum: u64,
+) -> Result<Option<u8>, DiagnosableError> {
+    let Some(value) = field_u64(source, field)? else {
+        return Ok(None);
+    };
+    if value > maximum {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!("{field} must be between 0 and {maximum}"),
+        ));
+    }
+    Ok(Some(value as u8))
 }
 
 fn parse_roi(source: &str) -> Result<Roi, DiagnosableError> {
@@ -1804,8 +2001,39 @@ mod tests {
               poll_ms = 50,
               detector = {
                 kind = "radial_cooldown",
-                roi = { x = 2850, y = 2030, w = 96, h = 92 },
+                roi = { x = 2850, y = 2030, w = 36, h = 36 },
                 mask = { shape = "circle", inset = 10 },
+                phases = {
+                  order = { "ready", "activated", "active", "recovering" },
+                  fallback = "unknown",
+                  ready = {
+                    sample = { kind = "clock_probe", angle_deg = 352, radius_px = 15, w = 3, h = 3 },
+                    min_luminance_percent = 44,
+                    min_saturation = 85,
+                    progress_fill = "full",
+                  },
+                  activated = {
+                    sample = { kind = "clock_probe", angle_deg = 8, radius_px = 15, w = 3, h = 3 },
+                    max_luminance_percent = 12,
+                    max_saturation = 20,
+                    progress_fill = "empty",
+                  },
+                  active = {
+                    sample = { kind = "clock_probe", angle_deg = 8, radius_px = 15, w = 3, h = 3 },
+                    max_luminance_percent = 34,
+                    max_saturation = 75,
+                    progress_fill = "empty",
+                  },
+                  recovering = {
+                    sample = { kind = "annulus_arc", inner_radius_px = 13, outer_radius_px = 17, start_deg = 20, end_deg = 340 },
+                    min_luminance_percent = 40,
+                    min_saturation = 80,
+                    metric = "bright_ratio",
+                    metric_scale = 1.5,
+                    progress_fill = "fraction",
+                    max_fill_until_ready = 0.95,
+                  },
+                },
               },
             })
             "#,

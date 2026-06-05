@@ -1,55 +1,165 @@
 use signal_auras_core::{
-    detect_horizontal_progress_bar, detect_radial_cooldown, ActiveProcessConfidence,
-    ActiveProcessContext, ActiveProcessProvider, BindingMode, BindingTrigger, Capability,
-    CapabilityAvailability, CapabilityKind, CapabilityReport, CapabilitySet, CapabilityStatus,
-    CompositeTrigger, DetectorDefinition, DiagnosableError, ErrorPhase, HotkeyBinding,
-    HotkeyRegistrar, InputEmission, LuaAutomationConfiguration, MacroAction, MacroDefinition,
-    MacroExecutor, ModifierSet, MotionDefinition, MotionTrigger, MouseTrigger, OverlayDefinition,
+    detect_horizontal_progress_bar, ActiveProcessConfidence, ActiveProcessContext,
+    ActiveProcessProvider, BindingMode, BindingTrigger, Capability, CapabilityAvailability,
+    CapabilityKind, CapabilityReport, CapabilitySet, CapabilityStatus, CompositeTrigger,
+    DetectorDefinition, DiagnosableError, ErrorPhase, HotkeyBinding, HotkeyRegistrar,
+    InputEmission, LuaAutomationConfiguration, MacroAction, MacroDefinition, MacroExecutor,
+    ModifierSet, MotionDefinition, MotionTrigger, MouseTrigger, OverlayDefinition,
     OverlayDefinitionSet, OverlayDiagnosticReason, OverlayLifecycleState, OverlayProviderReport,
     OverlayRect, OverlayStyle, OverlaySurfaceKind, ProcessName, ProgressBarVisualDefinition,
     ProgressFillDirection, RegistrationId, RendererProviderId, Roi, RuntimeStats, ScopeDenialKind,
-    ScopeSelection, ScreenSample, ShortcutRegistrationState, StateBinding, StateField,
-    StateTrackerDefinition, StateTrackerDefinitionSet, SynthesizedInputRequest, TrackerState,
+    ScopeSelection, ScreenPixelFormat, ScreenSample, ScreenSampleProvider,
+    ShortcutRegistrationState, StateBinding, StateField, StateTrackerDefinition,
+    StateTrackerDefinitionSet, StateTrackerPoller, SynthesizedInputRequest, TrackerState,
     VisualDefinition, WheelDirection, DEFAULT_FOCUS_STALE_THRESHOLD,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 #[test]
 fn poe2_screen_state_refutation_fixture_estimates_cooldown() {
     let fixture = std::fs::read("examples/poe2/refutation_cooldown.webm").unwrap();
     assert!(fixture.len() > 1024);
-    let mut history = signal_auras_core::RadialCooldownHistory::default();
-    let fractions = [80, 60, 40, 20, 0];
-    let mut remaining = Vec::new();
-    let mut last_state = None;
+    let tracker = StateTrackerDefinition::new(
+        "refutation_cooldown",
+        ScopeSelection::ExplicitGlobal,
+        CapabilitySet::new([CapabilityKind::ScreenRead]),
+        1,
+        DetectorDefinition::RadialCooldown {
+            roi: Roi::new(21, 63, 36, 36).unwrap(),
+            mask: Some(signal_auras_core::CircularMask::new(10)),
+            phases: fixture_refutation_phases(),
+        },
+    )
+    .unwrap();
+    let set = StateTrackerDefinitionSet::new([tracker]).unwrap();
+    let capabilities =
+        signal_auras_core::available_capability_report(set.required_capabilities(), "test");
+    let mut poller = StateTrackerPoller::new(set);
+    let active_context = ActiveProcessContext::unavailable("global scope does not need focus");
+    let mut provider = FixtureSampleProvider::new([
+        webm_refutation_frame(0, "ready_start.ppm"),
+        webm_refutation_frame(1_500, "activated.ppm"),
+        webm_refutation_frame(3_000, "active_early.ppm"),
+        webm_refutation_frame(7_000, "active_late.ppm"),
+        webm_refutation_frame(8_000, "ready_recovered.ppm"),
+        webm_refutation_frame(10_500, "unknown_occluded.ppm"),
+    ]);
 
-    for (index, fraction) in fractions.into_iter().enumerate() {
-        let seed = fixture[index % fixture.len()] % 2;
-        let sample = ScreenSample::new(index as u64 * 500, [fraction + seed]);
-        let state = detect_radial_cooldown(&sample, &mut history);
+    let mut phases = Vec::new();
+    let mut active_fractions = Vec::new();
+    for now_ms in [0, 1_500, 3_000, 7_000, 8_000, 10_500] {
+        poller.poll_due(now_ms, &capabilities, &active_context, &mut provider);
+        let state = poller.latest_state("refutation_cooldown").unwrap();
         if let signal_auras_core::TrackerState::RadialCooldown {
+            phase,
+            cooldown_fraction,
             ready,
-            remaining_ms,
             ..
-        } = &state
+        } = state
         {
-            if !ready {
-                remaining.push(remaining_ms.unwrap_or(u64::MAX));
+            phases.push(*phase);
+            if !ready
+                && matches!(
+                    phase,
+                    signal_auras_core::RadialCooldownPhase::Activated
+                        | signal_auras_core::RadialCooldownPhase::Active
+                )
+            {
+                active_fractions.push(*cooldown_fraction);
             }
+        } else {
+            panic!("unexpected tracker state: {state:?}");
         }
-        last_state = Some(state);
     }
 
-    assert!(remaining.windows(2).all(|pair| pair[0] >= pair[1]));
+    assert_eq!(
+        phases,
+        [
+            signal_auras_core::RadialCooldownPhase::Ready,
+            signal_auras_core::RadialCooldownPhase::Activated,
+            signal_auras_core::RadialCooldownPhase::Active,
+            signal_auras_core::RadialCooldownPhase::Recovering,
+            signal_auras_core::RadialCooldownPhase::Ready,
+            signal_auras_core::RadialCooldownPhase::Unknown,
+        ]
+    );
+    assert!(active_fractions.windows(2).all(|pair| pair[0] >= pair[1]));
     assert!(matches!(
-        last_state.unwrap(),
+        poller.latest_state("refutation_cooldown").unwrap(),
         signal_auras_core::TrackerState::RadialCooldown {
-            ready: true,
-            remaining_ms: Some(0),
+            phase: signal_auras_core::RadialCooldownPhase::Unknown,
+            ready: false,
+            remaining_ms: None,
             ..
         }
     ));
+}
+
+fn fixture_refutation_phases() -> signal_auras_core::RadialCooldownPhases {
+    let mut phases = signal_auras_core::RadialCooldownPhases::refutation_default();
+    for rule in &mut phases.order {
+        match rule.phase {
+            signal_auras_core::RadialCooldownPhase::Ready => {
+                rule.min_luminance_percent = Some(43);
+            }
+            signal_auras_core::RadialCooldownPhase::Active => {
+                rule.max_saturation = Some(70);
+            }
+            _ => {}
+        }
+    }
+    phases
+}
+
+struct FixtureSampleProvider {
+    samples: VecDeque<ScreenSample>,
+}
+
+impl FixtureSampleProvider {
+    fn new(samples: impl IntoIterator<Item = ScreenSample>) -> Self {
+        Self {
+            samples: samples.into_iter().collect(),
+        }
+    }
+}
+
+impl ScreenSampleProvider for FixtureSampleProvider {
+    fn capture_screen_sample(&mut self) -> Result<ScreenSample, DiagnosableError> {
+        self.samples.pop_front().ok_or_else(|| {
+            DiagnosableError::new(ErrorPhase::Trigger, "fixture sample provider exhausted")
+        })
+    }
+}
+
+fn webm_refutation_frame(captured_at_ms: u64, name: &str) -> ScreenSample {
+    let path = format!("examples/poe2/refutation_cooldown_frames/{name}");
+    let bytes = std::fs::read(path).unwrap();
+    let mut newline_count = 0;
+    let mut data_start = None;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'\n' {
+            newline_count += 1;
+            if newline_count == 3 {
+                data_start = Some(index + 1);
+                break;
+            }
+        }
+    }
+    let data_start = data_start.unwrap();
+    let header = std::str::from_utf8(&bytes[..data_start]).unwrap();
+    let fields = header.split_whitespace().collect::<Vec<_>>();
+    assert_eq!(fields, ["P6", "107", "107", "255"]);
+    let pixels = bytes[data_start..].to_vec();
+    assert_eq!(pixels.len(), 107 * 107 * 3);
+    ScreenSample::from_pixels(
+        107,
+        107,
+        107 * 3,
+        ScreenPixelFormat::Rgb888,
+        captured_at_ms,
+        pixels,
+    )
 }
 
 #[test]
@@ -140,6 +250,7 @@ fn overlay_state_maps_heavy_stun_and_refutation_progress_bars() {
     states.insert(
         "refutation_cooldown".to_string(),
         TrackerState::RadialCooldown {
+            phase: signal_auras_core::RadialCooldownPhase::Recovering,
             ready: false,
             cooldown_fraction: 25,
             remaining_ms: Some(1_000),
@@ -167,6 +278,85 @@ fn overlay_state_maps_heavy_stun_and_refutation_progress_bars() {
 }
 
 #[test]
+fn overlay_state_keeps_refutation_active_empty_and_marks_activation() {
+    let overlays = overlay_definition_set();
+    let capabilities =
+        signal_auras_core::available_capability_report(overlays.required_capabilities(), "test");
+    let active_context =
+        ActiveProcessContext::name_only(ProcessName::parse("PathOfExileSteam.exe").unwrap());
+    let mut states = BTreeMap::new();
+    states.insert(
+        "heavy_stun".to_string(),
+        TrackerState::HorizontalProgressBar {
+            visible: true,
+            progress_percent: 10,
+            confidence: 95,
+            freshness_ms: 0,
+        },
+    );
+    states.insert(
+        "refutation_cooldown".to_string(),
+        TrackerState::RadialCooldown {
+            phase: signal_auras_core::RadialCooldownPhase::Active,
+            ready: false,
+            cooldown_fraction: 80,
+            remaining_ms: Some(3_200),
+            total_estimated_ms: Some(4_000),
+            confidence: 95,
+            freshness_ms: 0,
+        },
+    );
+
+    let active_snapshot = overlays
+        .snapshots(
+            10,
+            &capabilities,
+            &active_context,
+            &states,
+            &OverlayProviderReport::native_available(),
+        )
+        .remove(0);
+    let refutation = active_snapshot
+        .visuals
+        .iter()
+        .find(|visual| visual.visual_id == "refutation")
+        .unwrap();
+    assert!((refutation.fill_fraction - 0.0).abs() < 0.001);
+    assert_eq!(refutation.fill, "#38bdf8");
+    assert_eq!(refutation.background, "#082f49");
+
+    states.insert(
+        "refutation_cooldown".to_string(),
+        TrackerState::RadialCooldown {
+            phase: signal_auras_core::RadialCooldownPhase::Activated,
+            ready: false,
+            cooldown_fraction: 100,
+            remaining_ms: Some(4_000),
+            total_estimated_ms: Some(4_000),
+            confidence: 95,
+            freshness_ms: 0,
+        },
+    );
+    let activated_snapshot = overlays
+        .snapshots(
+            20,
+            &capabilities,
+            &active_context,
+            &states,
+            &OverlayProviderReport::native_available(),
+        )
+        .remove(0);
+    let activated = activated_snapshot
+        .visuals
+        .iter()
+        .find(|visual| visual.visual_id == "refutation")
+        .unwrap();
+    assert!((activated.fill_fraction - 0.0).abs() < 0.001);
+    assert_eq!(activated.fill, "#f97316");
+    assert_eq!(activated.background, "#7f1d1d");
+}
+
+#[test]
 fn overlay_state_applies_refutation_ready_style() {
     let overlays = overlay_definition_set();
     let mut states = BTreeMap::new();
@@ -182,6 +372,7 @@ fn overlay_state_applies_refutation_ready_style() {
     states.insert(
         "refutation_cooldown".to_string(),
         TrackerState::RadialCooldown {
+            phase: signal_auras_core::RadialCooldownPhase::Ready,
             ready: true,
             cooldown_fraction: 0,
             remaining_ms: Some(0),
@@ -232,6 +423,7 @@ fn overlay_state_fails_closed_for_inactive_focus_stale_and_missing_source() {
     states.insert(
         "refutation_cooldown".to_string(),
         TrackerState::RadialCooldown {
+            phase: signal_auras_core::RadialCooldownPhase::Active,
             ready: false,
             cooldown_fraction: 50,
             remaining_ms: Some(2_000),
@@ -356,6 +548,7 @@ fn overlay_snapshots_are_sanitized_and_do_not_request_input_or_macros() {
         (
             "refutation_cooldown".to_string(),
             TrackerState::RadialCooldown {
+                phase: signal_auras_core::RadialCooldownPhase::Active,
                 ready: false,
                 cooldown_fraction: 40,
                 remaining_ms: Some(1_600),
@@ -457,8 +650,9 @@ fn overlay_test_trackers() -> StateTrackerDefinitionSet {
             CapabilitySet::new([CapabilityKind::ScreenRead]),
             50,
             DetectorDefinition::RadialCooldown {
-                roi: Roi::new(0, 0, 10, 10).unwrap(),
+                roi: Roi::new(0, 0, 36, 36).unwrap(),
                 mask: None,
+                phases: signal_auras_core::RadialCooldownPhases::refutation_default(),
             },
         )
         .unwrap(),

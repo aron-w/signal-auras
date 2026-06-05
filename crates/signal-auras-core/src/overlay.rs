@@ -1,7 +1,7 @@
 use crate::{
     ActiveProcessContext, AdapterDiagnostic, CapabilityAvailability, CapabilityKind,
     CapabilityReport, CapabilitySet, DetectorDefinition, DiagnosableError, ErrorPhase,
-    ScopeDecision, ScopeSelection, StateTrackerDefinitionSet, TrackerState,
+    RadialCooldownPhase, ScopeDecision, ScopeSelection, StateTrackerDefinitionSet, TrackerState,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -589,21 +589,42 @@ fn visual_snapshot(
         (
             VisualDefinition::ProgressBar(visual),
             TrackerState::RadialCooldown {
+                phase,
                 ready,
                 cooldown_fraction,
                 ..
             },
         ) if visual.binding.field == StateField::RemainingMs => {
-            let fill_fraction = if *ready {
-                1.0
-            } else {
-                1.0 - (f32::from(*cooldown_fraction).clamp(0.0, 100.0) / 100.0)
+            let fill_fraction = match phase {
+                RadialCooldownPhase::Ready => 1.0,
+                RadialCooldownPhase::Recovering => {
+                    1.0 - (f32::from(*cooldown_fraction).clamp(0.0, 100.0) / 100.0)
+                }
+                RadialCooldownPhase::Activated
+                | RadialCooldownPhase::Active
+                | RadialCooldownPhase::Unknown => 0.0,
             };
             let mut snapshot = base_visual_snapshot(visual, fill_fraction, true, *ready);
-            if *ready {
-                if let Some(style) = &visual.ready_style {
-                    style.apply_to(&mut snapshot);
+            match phase {
+                RadialCooldownPhase::Ready => {
+                    if let Some(style) = &visual.ready_style {
+                        style.apply_to(&mut snapshot);
+                    }
                 }
+                RadialCooldownPhase::Activated => {
+                    snapshot.fill = "#f97316".to_string();
+                    snapshot.background = "#7f1d1d".to_string();
+                    snapshot.opacity = snapshot.opacity.max(0.85);
+                }
+                RadialCooldownPhase::Active => {
+                    snapshot.fill = "#38bdf8".to_string();
+                    snapshot.background = "#082f49".to_string();
+                    snapshot.opacity = snapshot.opacity.max(0.8);
+                }
+                RadialCooldownPhase::Unknown => {
+                    apply_inactive_style(visual, &mut snapshot);
+                }
+                RadialCooldownPhase::Recovering => {}
             }
             Some(snapshot)
         }

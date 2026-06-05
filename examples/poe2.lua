@@ -20,8 +20,69 @@ sa.state.track({
   poll_ms = 50,
   detector = {
     kind = "radial_cooldown",
-    roi = { x = 1913, y = 1359, w = 54, h = 54 },
+    roi = { x = 1923, y = 1370, w = 36, h = 36 },
     mask = { shape = "circle", inset = 10 },
+    phases = {
+      order = { "ready", "activated", "active", "recovering" },
+      fallback = "unknown",
+
+      ready = {
+        sample = {
+          kind = "clock_probe",
+          angle_deg = 352,
+          radius_px = 15,
+          w = 3,
+          h = 3,
+        },
+        min_luminance_percent = 44,
+        min_saturation = 85,
+        progress_fill = "full",
+      },
+
+      activated = {
+        sample = {
+          kind = "clock_probe",
+          angle_deg = 8,
+          radius_px = 15,
+          w = 3,
+          h = 3,
+        },
+        max_luminance_percent = 12,
+        max_saturation = 20,
+        progress_fill = "empty",
+        fill = "#f97316",
+        background = "#7f1d1d",
+      },
+
+      active = {
+        sample = {
+          kind = "clock_probe",
+          angle_deg = 8,
+          radius_px = 15,
+          w = 3,
+          h = 3,
+        },
+        max_luminance_percent = 34,
+        max_saturation = 75,
+        progress_fill = "empty",
+      },
+
+      recovering = {
+        sample = {
+          kind = "annulus_arc",
+          inner_radius_px = 13,
+          outer_radius_px = 17,
+          start_deg = 20,
+          end_deg = 340,
+        },
+        min_luminance_percent = 40,
+        min_saturation = 80,
+        metric = "bright_ratio",
+        metric_scale = 1.5,
+        progress_fill = "fraction",
+        max_fill_until_ready = 0.95,
+      },
+    },
   },
 })
 
@@ -30,6 +91,7 @@ sa.state.track({
   scope = poe,
   capabilities = { "screen_read" },
   poll_ms = 50,
+  when = { tracker = "refutation_cooldown", phase = "active" },
   detector = {
     kind = "horizontal_progress_bar",
     roi = { x = 315, y = 1252, w = 312, h = 1 },
@@ -52,7 +114,7 @@ sa.overlay.mount({
       fill = "#d8b84c",
       background = "#101820",
       label = { visible = true },
-      inactive = { opacity = 0.25 },
+      inactive = { opacity = 0.0 },
     },
     {
       id = "refutation",

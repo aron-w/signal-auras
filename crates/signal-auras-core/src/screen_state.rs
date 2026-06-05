@@ -96,11 +96,12 @@ pub enum ProgressFillDirection {
     LeftToRight,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DetectorDefinition {
     RadialCooldown {
         roi: Roi,
         mask: Option<CircularMask>,
+        phases: RadialCooldownPhases,
     },
     HorizontalProgressBar {
         roi: Roi,
@@ -127,11 +128,12 @@ impl DetectorDefinition {
             return self.clone();
         }
         match self {
-            Self::RadialCooldown { roi, mask } => Self::RadialCooldown {
+            Self::RadialCooldown { roi, mask, phases } => Self::RadialCooldown {
                 roi: roi.scaled(scale),
                 mask: mask.as_ref().map(|mask| CircularMask {
                     inset: scale.scale_uniform_u32(mask.inset),
                 }),
+                phases: phases.scaled(scale),
             },
             Self::HorizontalProgressBar {
                 roi,
@@ -144,13 +146,336 @@ impl DetectorDefinition {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct RadialCooldownPhases {
+    pub order: Vec<RadialPhaseRule>,
+    pub fallback: RadialCooldownPhase,
+}
+
+impl RadialCooldownPhases {
+    pub fn new(
+        order: impl IntoIterator<Item = RadialPhaseRule>,
+        fallback: RadialCooldownPhase,
+    ) -> Result<Self, DiagnosableError> {
+        let order = order.into_iter().collect::<Vec<_>>();
+        if order.is_empty() {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                "radial_cooldown phases order cannot be empty",
+            ));
+        }
+        if fallback != RadialCooldownPhase::Unknown {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                "radial_cooldown phases fallback must be \"unknown\"",
+            ));
+        }
+        Ok(Self { order, fallback })
+    }
+
+    pub fn refutation_default() -> Self {
+        Self::new(
+            [
+                RadialPhaseRule {
+                    phase: RadialCooldownPhase::Ready,
+                    sample: RadialSampleRegion::ClockProbe {
+                        angle_deg: 352.0,
+                        radius_px: 15,
+                        w: 3,
+                        h: 3,
+                    },
+                    min_luminance_percent: Some(44),
+                    max_luminance_percent: None,
+                    min_saturation: Some(85),
+                    max_saturation: None,
+                    metric: RadialRuleMetric::Average,
+                    metric_scale: None,
+                    progress_fill: RadialProgressFill::Full,
+                    max_fill_until_ready: None,
+                    fill: None,
+                    background: None,
+                    opacity: None,
+                },
+                RadialPhaseRule {
+                    phase: RadialCooldownPhase::Activated,
+                    sample: RadialSampleRegion::ClockProbe {
+                        angle_deg: 8.0,
+                        radius_px: 15,
+                        w: 3,
+                        h: 3,
+                    },
+                    min_luminance_percent: None,
+                    max_luminance_percent: Some(12),
+                    min_saturation: None,
+                    max_saturation: Some(20),
+                    metric: RadialRuleMetric::Average,
+                    metric_scale: None,
+                    progress_fill: RadialProgressFill::Empty,
+                    max_fill_until_ready: None,
+                    fill: Some("#f97316".to_string()),
+                    background: Some("#7f1d1d".to_string()),
+                    opacity: None,
+                },
+                RadialPhaseRule {
+                    phase: RadialCooldownPhase::Active,
+                    sample: RadialSampleRegion::ClockProbe {
+                        angle_deg: 8.0,
+                        radius_px: 15,
+                        w: 3,
+                        h: 3,
+                    },
+                    min_luminance_percent: None,
+                    max_luminance_percent: Some(34),
+                    min_saturation: None,
+                    max_saturation: Some(75),
+                    metric: RadialRuleMetric::Average,
+                    metric_scale: None,
+                    progress_fill: RadialProgressFill::Empty,
+                    max_fill_until_ready: None,
+                    fill: None,
+                    background: None,
+                    opacity: None,
+                },
+                RadialPhaseRule {
+                    phase: RadialCooldownPhase::Recovering,
+                    sample: RadialSampleRegion::AnnulusArc {
+                        inner_radius_px: 13,
+                        outer_radius_px: 17,
+                        start_deg: 20.0,
+                        end_deg: 340.0,
+                    },
+                    min_luminance_percent: Some(40),
+                    max_luminance_percent: None,
+                    min_saturation: Some(80),
+                    max_saturation: None,
+                    metric: RadialRuleMetric::BrightRatio,
+                    metric_scale: Some(1.5),
+                    progress_fill: RadialProgressFill::Fraction,
+                    max_fill_until_ready: Some(0.95),
+                    fill: None,
+                    background: None,
+                    opacity: None,
+                },
+            ],
+            RadialCooldownPhase::Unknown,
+        )
+        .expect("default radial cooldown phase rules are valid")
+    }
+
+    fn scaled(&self, scale: ScreenCoordinateScale) -> Self {
+        Self {
+            order: self.order.iter().map(|rule| rule.scaled(scale)).collect(),
+            fallback: self.fallback,
+        }
+    }
+
+    pub fn validate_for_roi(&self, roi: &Roi) -> Result<(), DiagnosableError> {
+        for rule in &self.order {
+            rule.validate_for_roi(roi)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RadialPhaseRule {
+    pub phase: RadialCooldownPhase,
+    pub sample: RadialSampleRegion,
+    pub min_luminance_percent: Option<u8>,
+    pub max_luminance_percent: Option<u8>,
+    pub min_saturation: Option<u8>,
+    pub max_saturation: Option<u8>,
+    pub metric: RadialRuleMetric,
+    pub metric_scale: Option<f32>,
+    pub progress_fill: RadialProgressFill,
+    pub max_fill_until_ready: Option<f32>,
+    pub fill: Option<String>,
+    pub background: Option<String>,
+    pub opacity: Option<f32>,
+}
+
+impl RadialPhaseRule {
+    fn scaled(&self, scale: ScreenCoordinateScale) -> Self {
+        let mut rule = self.clone();
+        rule.sample = self.sample.scaled(scale);
+        rule
+    }
+
+    fn validate_for_roi(&self, roi: &Roi) -> Result<(), DiagnosableError> {
+        if let Some(value) = self.min_luminance_percent {
+            validate_luminance_threshold(value)?;
+        }
+        if let Some(value) = self.max_luminance_percent {
+            validate_luminance_threshold(value)?;
+        }
+        if let Some(value) = self.min_saturation {
+            validate_saturation_threshold(value)?;
+        }
+        if let Some(value) = self.max_saturation {
+            validate_saturation_threshold(value)?;
+        }
+        if let Some(opacity) = self.opacity {
+            if !(0.0..=1.0).contains(&opacity) {
+                return Err(DiagnosableError::new(
+                    ErrorPhase::ScriptValidation,
+                    "radial_cooldown phase opacity must be between 0 and 1",
+                ));
+            }
+        }
+        if let Some(scale) = self.metric_scale {
+            if !scale.is_finite() || scale <= 0.0 {
+                return Err(DiagnosableError::new(
+                    ErrorPhase::ScriptValidation,
+                    "radial_cooldown phase metric_scale must be positive",
+                ));
+            }
+        }
+        self.sample.validate_for_roi(roi)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RadialSampleRegion {
+    ClockProbe {
+        angle_deg: f32,
+        radius_px: u32,
+        w: u32,
+        h: u32,
+    },
+    AnnulusArc {
+        inner_radius_px: u32,
+        outer_radius_px: u32,
+        start_deg: f32,
+        end_deg: f32,
+    },
+    AggregateMask,
+}
+
+impl RadialSampleRegion {
+    fn scaled(self, scale: ScreenCoordinateScale) -> Self {
+        match self {
+            Self::ClockProbe {
+                angle_deg,
+                radius_px,
+                w,
+                h,
+            } => Self::ClockProbe {
+                angle_deg,
+                radius_px: scale.scale_uniform_u32(radius_px).max(1),
+                w: scale.scale_x_u32(w).max(1),
+                h: scale.scale_y_u32(h).max(1),
+            },
+            Self::AnnulusArc {
+                inner_radius_px,
+                outer_radius_px,
+                start_deg,
+                end_deg,
+            } => Self::AnnulusArc {
+                inner_radius_px: scale.scale_uniform_u32(inner_radius_px).max(1),
+                outer_radius_px: scale.scale_uniform_u32(outer_radius_px).max(1),
+                start_deg,
+                end_deg,
+            },
+            Self::AggregateMask => Self::AggregateMask,
+        }
+    }
+
+    fn validate_for_roi(self, roi: &Roi) -> Result<(), DiagnosableError> {
+        match self {
+            Self::ClockProbe {
+                angle_deg,
+                radius_px,
+                w,
+                h,
+            } => {
+                if !angle_deg.is_finite() {
+                    return Err(DiagnosableError::new(
+                        ErrorPhase::ScriptValidation,
+                        "clock_probe angle_deg must be finite",
+                    ));
+                }
+                if radius_px == 0 || w == 0 || h == 0 {
+                    return Err(DiagnosableError::new(
+                        ErrorPhase::ScriptValidation,
+                        "clock_probe radius_px, w, and h must be positive",
+                    ));
+                }
+                if clock_probe_rect(roi, angle_deg, radius_px, w, h).is_none() {
+                    return Err(DiagnosableError::new(
+                        ErrorPhase::ScriptValidation,
+                        "clock_probe must fit inside the radial_cooldown ROI",
+                    ));
+                }
+                Ok(())
+            }
+            Self::AnnulusArc {
+                inner_radius_px,
+                outer_radius_px,
+                start_deg,
+                end_deg,
+            } => {
+                if inner_radius_px >= outer_radius_px {
+                    return Err(DiagnosableError::new(
+                        ErrorPhase::ScriptValidation,
+                        "annulus_arc inner_radius_px must be less than outer_radius_px",
+                    ));
+                }
+                if !start_deg.is_finite() || !end_deg.is_finite() {
+                    return Err(DiagnosableError::new(
+                        ErrorPhase::ScriptValidation,
+                        "annulus_arc start_deg and end_deg must be finite",
+                    ));
+                }
+                let max_radius = (roi.w.min(roi.h) as f32) / 2.0;
+                if outer_radius_px as f32 > max_radius {
+                    return Err(DiagnosableError::new(
+                        ErrorPhase::ScriptValidation,
+                        "annulus_arc outer_radius_px must fit inside the radial_cooldown ROI",
+                    ));
+                }
+                Ok(())
+            }
+            Self::AggregateMask => Ok(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RadialRuleMetric {
+    Average,
+    BrightRatio,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RadialProgressFill {
+    Empty,
+    Fraction,
+    Full,
+}
+
+fn validate_luminance_threshold(value: u8) -> Result<(), DiagnosableError> {
+    if value <= 100 {
+        Ok(())
+    } else {
+        Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "radial_cooldown luminance threshold must be between 0 and 100",
+        ))
+    }
+}
+
+fn validate_saturation_threshold(_value: u8) -> Result<(), DiagnosableError> {
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct StateTrackerDefinition {
     pub id: String,
     pub scope: ScopeSelection,
     pub capabilities: CapabilitySet,
     pub poll_ms: u64,
     pub detector: DetectorDefinition,
+    pub condition: Option<StateTrackerCondition>,
 }
 
 impl StateTrackerDefinition {
@@ -186,7 +511,13 @@ impl StateTrackerDefinition {
             capabilities,
             poll_ms,
             detector,
+            condition: None,
         })
+    }
+
+    pub fn only_when(mut self, condition: StateTrackerCondition) -> Self {
+        self.condition = Some(condition);
+        self
     }
 
     pub fn required_capabilities(&self) -> CapabilitySet {
@@ -198,7 +529,36 @@ impl StateTrackerDefinition {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateTrackerCondition {
+    pub tracker_id: String,
+    pub phase: RadialCooldownPhase,
+}
+
+impl StateTrackerCondition {
+    pub fn radial_phase(
+        tracker_id: impl Into<String>,
+        phase: RadialCooldownPhase,
+    ) -> Result<Self, DiagnosableError> {
+        let tracker_id = tracker_id.into().trim().to_string();
+        if tracker_id.is_empty() {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                "state tracker condition tracker cannot be empty",
+            ));
+        }
+        Ok(Self { tracker_id, phase })
+    }
+
+    fn matches(&self, states: &BTreeMap<String, TrackerState>) -> bool {
+        matches!(
+            states.get(&self.tracker_id),
+            Some(TrackerState::RadialCooldown { phase, .. }) if *phase == self.phase
+        )
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct StateTrackerDefinitionSet {
     trackers: Vec<StateTrackerDefinition>,
     required_capabilities: CapabilitySet,
@@ -219,6 +579,36 @@ impl StateTrackerDefinitionSet {
                 ));
             }
             required.extend(tracker.required_capabilities().iter());
+        }
+        let mut declared_before = BTreeSet::new();
+        for tracker in &trackers {
+            if let Some(condition) = &tracker.condition {
+                if condition.tracker_id == tracker.id {
+                    return Err(DiagnosableError::new(
+                        ErrorPhase::ScriptValidation,
+                        format!("state tracker '{}' cannot depend on itself", tracker.id),
+                    ));
+                }
+                if !seen.contains(&condition.tracker_id) {
+                    return Err(DiagnosableError::new(
+                        ErrorPhase::ScriptValidation,
+                        format!(
+                            "state tracker '{}' condition references missing tracker '{}'",
+                            tracker.id, condition.tracker_id
+                        ),
+                    ));
+                }
+                if !declared_before.contains(&condition.tracker_id) {
+                    return Err(DiagnosableError::new(
+                        ErrorPhase::ScriptValidation,
+                        format!(
+                            "state tracker '{}' condition source '{}' must be declared first",
+                            tracker.id, condition.tracker_id
+                        ),
+                    ));
+                }
+            }
+            declared_before.insert(tracker.id.clone());
         }
         Ok(Self {
             trackers,
@@ -340,6 +730,7 @@ impl ScreenSample {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrackerState {
     RadialCooldown {
+        phase: RadialCooldownPhase,
         ready: bool,
         cooldown_fraction: u8,
         remaining_ms: Option<u64>,
@@ -360,6 +751,15 @@ pub enum TrackerState {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RadialCooldownPhase {
+    Ready,
+    Activated,
+    Active,
+    Recovering,
+    Unknown,
+}
+
 impl TrackerState {
     pub fn confidence(&self) -> u8 {
         match self {
@@ -372,13 +772,14 @@ impl TrackerState {
     pub fn summary(&self) -> String {
         match self {
             Self::RadialCooldown {
+                phase,
                 ready,
                 cooldown_fraction,
                 remaining_ms,
                 confidence,
                 ..
             } => format!(
-                "radial_cooldown ready={ready} fraction={cooldown_fraction} remaining_ms={remaining_ms:?} confidence={confidence}"
+                "radial_cooldown phase={phase:?} ready={ready} fraction={cooldown_fraction} remaining_ms={remaining_ms:?} confidence={confidence}"
             ),
             Self::HorizontalProgressBar {
                 visible,
@@ -402,6 +803,7 @@ pub enum TrackerInactiveReason {
     ScreenReadDenied,
     ScreenReadUnsupported,
     FocusInactive,
+    ConditionInactive,
     NoReadableSample,
 }
 
@@ -459,23 +861,27 @@ fn detect_radial_cooldown_with_roi(
     detector: Option<&DetectorDefinition>,
     history: &mut RadialCooldownHistory,
 ) -> TrackerState {
-    let Some(fraction) = observed_radial_cooldown_fraction(sample, detector) else {
+    let Some(observation) = observe_radial_cooldown(sample, detector) else {
         return TrackerState::Inactive {
             reason: TrackerInactiveReason::NoReadableSample,
             confidence: 0,
             freshness_ms: 0,
         };
     };
-    let fraction = fraction.min(100);
+    let phase = observation.phase;
+    let fraction = observation.cooldown_fraction.min(100);
     history.push(sample.captured_at_ms, fraction);
     let total_estimated_ms = history.estimate_total_ms();
-    let ready = fraction <= 2;
+    let ready = phase == RadialCooldownPhase::Ready;
     let remaining_ms = if ready {
         Some(0)
+    } else if phase == RadialCooldownPhase::Unknown {
+        None
     } else {
         total_estimated_ms.map(|total| total.saturating_mul(u64::from(fraction)) / 100)
     };
     TrackerState::RadialCooldown {
+        phase,
         ready,
         cooldown_fraction: if ready { 0 } else { fraction },
         remaining_ms,
@@ -485,23 +891,264 @@ fn detect_radial_cooldown_with_roi(
     }
 }
 
-fn observed_radial_cooldown_fraction(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RadialCooldownObservation {
+    cooldown_fraction: u8,
+    phase: RadialCooldownPhase,
+}
+
+fn observe_radial_cooldown(
     sample: &ScreenSample,
     detector: Option<&DetectorDefinition>,
-) -> Option<u8> {
-    let observed = observed_percent(sample, detector)?;
+) -> Option<RadialCooldownObservation> {
     if sample.pixel_format == ScreenPixelFormat::Luma8 && sample.pixels.len() == 1 {
-        return Some(observed);
+        let cooldown_fraction = observed_percent(sample, detector)?.min(100);
+        let phase = if cooldown_fraction <= 2 {
+            RadialCooldownPhase::Ready
+        } else if cooldown_fraction >= 98 {
+            RadialCooldownPhase::Activated
+        } else {
+            RadialCooldownPhase::Active
+        };
+        return Some(RadialCooldownObservation {
+            cooldown_fraction,
+            phase,
+        });
     }
+
+    let Some(DetectorDefinition::RadialCooldown { roi, mask, phases }) = detector else {
+        let stats = observed_radial_stats(sample, detector)?;
+        return Some(classify_grayscale_radial_observation(
+            stats.luminance_percent,
+        ));
+    };
+
+    observe_configured_radial_cooldown(sample, roi, mask.as_ref(), phases)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RadialPixelStats {
+    luminance_percent: u8,
+    saturation: u8,
+    bright_ratio_percent: u8,
+}
+
+fn observed_radial_stats(
+    sample: &ScreenSample,
+    detector: Option<&DetectorDefinition>,
+) -> Option<RadialPixelStats> {
+    if sample.pixels.is_empty() || sample.width == 0 || sample.height == 0 {
+        return None;
+    }
+    let default_roi = Roi {
+        x: 0,
+        y: 0,
+        w: sample.width,
+        h: sample.height,
+    };
+    let roi = detector.map_or(&default_roi, DetectorDefinition::roi);
+    let x_end = roi.x.checked_add(roi.w)?;
+    let y_end = roi.y.checked_add(roi.h)?;
+    if x_end > sample.width || y_end > sample.height {
+        return None;
+    }
+    let bytes_per_pixel = sample.pixel_format.bytes_per_pixel();
+    let min_stride = sample.width as usize * bytes_per_pixel;
+    let stride = sample.stride as usize;
+    if stride < min_stride {
+        return None;
+    }
+
+    let mut luminance_sum = 0u64;
+    let mut saturation_sum = 0u64;
+    let mut count = 0u64;
+    for y in roi.y..y_end {
+        for x in roi.x..x_end {
+            if !pixel_in_detector_mask(detector, roi, x, y) {
+                continue;
+            }
+            let offset = y as usize * stride + x as usize * bytes_per_pixel;
+            let pixel = sample.pixels.get(offset..offset + bytes_per_pixel)?;
+            let (r, g, b) = pixel_rgb(pixel, sample.pixel_format)?;
+            luminance_sum = luminance_sum.saturating_add(rgb_luminance(r, g, b));
+            saturation_sum =
+                saturation_sum.saturating_add(u64::from(r.max(g).max(b) - r.min(g).min(b)));
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    let luminance = luminance_sum / count;
+    let luminance_percent = if sample.pixel_format == ScreenPixelFormat::Luma8 {
+        luminance.min(100)
+    } else {
+        (luminance * 100 / 255).min(100)
+    };
+    Some(RadialPixelStats {
+        luminance_percent: luminance_percent as u8,
+        saturation: (saturation_sum / count).min(255) as u8,
+        bright_ratio_percent: 0,
+    })
+}
+
+fn observe_configured_radial_cooldown(
+    sample: &ScreenSample,
+    roi: &Roi,
+    mask: Option<&CircularMask>,
+    phases: &RadialCooldownPhases,
+) -> Option<RadialCooldownObservation> {
+    for rule in &phases.order {
+        let stats = observed_radial_rule_stats(sample, roi, mask, rule)?;
+        if !radial_rule_matches(rule, stats) {
+            continue;
+        }
+        return Some(RadialCooldownObservation {
+            cooldown_fraction: cooldown_fraction_for_rule(rule, stats),
+            phase: rule.phase,
+        });
+    }
+    Some(RadialCooldownObservation {
+        cooldown_fraction: 100,
+        phase: phases.fallback,
+    })
+}
+
+fn radial_rule_matches(rule: &RadialPhaseRule, stats: RadialPixelStats) -> bool {
+    if rule.metric == RadialRuleMetric::BrightRatio {
+        return stats.bright_ratio_percent > 0;
+    }
+    if let Some(minimum) = rule.min_luminance_percent {
+        if stats.luminance_percent < minimum {
+            return false;
+        }
+    }
+    if let Some(maximum) = rule.max_luminance_percent {
+        if stats.luminance_percent > maximum {
+            return false;
+        }
+    }
+    if let Some(minimum) = rule.min_saturation {
+        if stats.saturation < minimum {
+            return false;
+        }
+    }
+    if let Some(maximum) = rule.max_saturation {
+        if stats.saturation > maximum {
+            return false;
+        }
+    }
+    true
+}
+
+fn cooldown_fraction_for_rule(rule: &RadialPhaseRule, stats: RadialPixelStats) -> u8 {
+    match rule.progress_fill {
+        RadialProgressFill::Empty => 100,
+        RadialProgressFill::Full => 0,
+        RadialProgressFill::Fraction => {
+            let scale = rule.metric_scale.unwrap_or(1.0);
+            let mut fill_percent =
+                (f32::from(stats.bright_ratio_percent.min(100)) * scale).round() as u8;
+            fill_percent = fill_percent.min(100);
+            if let Some(max_fill) = rule.max_fill_until_ready {
+                let max_percent = (max_fill.clamp(0.0, 1.0) * 100.0).floor() as u8;
+                fill_percent = fill_percent.min(max_percent);
+            }
+            100u8.saturating_sub(fill_percent)
+        }
+    }
+}
+
+fn observed_radial_rule_stats(
+    sample: &ScreenSample,
+    roi: &Roi,
+    mask: Option<&CircularMask>,
+    rule: &RadialPhaseRule,
+) -> Option<RadialPixelStats> {
+    if sample.pixels.is_empty() || sample.width == 0 || sample.height == 0 {
+        return None;
+    }
+    let x_end = roi.x.checked_add(roi.w)?;
+    let y_end = roi.y.checked_add(roi.h)?;
+    if x_end > sample.width || y_end > sample.height {
+        return None;
+    }
+    let bytes_per_pixel = sample.pixel_format.bytes_per_pixel();
+    let min_stride = sample.width as usize * bytes_per_pixel;
+    let stride = sample.stride as usize;
+    if stride < min_stride {
+        return None;
+    }
+
+    let mut luminance_sum = 0u64;
+    let mut saturation_sum = 0u64;
+    let mut bright_count = 0u64;
+    let mut count = 0u64;
+    for y in roi.y..y_end {
+        for x in roi.x..x_end {
+            if !pixel_in_sample_region(&rule.sample, roi, x, y) {
+                continue;
+            }
+            if rule.sample == RadialSampleRegion::AggregateMask
+                && !pixel_in_circular_mask(mask, roi, x, y)
+            {
+                continue;
+            }
+            let offset = y as usize * stride + x as usize * bytes_per_pixel;
+            let pixel = sample.pixels.get(offset..offset + bytes_per_pixel)?;
+            let (r, g, b) = pixel_rgb(pixel, sample.pixel_format)?;
+            let luminance = if sample.pixel_format == ScreenPixelFormat::Luma8 {
+                rgb_luminance(r, g, b).min(100)
+            } else {
+                (rgb_luminance(r, g, b) * 100 / 255).min(100)
+            };
+            let saturation = u64::from(r.max(g).max(b) - r.min(g).min(b));
+            luminance_sum = luminance_sum.saturating_add(luminance);
+            saturation_sum = saturation_sum.saturating_add(saturation);
+            if rule.metric == RadialRuleMetric::BrightRatio {
+                let bright_enough = rule
+                    .min_luminance_percent
+                    .is_none_or(|minimum| luminance >= u64::from(minimum))
+                    && rule
+                        .min_saturation
+                        .is_none_or(|minimum| saturation >= u64::from(minimum));
+                if bright_enough {
+                    bright_count += 1;
+                }
+            }
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    Some(RadialPixelStats {
+        luminance_percent: (luminance_sum / count).min(100) as u8,
+        saturation: (saturation_sum / count).min(255) as u8,
+        bright_ratio_percent: ((bright_count * 100) / count).min(100) as u8,
+    })
+}
+
+fn classify_grayscale_radial_observation(observed: u8) -> RadialCooldownObservation {
     if observed >= RADIAL_READY_LUMINANCE_PERCENT {
-        return Some(0);
+        return RadialCooldownObservation {
+            cooldown_fraction: 0,
+            phase: RadialCooldownPhase::Ready,
+        };
     }
     if observed <= RADIAL_FULL_COOLDOWN_LUMINANCE_PERCENT {
-        return Some(100);
+        return RadialCooldownObservation {
+            cooldown_fraction: 100,
+            phase: RadialCooldownPhase::Activated,
+        };
     }
     let cooldown_range = RADIAL_READY_LUMINANCE_PERCENT - RADIAL_FULL_COOLDOWN_LUMINANCE_PERCENT;
     let dark_delta = RADIAL_READY_LUMINANCE_PERCENT - observed;
-    Some(((u64::from(dark_delta) * 100) / u64::from(cooldown_range)).min(100) as u8)
+    RadialCooldownObservation {
+        cooldown_fraction: ((u64::from(dark_delta) * 100) / u64::from(cooldown_range)).min(100)
+            as u8,
+        phase: RadialCooldownPhase::Active,
+    }
 }
 
 pub fn detect_horizontal_progress_bar(sample: &ScreenSample) -> TrackerState {
@@ -593,6 +1240,13 @@ fn pixel_in_detector_mask(
     else {
         return true;
     };
+    pixel_in_circular_mask(Some(mask), roi, x, y)
+}
+
+fn pixel_in_circular_mask(mask: Option<&CircularMask>, roi: &Roi, x: u32, y: u32) -> bool {
+    let Some(mask) = mask else {
+        return true;
+    };
     let inset = mask.inset.min(roi.w / 2).min(roi.h / 2);
     let inner_w = roi.w.saturating_sub(inset * 2);
     let inner_h = roi.h.saturating_sub(inset * 2);
@@ -611,20 +1265,114 @@ fn pixel_in_detector_mask(
         <= radius_x2 * radius_x2 * radius_y2 * radius_y2
 }
 
+fn pixel_in_sample_region(region: &RadialSampleRegion, roi: &Roi, x: u32, y: u32) -> bool {
+    match *region {
+        RadialSampleRegion::ClockProbe {
+            angle_deg,
+            radius_px,
+            w,
+            h,
+        } => clock_probe_rect(roi, angle_deg, radius_px, w, h).is_some_and(
+            |(left, top, right, bottom)| x >= left && x < right && y >= top && y < bottom,
+        ),
+        RadialSampleRegion::AnnulusArc {
+            inner_radius_px,
+            outer_radius_px,
+            start_deg,
+            end_deg,
+        } => {
+            let (dx, dy) = local_center_delta(roi, x, y);
+            let distance = (dx * dx + dy * dy).sqrt();
+            if distance < inner_radius_px as f32 || distance > outer_radius_px as f32 {
+                return false;
+            }
+            angle_in_clock_arc(clock_degrees(dx, dy), start_deg, end_deg)
+        }
+        RadialSampleRegion::AggregateMask => true,
+    }
+}
+
+fn clock_probe_rect(
+    roi: &Roi,
+    angle_deg: f32,
+    radius_px: u32,
+    w: u32,
+    h: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    if radius_px == 0 || w == 0 || h == 0 || !angle_deg.is_finite() {
+        return None;
+    }
+    let angle = angle_deg.to_radians();
+    let center_x = roi.x as f32 + (roi.w as f32 - 1.0) / 2.0;
+    let center_y = roi.y as f32 + (roi.h as f32 - 1.0) / 2.0;
+    let probe_center_x = center_x + angle.sin() * radius_px as f32;
+    let probe_center_y = center_y - angle.cos() * radius_px as f32;
+    let left = (probe_center_x - (w as f32 - 1.0) / 2.0).round() as i64;
+    let top = (probe_center_y - (h as f32 - 1.0) / 2.0).round() as i64;
+    let right = left + i64::from(w);
+    let bottom = top + i64::from(h);
+    let roi_left = i64::from(roi.x);
+    let roi_top = i64::from(roi.y);
+    let roi_right = i64::from(roi.x.checked_add(roi.w)?);
+    let roi_bottom = i64::from(roi.y.checked_add(roi.h)?);
+    if left < roi_left || top < roi_top || right > roi_right || bottom > roi_bottom {
+        return None;
+    }
+    Some((left as u32, top as u32, right as u32, bottom as u32))
+}
+
+fn local_center_delta(roi: &Roi, x: u32, y: u32) -> (f32, f32) {
+    let center_x = roi.x as f32 + (roi.w as f32 - 1.0) / 2.0;
+    let center_y = roi.y as f32 + (roi.h as f32 - 1.0) / 2.0;
+    (x as f32 - center_x, y as f32 - center_y)
+}
+
+fn clock_degrees(dx: f32, dy: f32) -> f32 {
+    let degrees = dx.atan2(-dy).to_degrees();
+    if degrees < 0.0 {
+        degrees + 360.0
+    } else {
+        degrees
+    }
+}
+
+fn angle_in_clock_arc(angle: f32, start: f32, end: f32) -> bool {
+    let angle = normalize_degrees(angle);
+    let start = normalize_degrees(start);
+    let end = normalize_degrees(end);
+    if start <= end {
+        angle >= start && angle <= end
+    } else {
+        angle >= start || angle <= end
+    }
+}
+
+fn normalize_degrees(value: f32) -> f32 {
+    value.rem_euclid(360.0)
+}
+
 fn pixel_percent(pixel: &[u8], format: ScreenPixelFormat) -> Option<u64> {
-    let luminance = match format {
-        ScreenPixelFormat::Luma8 => u64::from(*pixel.first()?),
-        ScreenPixelFormat::Rgb888 | ScreenPixelFormat::Rgba8888 | ScreenPixelFormat::Rgbx8888 => {
-            rgb_luminance(pixel[0], pixel[1], pixel[2])
-        }
-        ScreenPixelFormat::Bgr888 | ScreenPixelFormat::Bgra8888 | ScreenPixelFormat::Bgrx8888 => {
-            rgb_luminance(pixel[2], pixel[1], pixel[0])
-        }
-    };
+    let (r, g, b) = pixel_rgb(pixel, format)?;
+    let luminance = rgb_luminance(r, g, b);
     if format == ScreenPixelFormat::Luma8 {
         Some(luminance.min(100))
     } else {
         Some((luminance * 100 / 255).min(100))
+    }
+}
+
+fn pixel_rgb(pixel: &[u8], format: ScreenPixelFormat) -> Option<(u8, u8, u8)> {
+    match format {
+        ScreenPixelFormat::Luma8 => {
+            let value = *pixel.first()?;
+            Some((value, value, value))
+        }
+        ScreenPixelFormat::Rgb888 | ScreenPixelFormat::Rgba8888 | ScreenPixelFormat::Rgbx8888 => {
+            Some((pixel[0], pixel[1], pixel[2]))
+        }
+        ScreenPixelFormat::Bgr888 | ScreenPixelFormat::Bgra8888 | ScreenPixelFormat::Bgrx8888 => {
+            Some((pixel[2], pixel[1], pixel[0]))
+        }
     }
 }
 
@@ -809,6 +1557,23 @@ impl StateTrackerPoller {
             else {
                 continue;
             };
+            if tracker
+                .condition
+                .as_ref()
+                .is_some_and(|condition| !condition.matches(&self.latest))
+            {
+                self.latest.insert(
+                    id.clone(),
+                    TrackerState::Inactive {
+                        reason: TrackerInactiveReason::ConditionInactive,
+                        confidence: 0,
+                        freshness_ms: 0,
+                    },
+                );
+                self.last_poll_ms.insert(id.clone(), now_ms);
+                updated.push(id.clone());
+                continue;
+            }
             let detector = tracker.detector.scaled_for_sample(coordinate_scale);
             let state = match &detector {
                 DetectorDefinition::RadialCooldown { .. } => {
@@ -875,6 +1640,7 @@ mod tests {
         DetectorDefinition::RadialCooldown {
             roi: Roi::new(2850, 2030, 96, 92).unwrap(),
             mask: Some(CircularMask::new(10)),
+            phases: RadialCooldownPhases::refutation_default(),
         }
     }
 
@@ -882,6 +1648,57 @@ mod tests {
         DetectorDefinition::RadialCooldown {
             roi,
             mask: Some(CircularMask::new(0)),
+            phases: RadialCooldownPhases::new(
+                [
+                    RadialPhaseRule {
+                        phase: RadialCooldownPhase::Ready,
+                        sample: RadialSampleRegion::AggregateMask,
+                        min_luminance_percent: Some(40),
+                        max_luminance_percent: None,
+                        min_saturation: None,
+                        max_saturation: None,
+                        metric: RadialRuleMetric::Average,
+                        metric_scale: None,
+                        progress_fill: RadialProgressFill::Full,
+                        max_fill_until_ready: None,
+                        fill: None,
+                        background: None,
+                        opacity: None,
+                    },
+                    RadialPhaseRule {
+                        phase: RadialCooldownPhase::Activated,
+                        sample: RadialSampleRegion::AggregateMask,
+                        min_luminance_percent: None,
+                        max_luminance_percent: Some(10),
+                        min_saturation: None,
+                        max_saturation: None,
+                        metric: RadialRuleMetric::Average,
+                        metric_scale: None,
+                        progress_fill: RadialProgressFill::Empty,
+                        max_fill_until_ready: None,
+                        fill: None,
+                        background: None,
+                        opacity: None,
+                    },
+                    RadialPhaseRule {
+                        phase: RadialCooldownPhase::Active,
+                        sample: RadialSampleRegion::AggregateMask,
+                        min_luminance_percent: None,
+                        max_luminance_percent: Some(39),
+                        min_saturation: None,
+                        max_saturation: None,
+                        metric: RadialRuleMetric::Average,
+                        metric_scale: None,
+                        progress_fill: RadialProgressFill::Empty,
+                        max_fill_until_ready: None,
+                        fill: None,
+                        background: None,
+                        opacity: None,
+                    },
+                ],
+                RadialCooldownPhase::Unknown,
+            )
+            .unwrap(),
         }
     }
 
@@ -896,6 +1713,22 @@ mod tests {
         DetectorDefinition::HorizontalProgressBar {
             roi,
             fill_direction: ProgressFillDirection::LeftToRight,
+        }
+    }
+
+    fn single_pixel_radial_detector() -> DetectorDefinition {
+        DetectorDefinition::RadialCooldown {
+            roi: Roi::new(0, 0, 1, 1).unwrap(),
+            mask: None,
+            phases: RadialCooldownPhases::refutation_default(),
+        }
+    }
+
+    fn configured_refutation_detector() -> DetectorDefinition {
+        DetectorDefinition::RadialCooldown {
+            roi: Roi::new(0, 0, 36, 36).unwrap(),
+            mask: None,
+            phases: RadialCooldownPhases::refutation_default(),
         }
     }
 
@@ -961,6 +1794,7 @@ mod tests {
         assert_eq!(
             state,
             TrackerState::RadialCooldown {
+                phase: RadialCooldownPhase::Active,
                 ready: false,
                 cooldown_fraction: 20,
                 remaining_ms: Some(500),
@@ -980,6 +1814,7 @@ mod tests {
         assert!(matches!(
             state,
             TrackerState::RadialCooldown {
+                phase: RadialCooldownPhase::Ready,
                 ready: true,
                 remaining_ms: Some(0),
                 ..
@@ -998,6 +1833,7 @@ mod tests {
         assert_eq!(
             state,
             TrackerState::RadialCooldown {
+                phase: RadialCooldownPhase::Ready,
                 ready: true,
                 cooldown_fraction: 0,
                 remaining_ms: Some(0),
@@ -1010,7 +1846,6 @@ mod tests {
 
     #[test]
     fn radial_cooldown_normalizes_brightening_overlay_to_remaining_fraction() {
-        let detector = radial_detector_with_roi(Roi::new(0, 0, 8, 8).unwrap());
         let samples = [
             luma_frame(0, 8, 8, 11),
             luma_frame(500, 8, 8, 21),
@@ -1019,12 +1854,13 @@ mod tests {
         let mut history = RadialCooldownHistory::default();
         let states = samples
             .iter()
-            .map(|sample| detect_radial_cooldown_with_roi(sample, Some(&detector), &mut history))
+            .map(|sample| detect_radial_cooldown(sample, &mut history))
             .collect::<Vec<_>>();
 
         assert!(matches!(
             states[0],
             TrackerState::RadialCooldown {
+                phase: RadialCooldownPhase::Active,
                 ready: false,
                 cooldown_fraction: 96,
                 remaining_ms: None,
@@ -1034,6 +1870,7 @@ mod tests {
         assert!(matches!(
             states[1],
             TrackerState::RadialCooldown {
+                phase: RadialCooldownPhase::Active,
                 ready: false,
                 cooldown_fraction: 63,
                 remaining_ms: Some(_),
@@ -1043,12 +1880,176 @@ mod tests {
         assert!(matches!(
             states[2],
             TrackerState::RadialCooldown {
+                phase: RadialCooldownPhase::Active,
                 ready: false,
                 cooldown_fraction: 43,
                 remaining_ms: Some(_),
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn radial_cooldown_phase_rules_classify_probe_gated_states() {
+        let detector = configured_refutation_detector();
+
+        let cases = [
+            (
+                refutation_phase_sample(Some((40, 130, 220)), Some((0, 0, 0)), false),
+                RadialCooldownPhase::Ready,
+                0,
+            ),
+            (
+                refutation_phase_sample(None, Some((0, 0, 0)), false),
+                RadialCooldownPhase::Activated,
+                100,
+            ),
+            (
+                refutation_phase_sample(None, Some((65, 45, 35)), false),
+                RadialCooldownPhase::Active,
+                100,
+            ),
+            (
+                refutation_phase_sample(None, Some((140, 120, 100)), true),
+                RadialCooldownPhase::Recovering,
+                5,
+            ),
+            (
+                refutation_phase_sample(None, Some((140, 120, 100)), false),
+                RadialCooldownPhase::Unknown,
+                100,
+            ),
+        ];
+
+        for (index, (sample, expected_phase, expected_fraction)) in cases.into_iter().enumerate() {
+            let mut history = RadialCooldownHistory::default();
+            let state = detect_radial_cooldown_with_roi(&sample, Some(&detector), &mut history);
+            assert!(
+                matches!(
+                    state,
+                    TrackerState::RadialCooldown {
+                        phase,
+                        cooldown_fraction,
+                        ..
+                    } if phase == expected_phase && cooldown_fraction == expected_fraction
+                ),
+                "case {index} produced {state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn radial_cooldown_active_probe_wins_over_bright_recovery_annulus() {
+        let detector = configured_refutation_detector();
+        let sample = refutation_phase_sample(None, Some((65, 45, 35)), true);
+        let mut history = RadialCooldownHistory::default();
+
+        let state = detect_radial_cooldown_with_roi(&sample, Some(&detector), &mut history);
+
+        assert!(matches!(
+            state,
+            TrackerState::RadialCooldown {
+                phase: RadialCooldownPhase::Active,
+                cooldown_fraction: 100,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn radial_cooldown_recovery_metric_scale_normalizes_underreported_annulus() {
+        let phases = RadialCooldownPhases::refutation_default();
+        let recovering = phases
+            .order
+            .iter()
+            .find(|rule| rule.phase == RadialCooldownPhase::Recovering)
+            .unwrap();
+
+        assert_eq!(
+            cooldown_fraction_for_rule(
+                recovering,
+                RadialPixelStats {
+                    luminance_percent: 0,
+                    saturation: 0,
+                    bright_ratio_percent: 33,
+                },
+            ),
+            50
+        );
+        assert_eq!(
+            cooldown_fraction_for_rule(
+                recovering,
+                RadialPixelStats {
+                    luminance_percent: 0,
+                    saturation: 0,
+                    bright_ratio_percent: 66,
+                },
+            ),
+            5
+        );
+    }
+
+    fn refutation_phase_sample(
+        before_probe: Option<(u8, u8, u8)>,
+        after_probe: Option<(u8, u8, u8)>,
+        bright_annulus: bool,
+    ) -> ScreenSample {
+        let roi = Roi::new(0, 0, 36, 36).unwrap();
+        let mut pixels = vec![0u8; 36 * 36 * 3];
+        if bright_annulus {
+            paint_region(
+                &mut pixels,
+                &roi,
+                RadialSampleRegion::AnnulusArc {
+                    inner_radius_px: 13,
+                    outer_radius_px: 17,
+                    start_deg: 20.0,
+                    end_deg: 340.0,
+                },
+                (230, 110, 20),
+            );
+        }
+        if let Some(color) = before_probe {
+            paint_region(
+                &mut pixels,
+                &roi,
+                RadialSampleRegion::ClockProbe {
+                    angle_deg: 352.0,
+                    radius_px: 15,
+                    w: 3,
+                    h: 3,
+                },
+                color,
+            );
+        }
+        if let Some(color) = after_probe {
+            paint_region(
+                &mut pixels,
+                &roi,
+                RadialSampleRegion::ClockProbe {
+                    angle_deg: 8.0,
+                    radius_px: 15,
+                    w: 3,
+                    h: 3,
+                },
+                color,
+            );
+        }
+        ScreenSample::from_pixels(36, 36, 36 * 3, ScreenPixelFormat::Rgb888, 0, pixels)
+    }
+
+    fn paint_region(pixels: &mut [u8], roi: &Roi, region: RadialSampleRegion, color: (u8, u8, u8)) {
+        for y in roi.y..roi.y + roi.h {
+            for x in roi.x..roi.x + roi.w {
+                if !pixel_in_sample_region(&region, roi, x, y) {
+                    continue;
+                }
+                let offset = (y as usize * roi.w as usize + x as usize) * 3;
+                pixels[offset] = color.0;
+                pixels[offset + 1] = color.1;
+                pixels[offset + 2] = color.2;
+            }
+        }
     }
 
     #[test]
@@ -1190,6 +2191,69 @@ mod tests {
             })
         );
         assert_eq!(provider.captures, 1);
+    }
+
+    #[test]
+    fn poller_tracks_conditioned_progress_only_when_radial_source_phase_matches() {
+        let heavy = tracker(
+            "heavy_stun",
+            progress_detector_with_roi(Roi::new(0, 0, 1, 1).unwrap()),
+        )
+        .only_when(
+            StateTrackerCondition::radial_phase("refutation_cooldown", RadialCooldownPhase::Active)
+                .unwrap(),
+        );
+        let set = StateTrackerDefinitionSet::new([
+            tracker("refutation_cooldown", single_pixel_radial_detector()),
+            heavy,
+        ])
+        .unwrap();
+        let required = set.required_capabilities().clone();
+        let report = available_capability_report(&required, "test");
+        let active_context =
+            ActiveProcessContext::name_only(ProcessName::parse("steam_app_2694490").unwrap());
+        let mut poller = StateTrackerPoller::new(set);
+
+        let mut ready_provider = CountingProvider {
+            captures: 0,
+            sample: ScreenSample::synthetic_percent(0, 0),
+        };
+        poller.poll_due(0, &report, &active_context, &mut ready_provider);
+        assert!(matches!(
+            poller.latest_state("refutation_cooldown"),
+            Some(TrackerState::RadialCooldown {
+                phase: RadialCooldownPhase::Ready,
+                ..
+            })
+        ));
+        assert!(matches!(
+            poller.latest_state("heavy_stun"),
+            Some(TrackerState::Inactive {
+                reason: TrackerInactiveReason::ConditionInactive,
+                ..
+            })
+        ));
+
+        let mut active_provider = CountingProvider {
+            captures: 0,
+            sample: ScreenSample::synthetic_percent(50, 50),
+        };
+        poller.poll_due(50, &report, &active_context, &mut active_provider);
+        assert!(matches!(
+            poller.latest_state("refutation_cooldown"),
+            Some(TrackerState::RadialCooldown {
+                phase: RadialCooldownPhase::Active,
+                ..
+            })
+        ));
+        assert!(matches!(
+            poller.latest_state("heavy_stun"),
+            Some(TrackerState::HorizontalProgressBar {
+                visible: true,
+                progress_percent: 50,
+                ..
+            })
+        ));
     }
 
     #[test]

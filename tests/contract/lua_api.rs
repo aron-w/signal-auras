@@ -1,5 +1,6 @@
 use signal_auras_core::{
-    CapabilityKind, CapabilitySet, DetectorDefinition, MacroAction, RendererProviderId, StateField,
+    CapabilityKind, CapabilitySet, DetectorDefinition, MacroAction, RadialCooldownPhase,
+    RendererProviderId, StateField,
 };
 use signal_auras_lua::{
     load_lua_controller_program_file, load_lua_controller_program_source, load_lua_file,
@@ -90,8 +91,17 @@ fn state_trackers_accept_poe2_example_without_tracker_callbacks() {
         .unwrap();
     assert_eq!(refutation.poll_ms, 50);
     assert!(matches!(
-        refutation.detector,
-        DetectorDefinition::RadialCooldown { .. }
+        &refutation.detector,
+        DetectorDefinition::RadialCooldown {
+            roi,
+            mask: Some(mask),
+            phases,
+        } if roi.x == 1923
+            && roi.y == 1370
+            && roi.w == 36
+            && roi.h == 36
+            && mask.inset == 10
+            && phases.order.len() == 4
     ));
 
     let heavy_stun = trackers
@@ -99,6 +109,12 @@ fn state_trackers_accept_poe2_example_without_tracker_callbacks() {
         .find(|tracker| tracker.id == "heavy_stun")
         .unwrap();
     assert_eq!(heavy_stun.poll_ms, 50);
+    assert!(matches!(
+        &heavy_stun.condition,
+        Some(condition)
+            if condition.tracker_id == "refutation_cooldown"
+                && condition.phase == RadialCooldownPhase::Active
+    ));
     assert!(matches!(
         heavy_stun.detector,
         DetectorDefinition::HorizontalProgressBar { .. }
@@ -296,6 +312,86 @@ fn state_trackers_reject_user_declared_emits_and_fixture_fields() {
     }
 }
 
+#[test]
+fn radial_cooldown_lua_phases_are_required_and_validated() {
+    let valid = radial_tracker_source(
+        r##"
+        phases = {
+          order = { "ready", "activated", "active", "recovering" },
+          fallback = "unknown",
+          ready = {
+            sample = { kind = "clock_probe", angle_deg = 352, radius_px = 15, w = 3, h = 3 },
+            min_luminance_percent = 44,
+            min_saturation = 85,
+            progress_fill = "full",
+          },
+          activated = {
+            sample = { kind = "clock_probe", angle_deg = 8, radius_px = 15, w = 3, h = 3 },
+            max_luminance_percent = 12,
+            max_saturation = 20,
+            progress_fill = "empty",
+            fill = "#f97316",
+            background = "#7f1d1d",
+          },
+          active = {
+            sample = { kind = "clock_probe", angle_deg = 8, radius_px = 15, w = 3, h = 3 },
+            max_luminance_percent = 34,
+            max_saturation = 75,
+            progress_fill = "empty",
+          },
+          recovering = {
+            sample = { kind = "annulus_arc", inner_radius_px = 13, outer_radius_px = 17, start_deg = 20, end_deg = 340 },
+            min_luminance_percent = 40,
+            min_saturation = 80,
+            metric = "bright_ratio",
+            metric_scale = 1.5,
+            progress_fill = "fraction",
+            max_fill_until_ready = 0.95,
+          },
+        },
+        "##,
+    );
+    assert!(load_lua_controller_program_source(&valid).is_ok());
+
+    for invalid in [
+        radial_tracker_source(""),
+        valid.replace("fallback = \"unknown\"", "fallback = \"ready\""),
+        valid.replace("radius_px = 15", "radius_px = 40"),
+        valid.replace(
+            "inner_radius_px = 13, outer_radius_px = 17",
+            "inner_radius_px = 17, outer_radius_px = 13",
+        ),
+        valid.replace("min_luminance_percent = 44", "min_luminance_percent = 144"),
+        valid.replace(
+            "progress_fill = \"full\"",
+            "progress_fill = \"nearly_full\"",
+        ),
+    ] {
+        assert!(
+            load_lua_controller_program_source(&invalid).is_err(),
+            "source should be rejected: {invalid}"
+        );
+    }
+}
+
+fn radial_tracker_source(phases: &str) -> String {
+    format!(
+        r#"
+        sa.state.track({{
+          id = "refutation_cooldown",
+          capabilities = {{ "screen_read" }},
+          poll_ms = 50,
+          detector = {{
+            kind = "radial_cooldown",
+            roi = {{ x = 0, y = 0, w = 36, h = 36 }},
+            mask = {{ shape = "circle", inset = 10 }},
+            {phases}
+          }},
+        }})
+        "#
+    )
+}
+
 fn overlay_source(provider: &str) -> String {
     overlay_source_with_provider_and_visuals(provider, overlay_visuals())
 }
@@ -364,7 +460,38 @@ fn overlay_trackers() -> &'static str {
           poll_ms = 50,
           detector = {
             kind = "radial_cooldown",
-            roi = { x = 0, y = 0, w = 10, h = 10 },
+            roi = { x = 0, y = 0, w = 36, h = 36 },
+            phases = {
+              order = { "ready", "activated", "active", "recovering" },
+              fallback = "unknown",
+              ready = {
+                sample = { kind = "clock_probe", angle_deg = 352, radius_px = 15, w = 3, h = 3 },
+                min_luminance_percent = 44,
+                min_saturation = 85,
+                progress_fill = "full",
+              },
+              activated = {
+                sample = { kind = "clock_probe", angle_deg = 8, radius_px = 15, w = 3, h = 3 },
+                max_luminance_percent = 12,
+                max_saturation = 20,
+                progress_fill = "empty",
+              },
+              active = {
+                sample = { kind = "clock_probe", angle_deg = 8, radius_px = 15, w = 3, h = 3 },
+                max_luminance_percent = 34,
+                max_saturation = 75,
+                progress_fill = "empty",
+              },
+              recovering = {
+                sample = { kind = "annulus_arc", inner_radius_px = 13, outer_radius_px = 17, start_deg = 20, end_deg = 340 },
+                min_luminance_percent = 40,
+                min_saturation = 80,
+                metric = "bright_ratio",
+                metric_scale = 1.5,
+                progress_fill = "fraction",
+                max_fill_until_ready = 0.95,
+              },
+            },
           },
         })
     "#

@@ -1291,6 +1291,7 @@ mod tests {
                 DetectorDefinition::RadialCooldown {
                     roi: Roi::new(1540, 1560, 82, 82).unwrap(),
                     mask: None,
+                    phases: signal_auras_core::RadialCooldownPhases::refutation_default(),
                 },
             ),
             tracker(
