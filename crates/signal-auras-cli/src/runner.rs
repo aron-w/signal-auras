@@ -3,6 +3,16 @@ use crate::{
     logging::{init_runtime_logging, RuntimeLogConfig, RuntimeLogFormat, RuntimeLogLevel},
     prompt::{stdin_is_interactive, ScopePrompt, TerminalPrompt},
 };
+mod controller;
+mod diagnostics;
+mod lifecycle;
+mod runtime_loop;
+
+use lifecycle::{
+    cleanup_after_error, LiveRealControllerLifecycleArgs, LiveRealLifecycleArgs,
+    RealAdapterCleanupSession,
+};
+use runtime_loop::{idle_wait_timeout, next_live_wait_timeout};
 use signal_auras_core::{
     execute_plan_with_inter_action_delay, queue_controller_callback_outputs, ActiveProcessProvider,
     BindingMode, BindingTrigger, CallbackDisposition, CapabilityKind, CapabilityReport,
@@ -933,20 +943,22 @@ where
     let presses = config.presses_for_scope(scope.clone());
     let required = CapabilitySet::for_configuration_scope(&config, &scope);
     log.info("event=startup provider=kde-plasma-wayland");
-    if let Err(error) =
-        adapter.configure_input_provider(config.input_provider.as_ref(), config.leader.as_ref())
+    let mut session = RealAdapterCleanupSession::new(adapter);
+    if let Err(error) = session
+        .adapter()
+        .configure_input_provider(config.input_provider.as_ref(), config.leader.as_ref())
     {
-        cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
+        session.cleanup_after_error(ErrorPhase::Registration)?;
         return Err(error);
     }
-    let report = adapter.probe_capabilities(&required);
+    let report = session.adapter().probe_capabilities(&required);
     if let Some(error) = report.first_blocking_error(&required) {
         stats.record_capability_probe_failure();
         stats.record_permission_failure();
         log.warn(format!(
             "event=capability_probe result=failed hint=check_permissions error={error}"
         ));
-        cleanup_real_adapter_after_error(adapter, ErrorPhase::CapabilityProbe)?;
+        session.cleanup_after_error(ErrorPhase::CapabilityProbe)?;
         return Err(error);
     }
     stats.record_capability_probe_success();
@@ -954,7 +966,7 @@ where
 
     for binding in &bindings {
         stats.record_registration_attempt();
-        match adapter.register(binding.clone()) {
+        match session.adapter().register(binding.clone()) {
             Ok(id) => {
                 stats.record_registration_success();
                 log.info(format!(
@@ -966,7 +978,7 @@ where
             }
             Err(error) => {
                 stats.record_registration_failure();
-                cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
+                session.cleanup_after_error(ErrorPhase::Registration)?;
                 return Err(error);
             }
         }
@@ -978,21 +990,20 @@ where
         &motions,
         &presses,
         &active_adapter,
-        adapter,
+        session.adapter(),
         lifecycle,
         &mut stats,
     ) {
         Ok(reason) => reason,
         Err(error) => {
             println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
-            cleanup_real_adapter_after_error(adapter, ErrorPhase::Shutdown)?;
+            session.cleanup_after_error(ErrorPhase::Shutdown)?;
             return Err(error);
         }
     };
 
     println!("{}", stats.render_summary(shutdown_reason));
-    adapter.cancel_pending()?;
-    adapter.unregister_all()?;
+    session.finish_normal_shutdown()?;
     Ok(stats)
 }
 
@@ -1018,13 +1029,15 @@ where
     ));
     let required = program.required_capabilities().clone();
     log.info("event=startup provider=kde-plasma-wayland");
-    if let Err(error) =
-        adapter.configure_input_provider(program.input_provider.as_ref(), program.leader.as_ref())
+    let mut session = RealAdapterCleanupSession::new(adapter);
+    if let Err(error) = session
+        .adapter()
+        .configure_input_provider(program.input_provider.as_ref(), program.leader.as_ref())
     {
-        cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
+        session.cleanup_after_error(ErrorPhase::Registration)?;
         return Err(error);
     }
-    let report = adapter.probe_capabilities(&required);
+    let report = session.adapter().probe_capabilities(&required);
     let mut stats = RuntimeStats::new();
     if let Some(error) = report.first_blocking_error(&required) {
         stats.record_capability_probe_failure();
@@ -1032,14 +1045,14 @@ where
         log.warn(format!(
             "event=capability_probe result=failed hint=check_permissions error={error}"
         ));
-        cleanup_real_adapter_after_error(adapter, ErrorPhase::CapabilityProbe)?;
+        session.cleanup_after_error(ErrorPhase::CapabilityProbe)?;
         return Err(error);
     }
     stats.record_capability_probe_success();
     log.info("event=capability_probe result=ok");
     if required.contains(CapabilityKind::ActiveProcessMetadata) {
-        if let Err(error) = adapter.ensure_active_process_provider() {
-            cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
+        if let Err(error) = session.adapter().ensure_active_process_provider() {
+            session.cleanup_after_error(ErrorPhase::Registration)?;
             return Err(error);
         }
         stats.record_kde_bridge_setup();
@@ -1048,7 +1061,7 @@ where
     let hotkey_bindings = controller_hotkey_bindings(&program)?;
     for binding in &hotkey_bindings {
         stats.record_registration_attempt();
-        match adapter.register(binding.clone()) {
+        match session.adapter().register(binding.clone()) {
             Ok(id) => {
                 stats.record_registration_success();
                 log.info(format!(
@@ -1060,7 +1073,7 @@ where
             }
             Err(error) => {
                 stats.record_registration_failure();
-                cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
+                session.cleanup_after_error(ErrorPhase::Registration)?;
                 return Err(error);
             }
         }
@@ -1071,7 +1084,7 @@ where
         &program,
         runtime.as_ref(),
         &active_adapter,
-        adapter,
+        session.adapter(),
         lifecycle,
         &report,
         &mut stats,
@@ -1079,14 +1092,13 @@ where
         Ok(reason) => reason,
         Err(error) => {
             println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
-            cleanup_real_adapter_after_error(adapter, ErrorPhase::Shutdown)?;
+            session.cleanup_after_error(ErrorPhase::Shutdown)?;
             return Err(error);
         }
     };
 
     println!("{}", stats.render_summary(shutdown_reason));
-    adapter.cancel_pending()?;
-    adapter.unregister_all()?;
+    session.finish_normal_shutdown()?;
     Ok(stats)
 }
 
@@ -1118,14 +1130,16 @@ pub fn start_live_real_controller_runner_with_options(
     let required = program.required_capabilities().clone();
     let signal_fd = RuntimeSignalFd::shutdown()?;
     log.info("event=startup provider=kde-plasma-wayland");
-    if let Err(error) =
-        adapter.configure_input_provider(program.input_provider.as_ref(), program.leader.as_ref())
+    let mut session = RealAdapterCleanupSession::new(adapter);
+    if let Err(error) = session
+        .adapter()
+        .configure_input_provider(program.input_provider.as_ref(), program.leader.as_ref())
     {
-        cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
+        session.cleanup_after_error(ErrorPhase::Registration)?;
         log_guard.log_summary(&log);
         return Err(error);
     }
-    if let Some(summary) = adapter.input_provider_summary() {
+    if let Some(summary) = session.adapter().input_provider_summary() {
         log.debug(format!("event=input_provider_configured {summary}"));
     } else {
         log.debug("event=input_provider_configured provider=none");
@@ -1138,7 +1152,7 @@ pub fn start_live_real_controller_runner_with_options(
             .collect::<Vec<_>>()
             .join(",")
     ));
-    let report = adapter.probe_capabilities(&required);
+    let report = session.adapter().probe_capabilities(&required);
     let mut stats = RuntimeStats::new();
     if let Some(error) = report.first_blocking_error(&required) {
         stats.record_capability_probe_failure();
@@ -1146,7 +1160,7 @@ pub fn start_live_real_controller_runner_with_options(
         log.warn(format!(
             "event=capability_probe result=failed hint=check_permissions error={error}"
         ));
-        cleanup_real_adapter_after_error(adapter, ErrorPhase::CapabilityProbe)?;
+        session.cleanup_after_error(ErrorPhase::CapabilityProbe)?;
         log_guard.log_summary(&log);
         return Err(error);
     }
@@ -1154,8 +1168,8 @@ pub fn start_live_real_controller_runner_with_options(
     log.info("event=capability_probe result=ok");
     if required.contains(CapabilityKind::ActiveProcessMetadata) {
         log.debug("event=active_process_provider_start provider=kwin-script");
-        if let Err(error) = adapter.ensure_active_process_provider() {
-            cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
+        if let Err(error) = session.adapter().ensure_active_process_provider() {
+            session.cleanup_after_error(ErrorPhase::Registration)?;
             log_guard.log_summary(&log);
             return Err(error);
         }
@@ -1166,7 +1180,7 @@ pub fn start_live_real_controller_runner_with_options(
     let hotkey_bindings = controller_hotkey_bindings(&program)?;
     for binding in &hotkey_bindings {
         stats.record_registration_attempt();
-        match adapter.register(binding.clone()) {
+        match session.adapter().register(binding.clone()) {
             Ok(id) => {
                 stats.record_registration_success();
                 log.info(format!(
@@ -1178,7 +1192,7 @@ pub fn start_live_real_controller_runner_with_options(
             }
             Err(error) => {
                 stats.record_registration_failure();
-                cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
+                session.cleanup_after_error(ErrorPhase::Registration)?;
                 return Err(error);
             }
         }
@@ -1186,13 +1200,13 @@ pub fn start_live_real_controller_runner_with_options(
 
     let mut developer_diagnostics =
         DeveloperDiagnosticRuntime::with_trackers(program.state_trackers().clone());
-    developer_diagnostics.register_toggle(adapter, log);
+    developer_diagnostics.register_toggle(session.adapter(), log);
 
     let shutdown_reason =
         match run_live_real_controller_lifecycle(LiveRealControllerLifecycleArgs {
             program: &program,
             runtime: runtime.as_ref(),
-            adapter,
+            adapter: session.adapter(),
             capabilities: &report,
             stats: &mut stats,
             log,
@@ -1202,15 +1216,14 @@ pub fn start_live_real_controller_runner_with_options(
             Ok(reason) => reason,
             Err(error) => {
                 println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
-                cleanup_real_adapter_after_error(adapter, ErrorPhase::Shutdown)?;
+                session.cleanup_after_error(ErrorPhase::Shutdown)?;
                 log_guard.log_summary(&log);
                 return Err(error);
             }
         };
 
     println!("{}", stats.render_summary(shutdown_reason));
-    adapter.cancel_pending()?;
-    adapter.unregister_all()?;
+    session.finish_normal_shutdown()?;
     log.info(format!("event=shutdown reason={shutdown_reason:?}"));
     log_guard.log_summary(&log);
     Ok(stats)
@@ -1266,14 +1279,16 @@ pub fn start_live_real_runner_with_options(
     let required = CapabilitySet::for_configuration_scope(&config, &scope);
     let signal_fd = RuntimeSignalFd::shutdown()?;
     log.info("event=startup provider=kde-plasma-wayland");
-    if let Err(error) =
-        adapter.configure_input_provider(config.input_provider.as_ref(), config.leader.as_ref())
+    let mut session = RealAdapterCleanupSession::new(adapter);
+    if let Err(error) = session
+        .adapter()
+        .configure_input_provider(config.input_provider.as_ref(), config.leader.as_ref())
     {
-        cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
+        session.cleanup_after_error(ErrorPhase::Registration)?;
         log_guard.log_summary(&log);
         return Err(error);
     }
-    if let Some(summary) = adapter.input_provider_summary() {
+    if let Some(summary) = session.adapter().input_provider_summary() {
         log.debug(format!("event=input_provider_configured {summary}"));
     } else {
         log.debug("event=input_provider_configured provider=none");
@@ -1286,14 +1301,14 @@ pub fn start_live_real_runner_with_options(
             .collect::<Vec<_>>()
             .join(",")
     ));
-    let report = adapter.probe_capabilities(&required);
+    let report = session.adapter().probe_capabilities(&required);
     if let Some(error) = report.first_blocking_error(&required) {
         stats.record_capability_probe_failure();
         stats.record_permission_failure();
         log.warn(format!(
             "event=capability_probe result=failed hint=check_permissions error={error}"
         ));
-        cleanup_real_adapter_after_error(adapter, ErrorPhase::CapabilityProbe)?;
+        session.cleanup_after_error(ErrorPhase::CapabilityProbe)?;
         log_guard.log_summary(&log);
         return Err(error);
     }
@@ -1301,8 +1316,8 @@ pub fn start_live_real_runner_with_options(
     log.info("event=capability_probe result=ok");
     if required.contains(CapabilityKind::ActiveProcessMetadata) {
         log.debug("event=active_process_provider_start provider=kwin-script");
-        if let Err(error) = adapter.ensure_active_process_provider() {
-            cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
+        if let Err(error) = session.adapter().ensure_active_process_provider() {
+            session.cleanup_after_error(ErrorPhase::Registration)?;
             log_guard.log_summary(&log);
             return Err(error);
         }
@@ -1312,7 +1327,7 @@ pub fn start_live_real_runner_with_options(
 
     for binding in &bindings {
         stats.record_registration_attempt();
-        match adapter.register(binding.clone()) {
+        match session.adapter().register(binding.clone()) {
             Ok(id) => {
                 stats.record_registration_success();
                 log.info(format!(
@@ -1324,20 +1339,20 @@ pub fn start_live_real_runner_with_options(
             }
             Err(error) => {
                 stats.record_registration_failure();
-                cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
+                session.cleanup_after_error(ErrorPhase::Registration)?;
                 return Err(error);
             }
         }
     }
 
     let mut developer_diagnostics = DeveloperDiagnosticRuntime::default();
-    developer_diagnostics.register_toggle(adapter, log);
+    developer_diagnostics.register_toggle(session.adapter(), log);
 
     let shutdown_reason = match run_live_real_lifecycle(LiveRealLifecycleArgs {
         bindings: &bindings,
         motions: &motions,
         presses: &presses,
-        adapter,
+        adapter: session.adapter(),
         stats: &mut stats,
         log,
         signal_fd,
@@ -1346,15 +1361,14 @@ pub fn start_live_real_runner_with_options(
         Ok(reason) => reason,
         Err(error) => {
             println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
-            cleanup_real_adapter_after_error(adapter, ErrorPhase::Shutdown)?;
+            session.cleanup_after_error(ErrorPhase::Shutdown)?;
             log_guard.log_summary(&log);
             return Err(error);
         }
     };
 
     println!("{}", stats.render_summary(shutdown_reason));
-    adapter.cancel_pending()?;
-    adapter.unregister_all()?;
+    session.finish_normal_shutdown()?;
     log.info(format!("event=shutdown reason={shutdown_reason:?}"));
     log_guard.log_summary(&log);
     Ok(stats)
@@ -2210,17 +2224,6 @@ fn load_imperative_controller_runtime(
     ImperativeLuaController::load_source(&source).map(Some)
 }
 
-struct LiveRealLifecycleArgs<'a> {
-    bindings: &'a [HotkeyBinding],
-    motions: &'a [RuntimeMotion],
-    presses: &'a [RuntimePress],
-    adapter: &'a mut RealWaylandAdapter,
-    stats: &'a mut RuntimeStats,
-    log: RuntimeLog,
-    signal_fd: RuntimeSignalFd,
-    developer_diagnostics: &'a mut DeveloperDiagnosticRuntime,
-}
-
 fn run_live_real_lifecycle(
     args: LiveRealLifecycleArgs<'_>,
 ) -> Result<ShutdownReason, DiagnosableError> {
@@ -2403,17 +2406,6 @@ fn run_live_real_lifecycle(
         }
         macro_queue.drive_ready(adapter, stats)?;
     }
-}
-
-struct LiveRealControllerLifecycleArgs<'a> {
-    program: &'a ControllerProgram,
-    runtime: Option<&'a ImperativeLuaController>,
-    adapter: &'a mut RealWaylandAdapter,
-    capabilities: &'a CapabilityReport,
-    stats: &'a mut RuntimeStats,
-    log: RuntimeLog,
-    signal_fd: RuntimeSignalFd,
-    developer_diagnostics: &'a mut DeveloperDiagnosticRuntime,
 }
 
 fn run_live_real_controller_lifecycle(
@@ -3594,33 +3586,6 @@ impl LiveMacroQueue {
     }
 }
 
-fn next_live_wait_timeout(
-    repeat_ticks: &[(MotionTrigger, u64)],
-    last_repeat_ticks: &std::collections::BTreeMap<MotionTrigger, Instant>,
-    motion_runtime: &MotionRuntime,
-) -> Duration {
-    let mut timeout = idle_wait_timeout();
-    let now = Instant::now();
-    for (trigger, interval_ms) in repeat_ticks {
-        if !motion_runtime.loop_is_active(trigger) {
-            continue;
-        }
-        let due_in = match last_repeat_ticks.get(trigger) {
-            Some(last_tick) => {
-                let interval = Duration::from_millis(*interval_ms);
-                interval.saturating_sub(now.saturating_duration_since(*last_tick))
-            }
-            None => Duration::ZERO,
-        };
-        timeout = timeout.min(due_in);
-    }
-    timeout
-}
-
-fn idle_wait_timeout() -> Duration {
-    Duration::from_secs(300)
-}
-
 struct LiveMotionInputContext<'a> {
     motions: &'a [RuntimeMotion],
     presses: &'a [RuntimePress],
@@ -3852,50 +3817,6 @@ fn motion_input_debug_message(
         motion_input_state_label(observed.event.state),
         observed.source.display()
     )
-}
-
-fn cleanup_after_error(
-    registrar: &mut impl HotkeyRegistrar,
-    phase: ErrorPhase,
-) -> Result<(), DiagnosableError> {
-    registrar.unregister_all().map_err(|error| {
-        DiagnosableError::new(phase, format!("cleanup failed after runner error: {error}"))
-    })
-}
-
-fn cleanup_real_adapter_after_error(
-    adapter: &mut RealWaylandAdapter,
-    phase: ErrorPhase,
-) -> Result<(), DiagnosableError> {
-    tracing::info!(
-        event = "cleanup_after_error",
-        resource = "adapter_sessions",
-        disposition = "started"
-    );
-    let mut first_error = adapter.cancel_pending().err();
-    tracing::info!(
-        event = "cleanup_after_error",
-        resource = "registrations",
-        disposition = "started"
-    );
-    if let Err(error) = adapter.unregister_all() {
-        if first_error.is_none() {
-            first_error = Some(error);
-        }
-    }
-    if let Some(error) = first_error {
-        tracing::warn!(
-            event = "cleanup_after_error",
-            disposition = "failed",
-            error = %error
-        );
-        return Err(DiagnosableError::new(
-            phase,
-            format!("cleanup failed after runner error: {error}"),
-        ));
-    }
-    tracing::info!(event = "cleanup_after_error", disposition = "completed");
-    Ok(())
 }
 
 fn schedule_live_binding(

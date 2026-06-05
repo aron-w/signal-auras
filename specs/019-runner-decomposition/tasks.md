@@ -16,8 +16,8 @@
 ## Phase 2: Foundational
 
 - [X] T003 Add or confirm regression tests for startup failure cleanup, normal shutdown cleanup, callback wakeups, Lua callback budgets, and focus policy decisions in `tests/contract/` and integration tests
-- [ ] T004 Define module skeletons for lifecycle, runtime loop, controller execution, and diagnostics in `crates/signal-auras-cli/src/runner/`
-- [ ] T005 Keep `crates/signal-auras-cli/src/runner.rs` as the compatibility entry point while extracted modules are introduced
+- [X] T004 Define module skeletons for lifecycle, runtime loop, controller execution, and diagnostics in `crates/signal-auras-cli/src/runner/`
+- [X] T005 Keep `crates/signal-auras-cli/src/runner.rs` as the compatibility entry point while extracted modules are introduced
 
 ## Phase 3: User Story 1 - Reuse Lifecycle Inputs Without Long Argument Lists (P1)
 
@@ -25,9 +25,9 @@
 
 **Independent Test**: Startup failure cleanup and normal shutdown cleanup tests pass before and after lifecycle extraction.
 
-- [ ] T006 [P] [US1] Add lifecycle config/session tests in `crates/signal-auras-cli/src/runner/lifecycle.rs`
-- [ ] T007 [US1] Extract lifecycle configuration inputs into `crates/signal-auras-cli/src/runner/lifecycle.rs`
-- [ ] T008 [US1] Extract current-run resource ownership and idempotent cleanup session behavior into `crates/signal-auras-cli/src/runner/lifecycle.rs`
+- [X] T006 [P] [US1] Add lifecycle config/session tests in `crates/signal-auras-cli/src/runner/lifecycle.rs`
+- [X] T007 [US1] Extract lifecycle configuration inputs into `crates/signal-auras-cli/src/runner/lifecycle.rs`
+- [X] T008 [US1] Extract current-run resource ownership and idempotent cleanup session behavior into `crates/signal-auras-cli/src/runner/lifecycle.rs`
 - [X] T009 [US1] Replace clippy-reported live lifecycle function argument lists in `crates/signal-auras-cli/src/runner.rs` with named argument structs
 
 ## Phase 4: User Story 2 - Isolate Runtime Loop Coordination (P2)
@@ -36,7 +36,7 @@
 
 **Independent Test**: Callback, input, repeat, focus pass-through, and shutdown wake tests pass before and after extraction.
 
-- [ ] T010 [P] [US2] Add runtime loop coordinator tests in `crates/signal-auras-cli/src/runner/runtime_loop.rs`
+- [X] T010 [P] [US2] Add runtime loop coordinator tests in `crates/signal-auras-cli/src/runner/runtime_loop.rs`
 - [ ] T011 [US2] Extract input/callback/timer/hotplug/repeat/shutdown coordination into `crates/signal-auras-cli/src/runner/runtime_loop.rs`
 - [ ] T012 [US2] Preserve runtime diagnostics fields while moving loop coordination out of `crates/signal-auras-cli/src/runner.rs`
 
