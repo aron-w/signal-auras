@@ -582,6 +582,13 @@ impl RealWaylandAdapter {
         Ok(())
     }
 
+    pub fn cleanup_overlay(&mut self, overlay_id: &str) -> Result<(), DiagnosableError> {
+        self.overlay_renderer.cleanup(overlay_id.to_string())?;
+        self.overlay_placements.remove(overlay_id);
+        self.overlay_placement_attempts.remove(overlay_id);
+        Ok(())
+    }
+
     pub fn cleanup_overlays(&mut self) -> Result<CleanupReport, DiagnosableError> {
         let report = self.overlay_renderer.cleanup_all()?;
         self.overlay_placements.clear();
@@ -1389,6 +1396,7 @@ mod tests {
             lifecycle: OverlayLifecycleState::Active,
             visuals: vec![VisualSnapshot {
                 visual_id: "heavy_stun".to_string(),
+                shape: signal_auras_core::VisualShape::Rect,
                 rect: OverlayRect {
                     x: 20,
                     y: 30,

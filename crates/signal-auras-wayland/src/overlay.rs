@@ -1,7 +1,8 @@
 use signal_auras_core::{
     CleanupReport, DiagnosableError, ErrorPhase, OverlayDiagnosticReason, OverlayLifecycleState,
     OverlayProviderReport, OverlayProviderStatus, OverlayRect, OverlaySnapshot, RendererProviderId,
-    ScreenPixelFormat, ScreenSample, VisualSnapshot,
+    ScreenPixelFormat, ScreenSample, StateTrackerDefinitionSet, TrackerGhostAuraKind, VisualShape,
+    VisualSnapshot,
 };
 use std::{
     collections::BTreeMap,
@@ -20,6 +21,7 @@ use crate::capability::KdeServiceAvailability;
 const QML_LAUNCHER: &str = "qml";
 const QML_POLL_INTERVAL_MS: u64 = 50;
 pub const OVERLAY_SMOKE_ID: &str = "signal_auras_overlay_smoke";
+pub const TRACKER_GHOST_OVERLAY_ID: &str = "signal_auras_tracker_ghosts";
 const OVERLAY_SMOKE_RECT: OverlayRect = OverlayRect {
     x: 64,
     y: 64,
@@ -724,6 +726,7 @@ pub fn overlay_smoke_snapshot() -> OverlaySnapshot {
         lifecycle: OverlayLifecycleState::Active,
         visuals: vec![VisualSnapshot {
             visual_id: "magenta_probe".to_string(),
+            shape: VisualShape::Rect,
             rect: OVERLAY_SMOKE_RECT,
             opacity: 1.0,
             fill: OVERLAY_SMOKE_FILL.to_string(),
@@ -734,6 +737,51 @@ pub fn overlay_smoke_snapshot() -> OverlaySnapshot {
             ready: false,
         }],
         diagnostic: None,
+    }
+}
+
+pub fn tracker_ghost_overlay_snapshot(trackers: &StateTrackerDefinitionSet) -> OverlaySnapshot {
+    let visuals = signal_auras_core::tracker_ghost_auras(trackers)
+        .into_iter()
+        .map(|aura| {
+            let shape = match aura.kind {
+                TrackerGhostAuraKind::Rect => VisualShape::Rect,
+                TrackerGhostAuraKind::Circle { mark_center } => VisualShape::Circle {
+                    center_dot: mark_center,
+                },
+            };
+            VisualSnapshot {
+                visual_id: format!("ghost_{}", aura.tracker_id),
+                shape,
+                rect: OverlayRect {
+                    x: aura.roi.x,
+                    y: aura.roi.y,
+                    w: aura.roi.w,
+                    h: aura.roi.h,
+                },
+                opacity: 0.32,
+                fill: ghost_fill(aura.kind).to_string(),
+                background: ghost_fill(aura.kind).to_string(),
+                label_visible: false,
+                fill_fraction: 1.0,
+                active: true,
+                ready: false,
+            }
+        })
+        .collect();
+    OverlaySnapshot {
+        overlay_id: TRACKER_GHOST_OVERLAY_ID.to_string(),
+        provider: RendererProviderId::Native,
+        lifecycle: OverlayLifecycleState::Active,
+        visuals,
+        diagnostic: None,
+    }
+}
+
+fn ghost_fill(kind: TrackerGhostAuraKind) -> &'static str {
+    match kind {
+        TrackerGhostAuraKind::Circle { .. } => "#42ff87",
+        TrackerGhostAuraKind::Rect => "#00e5ff",
     }
 }
 
@@ -843,6 +891,7 @@ fn visual_json(visual: &VisualSnapshot, origin_x: u32, origin_y: u32) -> String 
         concat!(
             "{{",
             "\"visual_id\":{},",
+            "\"shape\":{},",
             "\"x\":{},\"y\":{},\"w\":{},\"h\":{},",
             "\"opacity\":{},",
             "\"fill\":{},",
@@ -854,6 +903,7 @@ fn visual_json(visual: &VisualSnapshot, origin_x: u32, origin_y: u32) -> String 
             "}}"
         ),
         json_string(&visual.visual_id),
+        json_string(visual_shape_label(visual.shape)),
         visual.rect.x.saturating_sub(origin_x),
         visual.rect.y.saturating_sub(origin_y),
         visual.rect.w,
@@ -873,15 +923,9 @@ fn visual_qml(visual: &VisualSnapshot, origin_x: u32, origin_y: u32) -> String {
     let y = visual.rect.y.saturating_sub(origin_y);
     let opacity = visual.opacity.clamp(0.0, 1.0);
     let fill_fraction = visual.fill_fraction.clamp(0.0, 1.0);
-    format!(
-        r##"
-    Item {{
-        x: {x}
-        y: {y}
-        width: {w}
-        height: {h}
-        opacity: {opacity}
-
+    let body = match visual.shape {
+        VisualShape::Rect => format!(
+            r##"
         Rectangle {{
             anchors.fill: parent
             color: {background}
@@ -897,6 +941,52 @@ fn visual_qml(visual: &VisualSnapshot, origin_x: u32, origin_y: u32) -> String {
             color: {fill}
             radius: 3
         }}
+"##,
+            background = json_string(&visual.background),
+            fill_fraction = fill_fraction,
+            fill = json_string(&visual.fill),
+        ),
+        VisualShape::Circle { center_dot } => format!(
+            r##"
+        Rectangle {{
+            anchors.fill: parent
+            color: "transparent"
+            border.color: {fill}
+            border.width: Math.max(2, Math.floor(Math.min(parent.width, parent.height) * 0.035))
+            radius: Math.min(parent.width, parent.height) / 2
+        }}
+
+        Rectangle {{
+            anchors.fill: parent
+            color: {fill}
+            radius: Math.min(parent.width, parent.height) / 2
+            opacity: 0.18
+        }}
+
+        Rectangle {{
+            visible: {center_dot}
+            width: Math.max(5, Math.floor(Math.min(parent.width, parent.height) * 0.12))
+            height: width
+            anchors.centerIn: parent
+            radius: width / 2
+            color: "#ff0000"
+            opacity: 0.95
+        }}
+"##,
+            fill = json_string(&visual.fill),
+            center_dot = center_dot,
+        ),
+    };
+    format!(
+        r##"
+    Item {{
+        x: {x}
+        y: {y}
+        width: {w}
+        height: {h}
+        opacity: {opacity}
+
+{body}
 
         Text {{
             anchors.centerIn: parent
@@ -913,9 +1003,7 @@ fn visual_qml(visual: &VisualSnapshot, origin_x: u32, origin_y: u32) -> String {
         w = visual.rect.w,
         h = visual.rect.h,
         opacity = opacity,
-        background = json_string(&visual.background),
-        fill_fraction = fill_fraction,
-        fill = json_string(&visual.fill),
+        body = body,
         label_visible = visual.label_visible,
         label = json_string(if visual.ready {
             "ready"
@@ -923,6 +1011,14 @@ fn visual_qml(visual: &VisualSnapshot, origin_x: u32, origin_y: u32) -> String {
             &visual.visual_id
         }),
     )
+}
+
+#[cfg(test)]
+fn visual_shape_label(shape: VisualShape) -> &'static str {
+    match shape {
+        VisualShape::Rect => "rect",
+        VisualShape::Circle { .. } => "circle",
+    }
 }
 
 fn json_string(value: &str) -> String {
@@ -1083,7 +1179,10 @@ pub(crate) fn available_overlay_environment_for_test() -> KdeEnvironment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use signal_auras_core::{OverlayDiagnostic, OverlayRect};
+    use signal_auras_core::{
+        CapabilityKind, CapabilitySet, DetectorDefinition, OverlayDiagnostic, OverlayRect,
+        ProgressFillDirection, Roi, ScopeSelection, StateTrackerDefinition,
+    };
 
     #[test]
     fn provider_report_uses_renderer_backend_availability() {
@@ -1163,7 +1262,7 @@ mod tests {
         assert!(json.contains("\"w\":160"));
         assert!(json.contains("\"h\":12"));
         assert!(json.contains("\"visual_id\":\"heavy-stun\""));
-        assert!(json.contains("\"visual_id\":\"heavy-stun\",\"x\":0,\"y\":0"));
+        assert!(json.contains("\"visual_id\":\"heavy-stun\",\"shape\":\"rect\",\"x\":0,\"y\":0"));
         assert!(json.contains("\"fill\":\"#6ee7b7\""));
         assert!(json.contains("\"fill_fraction\":0.5"));
         assert!(!json.contains("pixels"));
@@ -1182,6 +1281,46 @@ mod tests {
         assert!(qml.contains("color: \"#6ee7b7\""));
         assert!(!qml.contains("pixels"));
         assert!(!qml.contains("compositor"));
+    }
+
+    #[test]
+    fn tracker_ghost_overlay_uses_transparent_shapes_for_detector_rois() {
+        let trackers = StateTrackerDefinitionSet::new([
+            tracker(
+                "refutation",
+                DetectorDefinition::RadialCooldown {
+                    roi: Roi::new(1540, 1560, 82, 82).unwrap(),
+                    mask: None,
+                },
+            ),
+            tracker(
+                "heavy_stun",
+                DetectorDefinition::HorizontalProgressBar {
+                    roi: Roi::new(312, 1255, 300, 5).unwrap(),
+                    fill_direction: ProgressFillDirection::LeftToRight,
+                },
+            ),
+        ])
+        .unwrap();
+
+        let snapshot = tracker_ghost_overlay_snapshot(&trackers);
+        let qml = overlay_snapshot_qml(&snapshot);
+
+        assert_eq!(snapshot.overlay_id, TRACKER_GHOST_OVERLAY_ID);
+        assert_eq!(snapshot.provider, RendererProviderId::Native);
+        assert_eq!(snapshot.visuals.len(), 2);
+        assert_eq!(
+            snapshot.visuals[0].shape,
+            VisualShape::Circle { center_dot: true }
+        );
+        assert_eq!(snapshot.visuals[0].opacity, 0.32);
+        assert_eq!(snapshot.visuals[0].rect.x, 1540);
+        assert_eq!(snapshot.visuals[1].shape, VisualShape::Rect);
+        assert_eq!(snapshot.visuals[1].rect.w, 300);
+        assert!(qml.contains("color: \"transparent\""));
+        assert!(qml.contains("color: \"#ff0000\""));
+        assert!(qml.contains("visible: true"));
+        assert!(qml.contains("width: parent.width * 1"));
     }
 
     #[test]
@@ -1388,6 +1527,7 @@ mod tests {
             lifecycle: OverlayLifecycleState::Active,
             visuals: vec![VisualSnapshot {
                 visual_id: "heavy-stun".to_string(),
+                shape: VisualShape::Rect,
                 rect: OverlayRect {
                     x: 10,
                     y: 20,
@@ -1404,5 +1544,16 @@ mod tests {
             }],
             diagnostic: None,
         }
+    }
+
+    fn tracker(id: &str, detector: DetectorDefinition) -> StateTrackerDefinition {
+        StateTrackerDefinition::new(
+            id,
+            ScopeSelection::ExplicitGlobal,
+            CapabilitySet::new([CapabilityKind::ScreenRead]),
+            50,
+            detector,
+        )
+        .unwrap()
     }
 }

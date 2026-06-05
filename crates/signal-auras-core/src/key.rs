@@ -251,6 +251,10 @@ const KEY_ALIASES: &[KeyAlias] = &[
         name: "Num1",
         code: 79,
     },
+    KeyAlias {
+        name: "Num2",
+        code: 80,
+    },
 ];
 
 fn parse_key_token(value: &str) -> Option<KeyToken> {

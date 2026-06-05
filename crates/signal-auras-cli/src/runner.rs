@@ -14,8 +14,8 @@ use signal_auras_core::{
     MacroRunPoll, MacroRunState, MacroScheduler, MotionDefinition, MotionDiscardReason,
     MotionInputEvent, MotionInputState, MotionRuntime, MotionRuntimeEvent, MotionToken,
     MotionTrigger, RegistrationState, RuntimeMotion, RuntimePress, RuntimeStats,
-    RustOperationBatch, ScopeSelection, ShutdownReason, StateTrackerPoller,
-    SynthesizedInputRequest, TrackerState,
+    RustOperationBatch, ScopeSelection, ShutdownReason, StateTrackerDefinitionSet,
+    StateTrackerPoller, SynthesizedInputRequest, TrackerState,
 };
 use signal_auras_lua::{
     load_lua_controller_program_file, load_lua_file, ActiveWindowMetadata, ImperativeLuaController,
@@ -1157,7 +1157,8 @@ pub fn start_live_real_controller_runner_with_options(
         }
     }
 
-    let mut developer_diagnostics = DeveloperDiagnosticRuntime::default();
+    let mut developer_diagnostics =
+        DeveloperDiagnosticRuntime::with_trackers(program.state_trackers().clone());
     developer_diagnostics.register_toggle(adapter, log);
 
     let shutdown_reason = match run_live_real_controller_lifecycle(
@@ -2951,11 +2952,21 @@ struct ScopedFocusTracker {
 #[derive(Default)]
 struct DeveloperDiagnosticRuntime {
     state: DeveloperDiagnosticState,
+    trackers: Option<StateTrackerDefinitionSet>,
     toggle_registration: Option<signal_auras_core::RegistrationId>,
     pointer_registration: Option<signal_auras_core::RegistrationId>,
+    ghost_registration: Option<signal_auras_core::RegistrationId>,
+    ghost_visible: bool,
 }
 
 impl DeveloperDiagnosticRuntime {
+    fn with_trackers(trackers: StateTrackerDefinitionSet) -> Self {
+        Self {
+            trackers: Some(trackers),
+            ..Self::default()
+        }
+    }
+
     fn register_toggle(&mut self, adapter: &mut RealWaylandAdapter, log: RuntimeLog) {
         let Ok(hotkey) = DeveloperDiagnosticState::toggle_hotkey() else {
             log.warn("event=developer_diagnostic_registration result=failed reason=invalid_toggle_hotkey");
@@ -2996,8 +3007,11 @@ impl DeveloperDiagnosticRuntime {
                 ));
                 if enabled {
                     self.enable_pointer_shortcut(adapter, log)?;
+                    self.enable_ghost_shortcut(adapter, log)?;
                 } else {
+                    self.hide_tracker_ghosts(adapter, log)?;
                     self.disable_pointer_shortcut(adapter, log)?;
+                    self.disable_ghost_shortcut(adapter, log)?;
                 }
             }
             DeveloperDiagnosticShortcut::PointerUnderMouse => {
@@ -3013,6 +3027,20 @@ impl DeveloperDiagnosticRuntime {
                     Err(error) => log.warn(format!(
                         "event=developer_pointer_diagnostic disposition=failed error={error}"
                     )),
+                }
+            }
+            DeveloperDiagnosticShortcut::TrackerGhostAuras => {
+                if !self.state.tracker_ghost_enabled() {
+                    log.debug(format!(
+                        "event=developer_tracker_ghosts disposition=ignored reason=dev_mode_disabled hotkey={}",
+                        hotkey.as_str()
+                    ));
+                    return Ok(true);
+                }
+                if self.ghost_visible {
+                    self.hide_tracker_ghosts(adapter, log)?;
+                } else {
+                    self.show_tracker_ghosts(adapter, log)?;
                 }
             }
         }
@@ -3061,6 +3089,88 @@ impl DeveloperDiagnosticRuntime {
             report.attempted,
             report.failed
         ));
+        Ok(())
+    }
+
+    fn enable_ghost_shortcut(
+        &mut self,
+        adapter: &mut RealWaylandAdapter,
+        log: RuntimeLog,
+    ) -> Result<(), DiagnosableError> {
+        if self.ghost_registration.is_some() {
+            return Ok(());
+        }
+        let hotkey = DeveloperDiagnosticState::tracker_ghost_hotkey()?;
+        match adapter.register_internal_hotkey(hotkey) {
+            Ok(id) => {
+                log.info(format!(
+                    "event=developer_diagnostic_registration shortcut=tracker_ghosts hotkey={} id={}",
+                    signal_auras_core::TRACKER_GHOST_HOTKEY,
+                    id.as_str()
+                ));
+                self.ghost_registration = Some(id);
+            }
+            Err(error) => {
+                log.warn(format!(
+                    "event=developer_diagnostic_registration shortcut=tracker_ghosts result=failed error={error}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn disable_ghost_shortcut(
+        &mut self,
+        adapter: &mut RealWaylandAdapter,
+        log: RuntimeLog,
+    ) -> Result<(), DiagnosableError> {
+        let Some(id) = self.ghost_registration.take() else {
+            return Ok(());
+        };
+        let report = adapter.unregister_internal_hotkey(&id)?;
+        log.info(format!(
+            "event=developer_diagnostic_unregistration shortcut=tracker_ghosts id={} attempted={} failed={}",
+            id.as_str(),
+            report.attempted,
+            report.failed
+        ));
+        Ok(())
+    }
+
+    fn show_tracker_ghosts(
+        &mut self,
+        adapter: &mut RealWaylandAdapter,
+        log: RuntimeLog,
+    ) -> Result<(), DiagnosableError> {
+        let Some(trackers) = self.trackers.as_ref() else {
+            log.info("event=developer_tracker_ghosts enabled=false reason=no_state_trackers");
+            return Ok(());
+        };
+        if trackers.is_empty() {
+            log.info("event=developer_tracker_ghosts enabled=false reason=no_state_trackers");
+            return Ok(());
+        }
+        let snapshot = signal_auras_wayland::overlay::tracker_ghost_overlay_snapshot(trackers);
+        let count = snapshot.visuals.len();
+        adapter.render_overlay_snapshot(snapshot)?;
+        self.ghost_visible = true;
+        log.info(format!(
+            "event=developer_tracker_ghosts enabled=true visuals={count} opacity=transparent"
+        ));
+        Ok(())
+    }
+
+    fn hide_tracker_ghosts(
+        &mut self,
+        adapter: &mut RealWaylandAdapter,
+        log: RuntimeLog,
+    ) -> Result<(), DiagnosableError> {
+        if !self.ghost_visible {
+            return Ok(());
+        }
+        adapter.cleanup_overlay(signal_auras_wayland::overlay::TRACKER_GHOST_OVERLAY_ID)?;
+        self.ghost_visible = false;
+        log.info("event=developer_tracker_ghosts enabled=false");
         Ok(())
     }
 }

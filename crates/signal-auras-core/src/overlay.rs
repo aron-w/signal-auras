@@ -397,6 +397,7 @@ impl OverlaySnapshot {
 #[derive(Debug, Clone, PartialEq)]
 pub struct VisualSnapshot {
     pub visual_id: String,
+    pub shape: VisualShape,
     pub rect: OverlayRect,
     pub opacity: f32,
     pub fill: String,
@@ -405,6 +406,12 @@ pub struct VisualSnapshot {
     pub fill_fraction: f32,
     pub active: bool,
     pub ready: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisualShape {
+    Rect,
+    Circle { center_dot: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -617,6 +624,7 @@ fn base_visual_snapshot(
 ) -> VisualSnapshot {
     VisualSnapshot {
         visual_id: visual.id.clone(),
+        shape: VisualShape::Rect,
         rect: visual.rect.clone(),
         opacity: visual.opacity,
         fill: visual.fill.clone(),
