@@ -32,6 +32,8 @@ sa.overlay.mount({
       background = "#101820",
       label = { visible = true },
       ready = { fill = "#4ade80", opacity = 0.85 },
+      activated = { fill = "#f97316", background = "#7f1d1d", opacity = 0.85 },
+      active = { fill = "#38bdf8", background = "#082f49", opacity = 0.8 },
       inactive = { opacity = 0.25 },
     },
   },
@@ -59,7 +61,11 @@ sa.overlay.mount({
 - `background`: required color string.
 - `label`: optional table with `visible` boolean.
 - `ready`: optional override style.
+- `activated`: optional override style for radial cooldown progress bars bound to `remaining_ms`.
+- `active`: optional override style for radial cooldown progress bars bound to `remaining_ms`.
 - `inactive`: optional override style.
+
+Override styles accept optional `fill`, `background`, `opacity`, and `label_visible` or `visible` fields. `activated` and `active` styles are presentation-only and are rejected on non-radial progress-bar bindings.
 
 ## Validation Errors
 

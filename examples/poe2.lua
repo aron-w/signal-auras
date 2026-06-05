@@ -54,8 +54,6 @@ sa.state.track({
         max_luminance_percent = 12,
         max_saturation = 20,
         progress_fill = "empty",
-        fill = "#f97316",
-        background = "#7f1d1d",
       },
 
       active = {
@@ -130,6 +128,8 @@ sa.overlay.mount({
       background = "#101820",
       label = { visible = true },
       ready = { fill = "#4ade80", opacity = 0.85 },
+      activated = { fill = "#f97316", background = "#7f1d1d", opacity = 0.85 },
+      active = { fill = "#38bdf8", background = "#082f49", opacity = 0.8 },
       inactive = { opacity = 0.25 },
     },
   },

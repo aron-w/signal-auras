@@ -206,9 +206,6 @@ impl RadialCooldownPhases {
                     metric_scale: None,
                     progress_fill: RadialProgressFill::Full,
                     max_fill_until_ready: None,
-                    fill: None,
-                    background: None,
-                    opacity: None,
                 },
                 RadialPhaseRule {
                     phase: RadialCooldownPhase::Activated,
@@ -226,9 +223,6 @@ impl RadialCooldownPhases {
                     metric_scale: None,
                     progress_fill: RadialProgressFill::Empty,
                     max_fill_until_ready: None,
-                    fill: Some("#f97316".to_string()),
-                    background: Some("#7f1d1d".to_string()),
-                    opacity: None,
                 },
                 RadialPhaseRule {
                     phase: RadialCooldownPhase::Active,
@@ -246,9 +240,6 @@ impl RadialCooldownPhases {
                     metric_scale: None,
                     progress_fill: RadialProgressFill::Empty,
                     max_fill_until_ready: None,
-                    fill: None,
-                    background: None,
-                    opacity: None,
                 },
                 RadialPhaseRule {
                     phase: RadialCooldownPhase::Recovering,
@@ -266,9 +257,6 @@ impl RadialCooldownPhases {
                     metric_scale: Some(1.5),
                     progress_fill: RadialProgressFill::Fraction,
                     max_fill_until_ready: Some(0.95),
-                    fill: None,
-                    background: None,
-                    opacity: None,
                 },
             ],
             RadialCooldownPhase::Unknown,
@@ -337,9 +325,6 @@ pub struct RadialPhaseRule {
     pub metric_scale: Option<f32>,
     pub progress_fill: RadialProgressFill,
     pub max_fill_until_ready: Option<f32>,
-    pub fill: Option<String>,
-    pub background: Option<String>,
-    pub opacity: Option<f32>,
 }
 
 impl RadialPhaseRule {
@@ -361,14 +346,6 @@ impl RadialPhaseRule {
         }
         if let Some(value) = self.max_saturation {
             validate_saturation_threshold(value)?;
-        }
-        if let Some(opacity) = self.opacity {
-            if !(0.0..=1.0).contains(&opacity) {
-                return Err(DiagnosableError::new(
-                    ErrorPhase::ScriptValidation,
-                    "radial_cooldown phase opacity must be between 0 and 1",
-                ));
-            }
         }
         if let Some(scale) = self.metric_scale {
             if !scale.is_finite() || scale <= 0.0 {
@@ -1768,9 +1745,6 @@ mod tests {
                         metric_scale: None,
                         progress_fill: RadialProgressFill::Full,
                         max_fill_until_ready: None,
-                        fill: None,
-                        background: None,
-                        opacity: None,
                     },
                     RadialPhaseRule {
                         phase: RadialCooldownPhase::Activated,
@@ -1783,9 +1757,6 @@ mod tests {
                         metric_scale: None,
                         progress_fill: RadialProgressFill::Empty,
                         max_fill_until_ready: None,
-                        fill: None,
-                        background: None,
-                        opacity: None,
                     },
                     RadialPhaseRule {
                         phase: RadialCooldownPhase::Active,
@@ -1798,9 +1769,6 @@ mod tests {
                         metric_scale: None,
                         progress_fill: RadialProgressFill::Empty,
                         max_fill_until_ready: None,
-                        fill: None,
-                        background: None,
-                        opacity: None,
                     },
                 ],
                 RadialCooldownPhase::Unknown,
