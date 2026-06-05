@@ -22,4 +22,6 @@ For the overlay render providers follow-up, also read
 `specs/018-overlay-render-providers/plan.md`.
 For the runner architecture decomposition follow-up, also read
 `specs/019-runner-decomposition/plan.md`.
+For the Lua callback preemption follow-up, also read
+`specs/020-lua-callback-preemption/plan.md`.
 <!-- SPECKIT END -->
