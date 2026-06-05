@@ -287,6 +287,12 @@ fn install_sa_api(
         .map_err(lua_error)?,
     )
     .map_err(lua_error)?;
+    sa.set(
+        "import",
+        lua.create_function(|_, _module: String| Ok(()))
+            .map_err(lua_error)?,
+    )
+    .map_err(lua_error)?;
 
     let input = lua.create_table().map_err(lua_error)?;
     sa.set("input", input).map_err(lua_error)?;

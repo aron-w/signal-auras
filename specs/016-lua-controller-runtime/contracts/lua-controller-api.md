@@ -12,6 +12,12 @@
 
 `load_lua_controller_source(source)` MUST parse a single in-memory controller source and apply the same ambient API denial rules, except filesystem import resolution is unavailable.
 
+`load_lua_controller_runtime_source_file(path)` MUST resolve the same rooted
+`sa.import("module")` source tree as `load_lua_controller_program_file(path)` and
+return the combined source used by the imperative runtime. Runtime loading MUST
+therefore see callbacks defined in imported modules, including callbacks that use
+host-yielding APIs such as `sa.sleep` and `sa.window.*`.
+
 ## Registration Surface
 
 The controller loader recognizes startup registrations:
@@ -76,3 +82,7 @@ startup validation. Callback bodies MUST NOT be executed during load; loader-sid
 callback validation therefore keeps a bounded denied-token fallback for ambient API
 references, while runtime execution still denies the same globals through the
 structured Lua environment.
+
+The imperative runtime MUST tolerate original `sa.import(...)` statements that
+remain in resolved combined source. The runtime import function is a no-op;
+import resolution is owned by the rooted loader, not by runtime Lua execution.

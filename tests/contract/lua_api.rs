@@ -3,9 +3,9 @@ use signal_auras_core::{
     RendererProviderId, StateField,
 };
 use signal_auras_lua::{
-    load_lua_controller_program_file, load_lua_controller_program_source, load_lua_file,
-    load_lua_source, ActiveWindowMetadata, ImperativeLuaController, LuaCallbackStep,
-    LuaHostRequest, LuaHostResponse, LuaLogLevel,
+    load_lua_controller_program_file, load_lua_controller_program_source,
+    load_lua_controller_runtime_source_file, load_lua_file, load_lua_source, ActiveWindowMetadata,
+    ImperativeLuaController, LuaCallbackStep, LuaHostRequest, LuaHostResponse, LuaLogLevel,
 };
 use std::{fs, path::Path};
 
@@ -1068,6 +1068,51 @@ fn imperative_lua_denies_ambient_runtime_apis() {
 }
 
 #[test]
+fn imperative_lua_loads_resolved_imported_callbacks_with_runtime_import_noop() {
+    let root = temp_lua_dir("runtime-source-tree");
+    fs::write(
+        root.join("helper.lua"),
+        r#"
+        sa.callback("imported_sleep", function()
+          sa.sleep(25)
+        end)
+        "#,
+    )
+    .unwrap();
+    let main = root.join("main.lua");
+    fs::write(
+        &main,
+        r#"
+        sa.import("helper")
+        sa.hotkey({
+          trigger = "F5",
+          capabilities = { "global_shortcut", "timer" },
+          callback = "imported_sleep",
+        })
+        "#,
+    )
+    .unwrap();
+
+    let source = load_lua_controller_runtime_source_file(&main).unwrap();
+    assert!(source.contains(r#"sa.callback("imported_sleep""#));
+    assert!(source.contains(r#"sa.import("helper")"#));
+
+    let runtime = ImperativeLuaController::load_source(&source).unwrap();
+    let run = runtime.start_callback("imported_sleep").unwrap();
+
+    assert_eq!(
+        runtime
+            .resume_callback(
+                &run,
+                LuaHostResponse::Unit,
+                &CapabilitySet::new([CapabilityKind::Timer])
+            )
+            .unwrap(),
+        LuaCallbackStep::Yielded(LuaHostRequest::Sleep { duration_ms: 25 })
+    );
+}
+
+#[test]
 fn imperative_lua_requires_registered_callbacks_to_be_defined() {
     let error = match ImperativeLuaController::load_source(
         r#"
@@ -1083,4 +1128,23 @@ fn imperative_lua_requires_registered_callbacks_to_be_defined() {
     };
 
     assert!(error.message.contains("registered but not defined"));
+}
+
+fn temp_lua_dir(label: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_DIR_ID: AtomicU64 = AtomicU64::new(0);
+    let mut path = std::env::temp_dir();
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let sequence = NEXT_DIR_ID.fetch_add(1, Ordering::SeqCst);
+    path.push(format!(
+        "signal-auras-lua-api-{label}-{}-{unique}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir(&path).unwrap();
+    path
 }

@@ -109,12 +109,25 @@
 - [X] T038 [US4] Route controller loader validation through structured `mlua` execution with no-op registration/import APIs in `crates/signal-auras-lua/src/sandbox.rs`
 - [X] T039 [US4] Keep declarative `load_lua_source` ambient API denial on the shared compatibility token list in `crates/signal-auras-lua/src/sandbox.rs`
 
+## Phase 11: Architecture Review Follow-Up - Runtime Source-Tree Parity
+
+**Goal**: Imperative controller runtime activation loads the same rooted `sa.import` source tree as registration/program validation.
+
+**Independent Test**: A main controller imports a module that defines an imperative callback using `sa.sleep`; the runtime source-tree helper includes the callback, `ImperativeLuaController::load_source` accepts the resolved source with the original `sa.import` call still present, and the CLI runner schedules/resumes the imported callback.
+
+- [X] T040 [P] [US2] Add Lua runtime source-tree helper test in `tests/contract/lua_api.rs`
+- [X] T041 [P] [US2] Add CLI runner multi-file imported imperative callback test in `tests/contract/cli_runner.rs`
+- [X] T042 [US2] Export a narrow rooted controller runtime source-tree helper from `crates/signal-auras-lua/src/sandbox.rs` and `crates/signal-auras-lua/src/lib.rs`
+- [X] T043 [US2] Route `load_imperative_controller_runtime` in `crates/signal-auras-cli/src/runner.rs` through the resolved controller source tree
+- [X] T044 [US2] Install a no-op `sa.import` in `ImperativeLuaController` runtime setup in `crates/signal-auras-lua/src/runtime.rs`
+
 ## Dependencies & Execution Order
 
 - Setup and foundational artifacts precede implementation.
 - US1 registration contracts are required before US2 scheduler and US3 output integration.
 - US4 compatibility must remain true throughout all edits.
 - Phase 10 depends on completed controller and imperative runtime APIs from Phases 7-9.
+- Phase 11 depends on completed source-tree import loading and imperative runtime APIs from Phases 7-10.
 - Verification tasks run after formatting and implementation.
 
 ## Parallel Opportunities

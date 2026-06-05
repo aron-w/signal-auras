@@ -6,7 +6,7 @@
 
 ## Summary
 
-Introduce Lua as a controller surface while preserving Rust as the trusted automation core. This increment defines standalone Rust contracts for controller registration validation, bounded Lua callback scheduling, Rust-backed output batching, and capability enforcement, adds an embedded Lua 5.4 coroutine runtime for imperative callbacks, represents `sa.sleep` as scheduled continuation work, wires the live controller runner to Rust-owned window, timer, logging, and synthesized-input host APIs, and unifies controller/runtime sandbox denied globals without changing the existing declarative Lua configuration loader.
+Introduce Lua as a controller surface while preserving Rust as the trusted automation core. This increment defines standalone Rust contracts for controller registration validation, bounded Lua callback scheduling, Rust-backed output batching, and capability enforcement, adds an embedded Lua 5.4 coroutine runtime for imperative callbacks, represents `sa.sleep` as scheduled continuation work, wires the live controller runner to Rust-owned window, timer, logging, and synthesized-input host APIs, unifies controller/runtime sandbox denied globals without changing the existing declarative Lua configuration loader, and makes imperative runtime activation consume the same rooted controller source tree as registration/program validation.
 
 ## Technical Context
 
@@ -26,7 +26,7 @@ Introduce Lua as a controller surface while preserving Rust as the trusted autom
 
 **Constraints**: Preserve existing declarative Lua API, fail closed on denied or unprobed capabilities, keep all OS-facing work in Rust adapters, deny ambient Lua filesystem/shell/network/debug/package access through one shared policy, avoid hidden global behavior, and do not introduce a daemon, async runtime, persistent state, or ambient dynamic registration.
 
-**Scale/Scope**: One terminal-started runner process, one main controller script plus local modules rooted at that script directory, current-run registrations, bounded callback queue, bounded output batch, embedded Lua callbacks, KWin-backed active-window lookup/activation on KDE Plasma Wayland, and the existing Wayland adapter capability model.
+**Scale/Scope**: One terminal-started runner process, one main controller script plus local modules rooted at that script directory, current-run registrations, bounded callback queue, bounded output batch, embedded Lua callbacks loaded from the resolved source tree, KWin-backed active-window lookup/activation on KDE Plasma Wayland, and the existing Wayland adapter capability model.
 
 ## Constitution Check
 
@@ -87,7 +87,7 @@ tests/contract/
 └── rust_library.rs
 ```
 
-**Structure Decision**: Keep trusted controller semantics in `signal-auras-core::controller`; keep restricted source/module loading and static compatibility parsing in `signal-auras-lua::sandbox`; keep the shared denied-global policy in `signal-auras-lua::sandbox_policy`; keep embedded coroutine execution in `signal-auras-lua::runtime`; keep all OS-facing sleep, window, logging, and input effects in the CLI runner and Wayland adapter.
+**Structure Decision**: Keep trusted controller semantics in `signal-auras-core::controller`; keep restricted source/module loading, runtime source-tree resolution, and static compatibility parsing in `signal-auras-lua::sandbox`; keep the shared denied-global policy in `signal-auras-lua::sandbox_policy`; keep embedded coroutine execution in `signal-auras-lua::runtime`; keep all OS-facing sleep, window, logging, and input effects in the CLI runner and Wayland adapter.
 
 ## Complexity Tracking
 

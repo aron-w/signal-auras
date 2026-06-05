@@ -89,19 +89,21 @@ pub fn load_lua_source(source: &str) -> Result<LuaAutomationConfiguration, Diagn
 pub fn load_lua_controller_file(
     path: &Path,
 ) -> Result<ControllerRegistrationSet, DiagnosableError> {
-    let root = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut visited = BTreeSet::new();
-    let source = load_controller_source_tree(path, root, &mut visited)?;
+    let source = load_controller_source_tree_file(path)?;
     load_lua_controller_source(&source)
 }
 
 pub fn load_lua_controller_program_file(
     path: &Path,
 ) -> Result<ControllerProgram, DiagnosableError> {
-    let root = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut visited = BTreeSet::new();
-    let source = load_controller_source_tree(path, root, &mut visited)?;
+    let source = load_controller_source_tree_file(path)?;
     load_lua_controller_program_source(&source)
+}
+
+pub fn load_lua_controller_runtime_source_file(path: &Path) -> Result<String, DiagnosableError> {
+    let source = load_controller_source_tree_file(path)?;
+    load_lua_controller_program_source(&source)?;
+    Ok(source)
 }
 
 pub fn load_lua_controller_source(
@@ -976,6 +978,12 @@ fn load_controller_source_tree(
     }
     combined.push_str(&source);
     Ok(combined)
+}
+
+fn load_controller_source_tree_file(path: &Path) -> Result<String, DiagnosableError> {
+    let root = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut visited = BTreeSet::new();
+    load_controller_source_tree(path, root, &mut visited)
 }
 
 fn controller_imports(source: &str) -> Vec<&str> {

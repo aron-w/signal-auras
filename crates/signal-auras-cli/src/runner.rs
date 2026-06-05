@@ -31,7 +31,8 @@ use signal_auras_core::{
     StateTrackerDefinitionSet, StateTrackerPoller, SynthesizedInputRequest, TrackerState,
 };
 use signal_auras_lua::{
-    load_lua_controller_program_file, load_lua_file, ActiveWindowMetadata, ImperativeLuaController,
+    load_lua_controller_program_file, load_lua_controller_runtime_source_file, load_lua_file,
+    ActiveWindowMetadata, ImperativeLuaController,
 };
 use signal_auras_wayland::{
     evdev::{EvdevInputWaitOutcome, EvdevObservationProvider, KernelEventTimestamp},
@@ -1879,15 +1880,7 @@ where
 fn load_imperative_controller_runtime(
     lua_file: &Path,
 ) -> Result<Option<ImperativeLuaController>, DiagnosableError> {
-    let source = fs::read_to_string(lua_file).map_err(|error| {
-        DiagnosableError::new(
-            ErrorPhase::ScriptLoad,
-            format!(
-                "cannot read Lua controller file '{}': {error}",
-                lua_file.display()
-            ),
-        )
-    })?;
+    let source = load_lua_controller_runtime_source_file(lua_file)?;
     if !(source.contains("sa.sleep") || source.contains("sa.window.")) {
         return Ok(None);
     }

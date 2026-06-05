@@ -739,6 +739,68 @@ fn controller_runner_sleep_yields_without_blocking_host_sleep() {
 }
 
 #[test]
+fn controller_runner_executes_imported_imperative_callback_from_source_tree() {
+    let root = temp_lua_dir("imported-imperative-callback");
+    std::fs::write(
+        root.join("helper.lua"),
+        r#"
+        sa.callback("delayed_import", function()
+          sa.sleep(100)
+          sa.input.text("from import")
+        end)
+        "#,
+    )
+    .unwrap();
+    let lua_file = root.join("main.lua");
+    std::fs::write(
+        &lua_file,
+        r#"
+        sa.import("helper")
+        sa.hotkey({
+          trigger = "F5",
+          capabilities = { "global_shortcut", "timer", "synthesized_input" },
+          callback = "delayed_import",
+        })
+        "#,
+    )
+    .unwrap();
+    let mut registrar = RecordingRegistrar::default();
+    let active = StaticActive(None);
+    let mut executor = CountingExecutor::default();
+    let mut lifecycle = ScriptedLifecycle::new(vec![
+        RunnerEvent::Callback {
+            hotkey: signal_auras_core::HotkeyId::parse("F5").unwrap(),
+            received_at: Instant::now(),
+        },
+        RunnerEvent::TimerElapsed,
+        RunnerEvent::Shutdown(ShutdownReason::CtrlC),
+    ]);
+    let required = CapabilitySet::new([
+        CapabilityKind::GlobalShortcut,
+        CapabilityKind::Timer,
+        CapabilityKind::SynthesizedInput,
+    ]);
+
+    let stats = start_controller_runner_with_lifecycle(
+        &lua_file,
+        &mut registrar,
+        &active,
+        &mut executor,
+        &mut lifecycle,
+        available_capability_report(&required, "test"),
+    )
+    .unwrap();
+
+    assert_eq!(executor.sleep_calls, 0);
+    assert_eq!(
+        executor.emitted,
+        vec![MacroAction::text("from import").unwrap()]
+    );
+    assert_eq!(stats.synthesized_input_emitted_count, 1);
+    assert_eq!(stats.cancelled_macro_run_count, 0);
+}
+
+#[test]
 fn controller_runner_fails_before_registration_when_output_capability_denied() {
     let lua_file = write_lua(
         r#"
@@ -948,5 +1010,21 @@ fn write_lua(source: &str) -> PathBuf {
         std::process::id()
     ));
     std::fs::write(&path, source).unwrap();
+    path
+}
+
+fn temp_lua_dir(label: &str) -> PathBuf {
+    static NEXT_DIR_ID: AtomicU64 = AtomicU64::new(0);
+    let mut path = std::env::temp_dir();
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let sequence = NEXT_DIR_ID.fetch_add(1, Ordering::SeqCst);
+    path.push(format!(
+        "signal-auras-cli-runner-{label}-{}-{unique}-{sequence}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&path).unwrap();
     path
 }
