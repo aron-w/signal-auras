@@ -86,6 +86,7 @@ An operator debugging process-aware automation needs clear info-level logs when 
 - **FR-014**: System MUST preserve explicit current-run process inspection, input observation, input prevention, macro execution, and synthesized input consent boundaries.
 - **FR-015**: System MUST fail closed with diagnosable feedback when the selected compositor or input provider cannot guarantee no processing and no prevention while inactive.
 - **FR-016**: System MUST include automated coverage for non-matching pass-through, inactive no-processing, active resumption, inactive cancellation, stale/unavailable inactive behavior, and info-level transition logs.
+- **FR-017**: Scoped pass-through decisions MUST share the same core-owned focus freshness policy as hotkey, press, motion, macro, and repeat decisions.
 
 ### Key Entities
 
@@ -107,6 +108,7 @@ An operator debugging process-aware automation needs clear info-level logs when 
 - **SC-007**: Privacy checks confirm transition logs do not include command-line arguments, window titles, text payloads, or unrelated process data.
 - **SC-008**: Existing Lua scripts and examples using `scope.processes`, hotkeys, and motions continue to load without migration.
 - **SC-009**: Feature verification passes with documented Nix commands or records unavailable Nix checks with the exact failure.
+- **SC-010**: Regression tests show stale scoped press/motion decisions deny at the same 2-second default threshold used by core focus matching.
 
 ## Assumptions
 

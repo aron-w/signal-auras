@@ -101,6 +101,15 @@
 - [X] T025 Run `nix develop -c cargo test`
 - [X] T026 Run `nix flake check`
 
+## Phase 7: Architecture Review Follow-Up - Shared Freshness Policy
+
+**Goal**: Scoped focus pass-through uses the same core freshness threshold as all other focus-gated runtime paths.
+
+**Independent Test**: Runner stale-motion regression coverage proves scoped press/motion decisions deny beyond the core 2-second threshold and no longer use a CLI-local 30-second window.
+
+- [X] T027 [P] [US2] Add shared freshness policy regression coverage in `crates/signal-auras-cli/src/runner.rs`
+- [X] T028 [US2] Route scoped focus tracker, live press, motion trigger, and repeat decisions through the core policy path in `crates/signal-auras-cli/src/runner.rs`
+
 ---
 
 ## Dependencies & Execution Order

@@ -27,7 +27,7 @@ use signal_auras_wayland::{
     RealWaylandAdapter,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{self, OpenOptions},
     io,
     path::{Path, PathBuf},
@@ -36,7 +36,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MOTION_FOCUS_STALE_THRESHOLD: Duration = Duration::from_secs(30);
+fn runtime_focus_policy() -> FocusFreshnessPolicy {
+    FocusFreshnessPolicy::default()
+}
 
 pub trait ControllerHost: MacroExecutor {
     fn sleep(&mut self, duration: Duration) -> Result<(), DiagnosableError> {
@@ -931,7 +933,12 @@ where
     let presses = config.presses_for_scope(scope.clone());
     let required = CapabilitySet::for_configuration_scope(&config, &scope);
     log.info("event=startup provider=kde-plasma-wayland");
-    adapter.configure_input_provider(config.input_provider.as_ref(), config.leader.as_ref())?;
+    if let Err(error) =
+        adapter.configure_input_provider(config.input_provider.as_ref(), config.leader.as_ref())
+    {
+        cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
+        return Err(error);
+    }
     let report = adapter.probe_capabilities(&required);
     if let Some(error) = report.first_blocking_error(&required) {
         stats.record_capability_probe_failure();
@@ -939,6 +946,7 @@ where
         log.warn(format!(
             "event=capability_probe result=failed hint=check_permissions error={error}"
         ));
+        cleanup_real_adapter_after_error(adapter, ErrorPhase::CapabilityProbe)?;
         return Err(error);
     }
     stats.record_capability_probe_success();
@@ -958,7 +966,7 @@ where
             }
             Err(error) => {
                 stats.record_registration_failure();
-                cleanup_after_error(adapter, ErrorPhase::Registration)?;
+                cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
                 return Err(error);
             }
         }
@@ -977,7 +985,7 @@ where
         Ok(reason) => reason,
         Err(error) => {
             println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
-            cleanup_after_error(adapter, ErrorPhase::Shutdown)?;
+            cleanup_real_adapter_after_error(adapter, ErrorPhase::Shutdown)?;
             return Err(error);
         }
     };
@@ -1010,7 +1018,12 @@ where
     ));
     let required = program.required_capabilities().clone();
     log.info("event=startup provider=kde-plasma-wayland");
-    adapter.configure_input_provider(program.input_provider.as_ref(), program.leader.as_ref())?;
+    if let Err(error) =
+        adapter.configure_input_provider(program.input_provider.as_ref(), program.leader.as_ref())
+    {
+        cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
+        return Err(error);
+    }
     let report = adapter.probe_capabilities(&required);
     let mut stats = RuntimeStats::new();
     if let Some(error) = report.first_blocking_error(&required) {
@@ -1019,12 +1032,16 @@ where
         log.warn(format!(
             "event=capability_probe result=failed hint=check_permissions error={error}"
         ));
+        cleanup_real_adapter_after_error(adapter, ErrorPhase::CapabilityProbe)?;
         return Err(error);
     }
     stats.record_capability_probe_success();
     log.info("event=capability_probe result=ok");
     if required.contains(CapabilityKind::ActiveProcessMetadata) {
-        adapter.ensure_active_process_provider()?;
+        if let Err(error) = adapter.ensure_active_process_provider() {
+            cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
+            return Err(error);
+        }
         stats.record_kde_bridge_setup();
     }
 
@@ -1043,7 +1060,7 @@ where
             }
             Err(error) => {
                 stats.record_registration_failure();
-                cleanup_after_error(adapter, ErrorPhase::Registration)?;
+                cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
                 return Err(error);
             }
         }
@@ -1062,8 +1079,7 @@ where
         Ok(reason) => reason,
         Err(error) => {
             println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
-            adapter.cancel_pending()?;
-            cleanup_after_error(adapter, ErrorPhase::Shutdown)?;
+            cleanup_real_adapter_after_error(adapter, ErrorPhase::Shutdown)?;
             return Err(error);
         }
     };
@@ -1102,7 +1118,13 @@ pub fn start_live_real_controller_runner_with_options(
     let required = program.required_capabilities().clone();
     let signal_fd = RuntimeSignalFd::shutdown()?;
     log.info("event=startup provider=kde-plasma-wayland");
-    adapter.configure_input_provider(program.input_provider.as_ref(), program.leader.as_ref())?;
+    if let Err(error) =
+        adapter.configure_input_provider(program.input_provider.as_ref(), program.leader.as_ref())
+    {
+        cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
+        log_guard.log_summary(&log);
+        return Err(error);
+    }
     if let Some(summary) = adapter.input_provider_summary() {
         log.debug(format!("event=input_provider_configured {summary}"));
     } else {
@@ -1124,6 +1146,7 @@ pub fn start_live_real_controller_runner_with_options(
         log.warn(format!(
             "event=capability_probe result=failed hint=check_permissions error={error}"
         ));
+        cleanup_real_adapter_after_error(adapter, ErrorPhase::CapabilityProbe)?;
         log_guard.log_summary(&log);
         return Err(error);
     }
@@ -1131,7 +1154,11 @@ pub fn start_live_real_controller_runner_with_options(
     log.info("event=capability_probe result=ok");
     if required.contains(CapabilityKind::ActiveProcessMetadata) {
         log.debug("event=active_process_provider_start provider=kwin-script");
-        adapter.ensure_active_process_provider()?;
+        if let Err(error) = adapter.ensure_active_process_provider() {
+            cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
+            log_guard.log_summary(&log);
+            return Err(error);
+        }
         stats.record_kde_bridge_setup();
         log.debug("event=active_process_provider_ready provider=kwin-script");
     }
@@ -1151,7 +1178,7 @@ pub fn start_live_real_controller_runner_with_options(
             }
             Err(error) => {
                 stats.record_registration_failure();
-                cleanup_after_error(adapter, ErrorPhase::Registration)?;
+                cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
                 return Err(error);
             }
         }
@@ -1161,25 +1188,25 @@ pub fn start_live_real_controller_runner_with_options(
         DeveloperDiagnosticRuntime::with_trackers(program.state_trackers().clone());
     developer_diagnostics.register_toggle(adapter, log);
 
-    let shutdown_reason = match run_live_real_controller_lifecycle(
-        &program,
-        runtime.as_ref(),
-        adapter,
-        &report,
-        &mut stats,
-        log,
-        signal_fd,
-        &mut developer_diagnostics,
-    ) {
-        Ok(reason) => reason,
-        Err(error) => {
-            println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
-            adapter.cancel_pending()?;
-            cleanup_after_error(adapter, ErrorPhase::Shutdown)?;
-            log_guard.log_summary(&log);
-            return Err(error);
-        }
-    };
+    let shutdown_reason =
+        match run_live_real_controller_lifecycle(LiveRealControllerLifecycleArgs {
+            program: &program,
+            runtime: runtime.as_ref(),
+            adapter,
+            capabilities: &report,
+            stats: &mut stats,
+            log,
+            signal_fd,
+            developer_diagnostics: &mut developer_diagnostics,
+        }) {
+            Ok(reason) => reason,
+            Err(error) => {
+                println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
+                cleanup_real_adapter_after_error(adapter, ErrorPhase::Shutdown)?;
+                log_guard.log_summary(&log);
+                return Err(error);
+            }
+        };
 
     println!("{}", stats.render_summary(shutdown_reason));
     adapter.cancel_pending()?;
@@ -1239,7 +1266,13 @@ pub fn start_live_real_runner_with_options(
     let required = CapabilitySet::for_configuration_scope(&config, &scope);
     let signal_fd = RuntimeSignalFd::shutdown()?;
     log.info("event=startup provider=kde-plasma-wayland");
-    adapter.configure_input_provider(config.input_provider.as_ref(), config.leader.as_ref())?;
+    if let Err(error) =
+        adapter.configure_input_provider(config.input_provider.as_ref(), config.leader.as_ref())
+    {
+        cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
+        log_guard.log_summary(&log);
+        return Err(error);
+    }
     if let Some(summary) = adapter.input_provider_summary() {
         log.debug(format!("event=input_provider_configured {summary}"));
     } else {
@@ -1260,6 +1293,7 @@ pub fn start_live_real_runner_with_options(
         log.warn(format!(
             "event=capability_probe result=failed hint=check_permissions error={error}"
         ));
+        cleanup_real_adapter_after_error(adapter, ErrorPhase::CapabilityProbe)?;
         log_guard.log_summary(&log);
         return Err(error);
     }
@@ -1267,7 +1301,11 @@ pub fn start_live_real_runner_with_options(
     log.info("event=capability_probe result=ok");
     if required.contains(CapabilityKind::ActiveProcessMetadata) {
         log.debug("event=active_process_provider_start provider=kwin-script");
-        adapter.ensure_active_process_provider()?;
+        if let Err(error) = adapter.ensure_active_process_provider() {
+            cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
+            log_guard.log_summary(&log);
+            return Err(error);
+        }
         stats.record_kde_bridge_setup();
         log.debug("event=active_process_provider_ready provider=kwin-script");
     }
@@ -1286,7 +1324,7 @@ pub fn start_live_real_runner_with_options(
             }
             Err(error) => {
                 stats.record_registration_failure();
-                cleanup_after_error(adapter, ErrorPhase::Registration)?;
+                cleanup_real_adapter_after_error(adapter, ErrorPhase::Registration)?;
                 return Err(error);
             }
         }
@@ -1295,21 +1333,20 @@ pub fn start_live_real_runner_with_options(
     let mut developer_diagnostics = DeveloperDiagnosticRuntime::default();
     developer_diagnostics.register_toggle(adapter, log);
 
-    let shutdown_reason = match run_live_real_lifecycle(
-        &bindings,
-        &motions,
-        &presses,
+    let shutdown_reason = match run_live_real_lifecycle(LiveRealLifecycleArgs {
+        bindings: &bindings,
+        motions: &motions,
+        presses: &presses,
         adapter,
-        &mut stats,
+        stats: &mut stats,
         log,
         signal_fd,
-        &mut developer_diagnostics,
-    ) {
+        developer_diagnostics: &mut developer_diagnostics,
+    }) {
         Ok(reason) => reason,
         Err(error) => {
             println!("{}", stats.render_summary(ShutdownReason::RuntimeError));
-            adapter.cancel_pending()?;
-            cleanup_after_error(adapter, ErrorPhase::Shutdown)?;
+            cleanup_real_adapter_after_error(adapter, ErrorPhase::Shutdown)?;
             log_guard.log_summary(&log);
             return Err(error);
         }
@@ -1381,6 +1418,7 @@ pub enum RunnerEvent {
         observed_at: Instant,
     },
     MotionRepeatTick(MotionTrigger),
+    TimerElapsed,
     Shutdown(ShutdownReason),
     RuntimeError(DiagnosableError),
 }
@@ -1598,6 +1636,7 @@ where
                 return Ok(reason);
             }
             RunnerEvent::RuntimeError(error) => return Err(error),
+            RunnerEvent::TimerElapsed => {}
         }
     }
 }
@@ -1641,8 +1680,9 @@ where
     L: RunnerLifecycle,
 {
     let mut scheduler = LuaCallbackScheduler::new(64, Duration::from_millis(50))?;
+    let mut continuations = ControllerCallbackContinuations::default();
     loop {
-        match lifecycle.next_event()? {
+        let force_ready = match lifecycle.next_event()? {
             RunnerEvent::Hotkey(hotkey) => {
                 if let Some(registration) = controller_registration_for_hotkey(program, &hotkey) {
                     let _ = schedule_controller_callback(
@@ -1654,6 +1694,7 @@ where
                         Instant::now(),
                     )?;
                 }
+                false
             }
             RunnerEvent::Callback {
                 hotkey,
@@ -1673,6 +1714,7 @@ where
                 } else {
                     stats.record_shortcut_ignored();
                 }
+                false
             }
             RunnerEvent::Trigger(trigger) => {
                 if let BindingTrigger::Keyboard(hotkey) = trigger {
@@ -1688,23 +1730,29 @@ where
                         )?;
                     }
                 }
+                false
             }
             RunnerEvent::Shutdown(reason) => {
-                let cancelled = scheduler.cancel_all();
+                let cancelled = scheduler.cancel_all() + continuations.cancel_all(&mut scheduler);
                 if cancelled > 0 {
                     stats.record_cancelled_macro_runs(cancelled as u64);
                 }
                 return Ok(reason);
             }
             RunnerEvent::RuntimeError(error) => return Err(error),
+            RunnerEvent::TimerElapsed => true,
             RunnerEvent::MotionInput(_)
             | RunnerEvent::ObservedMotionInput { .. }
-            | RunnerEvent::MotionRepeatTick(_) => {}
+            | RunnerEvent::MotionRepeatTick(_) => false,
+        };
+        if force_ready {
+            continuations.force_ready();
         }
         drain_controller_callbacks(
             program,
             runtime,
             &mut scheduler,
+            &mut continuations,
             capabilities,
             executor,
             stats,
@@ -1812,10 +1860,87 @@ where
         && registration.mode == BindingMode::Consume)
 }
 
+struct PendingControllerCallback {
+    task: signal_auras_core::LuaCallbackTask,
+    coroutine: signal_auras_lua::LuaCallbackCoroutine,
+    response: LuaHostResponse,
+    ready_at: Instant,
+    execution_elapsed: Duration,
+}
+
+#[derive(Default)]
+struct ControllerCallbackContinuations {
+    pending: VecDeque<PendingControllerCallback>,
+}
+
+impl ControllerCallbackContinuations {
+    fn push(
+        &mut self,
+        task: signal_auras_core::LuaCallbackTask,
+        coroutine: signal_auras_lua::LuaCallbackCoroutine,
+        response: LuaHostResponse,
+        ready_at: Instant,
+        execution_elapsed: Duration,
+    ) {
+        self.pending.push_back(PendingControllerCallback {
+            task,
+            coroutine,
+            response,
+            ready_at,
+            execution_elapsed,
+        });
+    }
+
+    fn pop_ready(&mut self) -> Option<PendingControllerCallback> {
+        let now = Instant::now();
+        let index = self
+            .pending
+            .iter()
+            .position(|pending| pending.ready_at <= now)?;
+        self.pending.remove(index)
+    }
+
+    fn next_wait_timeout(&self) -> Duration {
+        let now = Instant::now();
+        self.pending
+            .iter()
+            .map(|pending| pending.ready_at.saturating_duration_since(now))
+            .min()
+            .unwrap_or_else(idle_wait_timeout)
+    }
+
+    fn force_ready(&mut self) {
+        let now = Instant::now();
+        for pending in &mut self.pending {
+            pending.ready_at = now;
+        }
+    }
+
+    fn cancel_all(&mut self, scheduler: &mut LuaCallbackScheduler) -> usize {
+        let mut cancelled = 0;
+        while let Some(pending) = self.pending.pop_front() {
+            if scheduler.cancel_task(&pending.task) == CallbackDisposition::Cancelled {
+                cancelled += 1;
+            }
+        }
+        cancelled
+    }
+}
+
+enum ControllerTaskExecution {
+    Complete,
+    PendingSleep {
+        coroutine: signal_auras_lua::LuaCallbackCoroutine,
+        response: LuaHostResponse,
+        ready_at: Instant,
+    },
+}
+
 fn drain_controller_callbacks<E>(
     program: &ControllerProgram,
     runtime: Option<&ImperativeLuaController>,
     scheduler: &mut LuaCallbackScheduler,
+    continuations: &mut ControllerCallbackContinuations,
     capabilities: &CapabilityReport,
     executor: &mut E,
     stats: &mut RuntimeStats,
@@ -1823,15 +1948,65 @@ fn drain_controller_callbacks<E>(
 where
     E: ControllerHost,
 {
+    while let Some(mut pending) = continuations.pop_ready() {
+        let started_at = Instant::now();
+        let result = resume_imperative_controller_task(
+            runtime.ok_or_else(|| {
+                DiagnosableError::new(
+                    ErrorPhase::ScriptValidation,
+                    format!(
+                        "controller callback '{}' has no imperative runtime",
+                        pending.task.callback
+                    ),
+                )
+            })?,
+            pending.coroutine,
+            pending.response,
+            capabilities,
+            executor,
+            stats,
+        );
+        pending.execution_elapsed += started_at.elapsed();
+        match result? {
+            ControllerTaskExecution::Complete => {
+                let disposition = scheduler.finish(pending.task, pending.execution_elapsed);
+                if disposition == CallbackDisposition::Slow {
+                    tracing::warn!(event = "callback_received", disposition = "slow");
+                }
+            }
+            ControllerTaskExecution::PendingSleep {
+                coroutine,
+                response,
+                ready_at,
+            } => continuations.push(
+                pending.task,
+                coroutine,
+                response,
+                ready_at,
+                pending.execution_elapsed,
+            ),
+        }
+    }
     while let Some(task) = scheduler.pop_next() {
         let started_at = Instant::now();
         let result =
             execute_controller_task(program, runtime, &task, capabilities, executor, stats);
-        let disposition = scheduler.finish(task, started_at.elapsed());
-        if disposition == CallbackDisposition::Slow {
-            tracing::warn!(event = "callback_received", disposition = "slow");
+        let execution_elapsed = started_at.elapsed();
+        match result? {
+            ControllerTaskExecution::Complete => {
+                let disposition = scheduler.finish(task, execution_elapsed);
+                if disposition == CallbackDisposition::Slow {
+                    tracing::warn!(event = "callback_received", disposition = "slow");
+                }
+            }
+            ControllerTaskExecution::PendingSleep {
+                coroutine,
+                response,
+                ready_at,
+            } => {
+                continuations.push(task, coroutine, response, ready_at, execution_elapsed);
+            }
         }
-        result?;
     }
     Ok(())
 }
@@ -1843,7 +2018,7 @@ fn execute_controller_task<E>(
     capabilities: &CapabilityReport,
     executor: &mut E,
     stats: &mut RuntimeStats,
-) -> Result<(), DiagnosableError>
+) -> Result<ControllerTaskExecution, DiagnosableError>
 where
     E: ControllerHost,
 {
@@ -1892,7 +2067,7 @@ where
         }
     }
     stats.macro_success_count += 1;
-    Ok(())
+    Ok(ControllerTaskExecution::Complete)
 }
 
 fn execute_imperative_controller_task<E>(
@@ -1901,18 +2076,38 @@ fn execute_imperative_controller_task<E>(
     capabilities: &CapabilityReport,
     executor: &mut E,
     stats: &mut RuntimeStats,
-) -> Result<(), DiagnosableError>
+) -> Result<ControllerTaskExecution, DiagnosableError>
 where
     E: ControllerHost,
 {
     let coroutine = runtime.start_callback(callback_name)?;
+    resume_imperative_controller_task(
+        runtime,
+        coroutine,
+        LuaHostResponse::Unit,
+        capabilities,
+        executor,
+        stats,
+    )
+}
+
+fn resume_imperative_controller_task<E>(
+    runtime: &ImperativeLuaController,
+    coroutine: signal_auras_lua::LuaCallbackCoroutine,
+    mut response: LuaHostResponse,
+    capabilities: &CapabilityReport,
+    executor: &mut E,
+    stats: &mut RuntimeStats,
+) -> Result<ControllerTaskExecution, DiagnosableError>
+where
+    E: ControllerHost,
+{
     let declared = runtime.registrations().required_capabilities();
-    let mut response = LuaHostResponse::Unit;
     loop {
         match runtime.resume_callback(&coroutine, response, declared)? {
             LuaCallbackStep::Complete => {
                 stats.macro_success_count += 1;
-                return Ok(());
+                return Ok(ControllerTaskExecution::Complete);
             }
             LuaCallbackStep::Yielded(request) => {
                 if let Some(required) = request.required_capability() {
@@ -1922,6 +2117,14 @@ where
                         stats.denied_action_count += 1;
                         return Err(error);
                     }
+                }
+                if let LuaHostRequest::Sleep { duration_ms } = request {
+                    let duration = Duration::from_millis(duration_ms);
+                    return Ok(ControllerTaskExecution::PendingSleep {
+                        coroutine,
+                        response: LuaHostResponse::Unit,
+                        ready_at: Instant::now() + duration,
+                    });
                 }
                 response = execute_lua_host_request(request, executor, stats)?;
             }
@@ -2007,16 +2210,30 @@ fn load_imperative_controller_runtime(
     ImperativeLuaController::load_source(&source).map(Some)
 }
 
-fn run_live_real_lifecycle(
-    bindings: &[HotkeyBinding],
-    motions: &[RuntimeMotion],
-    presses: &[RuntimePress],
-    adapter: &mut RealWaylandAdapter,
-    stats: &mut RuntimeStats,
+struct LiveRealLifecycleArgs<'a> {
+    bindings: &'a [HotkeyBinding],
+    motions: &'a [RuntimeMotion],
+    presses: &'a [RuntimePress],
+    adapter: &'a mut RealWaylandAdapter,
+    stats: &'a mut RuntimeStats,
     log: RuntimeLog,
-    mut signal_fd: RuntimeSignalFd,
-    developer_diagnostics: &mut DeveloperDiagnosticRuntime,
+    signal_fd: RuntimeSignalFd,
+    developer_diagnostics: &'a mut DeveloperDiagnosticRuntime,
+}
+
+fn run_live_real_lifecycle(
+    args: LiveRealLifecycleArgs<'_>,
 ) -> Result<ShutdownReason, DiagnosableError> {
+    let LiveRealLifecycleArgs {
+        bindings,
+        motions,
+        presses,
+        adapter,
+        stats,
+        log,
+        mut signal_fd,
+        developer_diagnostics,
+    } = args;
     let timer_fd = RuntimeTimerFd::new()?;
     let mut macro_queue = LiveMacroQueue::default();
     let mut focus_tracker = ScopedFocusTracker::default();
@@ -2188,18 +2405,33 @@ fn run_live_real_lifecycle(
     }
 }
 
-fn run_live_real_controller_lifecycle(
-    program: &ControllerProgram,
-    runtime: Option<&ImperativeLuaController>,
-    adapter: &mut RealWaylandAdapter,
-    capabilities: &CapabilityReport,
-    stats: &mut RuntimeStats,
+struct LiveRealControllerLifecycleArgs<'a> {
+    program: &'a ControllerProgram,
+    runtime: Option<&'a ImperativeLuaController>,
+    adapter: &'a mut RealWaylandAdapter,
+    capabilities: &'a CapabilityReport,
+    stats: &'a mut RuntimeStats,
     log: RuntimeLog,
-    mut signal_fd: RuntimeSignalFd,
-    developer_diagnostics: &mut DeveloperDiagnosticRuntime,
+    signal_fd: RuntimeSignalFd,
+    developer_diagnostics: &'a mut DeveloperDiagnosticRuntime,
+}
+
+fn run_live_real_controller_lifecycle(
+    args: LiveRealControllerLifecycleArgs<'_>,
 ) -> Result<ShutdownReason, DiagnosableError> {
+    let LiveRealControllerLifecycleArgs {
+        program,
+        runtime,
+        adapter,
+        capabilities,
+        stats,
+        log,
+        mut signal_fd,
+        developer_diagnostics,
+    } = args;
     let timer_fd = RuntimeTimerFd::new()?;
     let mut scheduler = LuaCallbackScheduler::new(64, Duration::from_millis(50))?;
+    let mut continuations = ControllerCallbackContinuations::default();
     let mut motion_runtime = MotionRuntime::new(controller_motion_definitions(program)?);
     let mut repeat_ticks = controller_repeat_ticks(program)?;
     let mut last_repeat_ticks = BTreeMap::new();
@@ -2235,14 +2467,18 @@ fn run_live_real_controller_lifecycle(
             program,
             runtime,
             &mut scheduler,
+            &mut continuations,
             capabilities,
             adapter,
             stats,
         )?;
         let wait_timeout =
-            next_live_wait_timeout(&repeat_ticks, &last_repeat_ticks, &motion_runtime).min(
-                next_live_state_tracker_wait_timeout(&state_trackers, tracker_time_base),
-            );
+            next_live_wait_timeout(&repeat_ticks, &last_repeat_ticks, &motion_runtime)
+                .min(next_live_state_tracker_wait_timeout(
+                    &state_trackers,
+                    tracker_time_base,
+                ))
+                .min(continuations.next_wait_timeout());
         timer_fd.arm_after(wait_timeout)?;
         let mut runtime_fds = vec![signal_fd.as_raw_fd(), timer_fd.as_raw_fd()];
         if let Some(fd) = adapter.callback_wake_fd() {
@@ -2253,7 +2489,8 @@ fn run_live_real_controller_lifecycle(
                 if fd == signal_fd.as_raw_fd() =>
             {
                 if let Some(reason) = signal_fd.drain_shutdown_reason()? {
-                    let cancelled = scheduler.cancel_all();
+                    let cancelled =
+                        scheduler.cancel_all() + continuations.cancel_all(&mut scheduler);
                     if cancelled > 0 {
                         stats.record_cancelled_macro_runs(cancelled as u64);
                     }
@@ -2320,6 +2557,7 @@ fn run_live_real_controller_lifecycle(
             program,
             runtime,
             &mut scheduler,
+            &mut continuations,
             capabilities,
             adapter,
             stats,
@@ -2357,6 +2595,7 @@ fn run_live_real_controller_lifecycle(
             program,
             runtime,
             &mut scheduler,
+            &mut continuations,
             capabilities,
             adapter,
             stats,
@@ -3624,6 +3863,41 @@ fn cleanup_after_error(
     })
 }
 
+fn cleanup_real_adapter_after_error(
+    adapter: &mut RealWaylandAdapter,
+    phase: ErrorPhase,
+) -> Result<(), DiagnosableError> {
+    tracing::info!(
+        event = "cleanup_after_error",
+        resource = "adapter_sessions",
+        disposition = "started"
+    );
+    let mut first_error = adapter.cancel_pending().err();
+    tracing::info!(
+        event = "cleanup_after_error",
+        resource = "registrations",
+        disposition = "started"
+    );
+    if let Err(error) = adapter.unregister_all() {
+        if first_error.is_none() {
+            first_error = Some(error);
+        }
+    }
+    if let Some(error) = first_error {
+        tracing::warn!(
+            event = "cleanup_after_error",
+            disposition = "failed",
+            error = %error
+        );
+        return Err(DiagnosableError::new(
+            phase,
+            format!("cleanup failed after runner error: {error}"),
+        ));
+    }
+    tracing::info!(event = "cleanup_after_error", disposition = "completed");
+    Ok(())
+}
+
 fn schedule_live_binding(
     binding: &HotkeyBinding,
     active_context: signal_auras_core::ActiveProcessContext,
@@ -3633,12 +3907,7 @@ fn schedule_live_binding(
     log: RuntimeLog,
 ) -> Result<(), DiagnosableError> {
     let trigger_label = binding.trigger_label();
-    if focus_tracker.observe(
-        &binding.scope,
-        &active_context,
-        FocusFreshnessPolicy::default(),
-        log,
-    ) {
+    if focus_tracker.observe(&binding.scope, &active_context, runtime_focus_policy(), log) {
         let cancelled = macro_queue.cancel_process_scoped();
         stats.record_cancelled_macro_runs(cancelled as u64);
     }
@@ -3748,19 +4017,14 @@ fn schedule_live_press(
     log: RuntimeLog,
 ) -> Result<bool, DiagnosableError> {
     let trigger_label = format!("press {}", press.definition.trigger.describe());
-    if focus_tracker.observe(
-        &press.scope,
-        &active_context,
-        FocusFreshnessPolicy::new(MOTION_FOCUS_STALE_THRESHOLD),
-        log,
-    ) {
+    if focus_tracker.observe(&press.scope, &active_context, runtime_focus_policy(), log) {
         let cancelled = macro_queue.cancel_process_scoped();
         stats.record_cancelled_macro_runs(cancelled as u64);
     }
     let state = press.scope.scoped_focus_state_at_with_policy(
         &active_context,
         Instant::now(),
-        FocusFreshnessPolicy::new(MOTION_FOCUS_STALE_THRESHOLD),
+        runtime_focus_policy(),
     );
     if !state.is_active() {
         if let Some(diagnostic) = state.diagnostic {
@@ -3827,19 +4091,14 @@ fn schedule_live_motion_trigger(
     starts_loop: bool,
 ) -> Result<bool, DiagnosableError> {
     let trigger_label = motion.definition.trigger.describe();
-    if focus_tracker.observe(
-        &motion.scope,
-        &active_context,
-        FocusFreshnessPolicy::new(MOTION_FOCUS_STALE_THRESHOLD),
-        log,
-    ) {
+    if focus_tracker.observe(&motion.scope, &active_context, runtime_focus_policy(), log) {
         let cancelled = macro_queue.cancel_process_scoped();
         stats.record_cancelled_macro_runs(cancelled as u64);
     }
     let state = motion.scope.scoped_focus_state_at_with_policy(
         &active_context,
         Instant::now(),
-        FocusFreshnessPolicy::new(MOTION_FOCUS_STALE_THRESHOLD),
+        runtime_focus_policy(),
     );
     if !state.is_active() {
         if let Some(diagnostic) = state.diagnostic {
@@ -3950,19 +4209,14 @@ fn schedule_live_motion_repeat_tick(
         }
         return Ok(());
     }
-    if focus_tracker.observe(
-        &motion.scope,
-        &active_context,
-        FocusFreshnessPolicy::new(MOTION_FOCUS_STALE_THRESHOLD),
-        log,
-    ) {
+    if focus_tracker.observe(&motion.scope, &active_context, runtime_focus_policy(), log) {
         let cancelled = macro_queue.cancel_process_scoped();
         stats.record_cancelled_macro_runs(cancelled as u64);
     }
     let state = motion.scope.scoped_focus_state_at_with_policy(
         &active_context,
         Instant::now(),
-        FocusFreshnessPolicy::new(MOTION_FOCUS_STALE_THRESHOLD),
+        runtime_focus_policy(),
     );
     if !state.is_active() {
         if let Some(diagnostic) = state.diagnostic {
@@ -4008,10 +4262,7 @@ fn decide_motion_scope(
     scope: &ScopeSelection,
     active_context: &signal_auras_core::ActiveProcessContext,
 ) -> signal_auras_core::ScopeDecision {
-    scope.decide_context_with_policy(
-        active_context,
-        FocusFreshnessPolicy::new(MOTION_FOCUS_STALE_THRESHOLD),
-    )
+    scope.decide_context_with_policy(active_context, runtime_focus_policy())
 }
 
 pub fn handle_trigger<P, E>(
@@ -4161,7 +4412,7 @@ where
     let state = press.scope.scoped_focus_state_at_with_policy(
         &active_context,
         Instant::now(),
-        FocusFreshnessPolicy::new(MOTION_FOCUS_STALE_THRESHOLD),
+        runtime_focus_policy(),
     );
     if !state.is_active() {
         if let Some(diagnostic) = state.diagnostic {
@@ -4230,7 +4481,7 @@ where
     let state = motion.scope.scoped_focus_state_at_with_policy(
         &active_context,
         Instant::now(),
-        FocusFreshnessPolicy::new(MOTION_FOCUS_STALE_THRESHOLD),
+        runtime_focus_policy(),
     );
     if !state.is_active() {
         if let Some(diagnostic) = state.diagnostic {
@@ -4380,7 +4631,7 @@ where
     let state = motion.scope.scoped_focus_state_at_with_policy(
         &active_context,
         Instant::now(),
-        FocusFreshnessPolicy::new(MOTION_FOCUS_STALE_THRESHOLD),
+        runtime_focus_policy(),
     );
     if !state.is_active() {
         if let Some(diagnostic) = state.diagnostic {
@@ -4532,7 +4783,7 @@ mod tests {
     }
 
     #[test]
-    fn motion_process_scope_uses_longer_stable_focus_window() {
+    fn motion_process_scope_uses_core_freshness_policy() {
         let scope = ScopeSelection::process_list(vec![signal_auras_core::ProcessName::parse(
             "steam_app_2694490",
         )
@@ -4549,13 +4800,14 @@ mod tests {
             scope.decide_context(&context),
             signal_auras_core::ScopeDecision::Denied { .. }
         ));
-        assert_eq!(
+        assert!(matches!(
             decide_motion_scope(&scope, &context),
-            signal_auras_core::ScopeDecision::Allowed
-        );
+            signal_auras_core::ScopeDecision::Denied { .. }
+        ));
 
-        context.captured_at =
-            Instant::now() - MOTION_FOCUS_STALE_THRESHOLD - Duration::from_millis(1);
+        context.captured_at = Instant::now()
+            - signal_auras_core::DEFAULT_FOCUS_STALE_THRESHOLD
+            - Duration::from_millis(1);
 
         match decide_motion_scope(&scope, &context) {
             signal_auras_core::ScopeDecision::Denied { diagnostic, .. } => {
@@ -4565,7 +4817,7 @@ mod tests {
                 );
                 assert_eq!(
                     diagnostic.stale_threshold,
-                    Some(MOTION_FOCUS_STALE_THRESHOLD)
+                    Some(signal_auras_core::DEFAULT_FOCUS_STALE_THRESHOLD)
                 );
             }
             signal_auras_core::ScopeDecision::Allowed => {

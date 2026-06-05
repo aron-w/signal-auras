@@ -95,6 +95,9 @@ A user with existing declarative Lua configuration can continue running it while
 - **FR-010**: System MUST preserve existing declarative Lua scripts and document any new controller API as a versioned script API.
 - **FR-011**: System MUST provide privacy-bounded diagnostics for registration, callback latency, queue depth, skipped/dropped work, denied capabilities, and cleanup.
 - **FR-012**: System MUST define standalone Rust library contracts for registration, callback scheduling, output batching, and capability enforcement before CLI or Lua integration.
+- **FR-013**: `sa.sleep` MUST yield a host timer request and MUST NOT block the runtime/event-loop thread while waiting.
+- **FR-014**: Pending imperative Lua continuations MUST preserve callback overload protection until they complete, fail, or are cancelled.
+- **FR-015**: Shutdown MUST cancel pending imperative Lua continuations and prevent post-cancellation output.
 
 ### Key Entities
 
@@ -115,12 +118,14 @@ A user with existing declarative Lua configuration can continue running it while
 - **SC-005**: Denied capabilities execute no OS action and produce diagnosable user-facing errors.
 - **SC-006**: Existing Lua compatibility tests and examples continue to pass unchanged.
 - **SC-007**: Verification passes with documented Nix commands for formatting, linting, tests, and flake checks where feasible.
+- **SC-008**: Contract tests show `sa.sleep` creates pending work, resumes only on a timer wake, and is cancellable with no host-thread sleep call.
 
 ## Assumptions
 
 - V1 uses a two-phase model: Lua registers behavior at startup; dynamic runtime registration is out of scope except enable/disable of already registered handles.
 - V1 embeds real Lua 5.4-compatible execution, but host APIs remain capability-scoped and sandboxed.
 - Lua callbacks are intended for short policy decisions; expensive screen, input, process, and compositor operations are Rust-backed queued APIs.
+- Pure Lua code that spins without yielding still requires a later runtime budget/preemption follow-up; this increment schedules host-yielding callbacks such as `sa.sleep`.
 - Rust remains the trusted core and owns all safety, lifetime, event-loop, and OS permission boundaries.
 - KDE Plasma Wayland on NixOS remains the primary real-desktop target; unsupported compositors fail explicitly.
 - Pixel/image checks may be exposed through this controller model later, but this feature focuses first on non-blocking input/output and callback scheduling.

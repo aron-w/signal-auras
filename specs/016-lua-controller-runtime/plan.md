@@ -6,7 +6,7 @@
 
 ## Summary
 
-Introduce Lua as a controller surface while preserving Rust as the trusted automation core. This increment defines standalone Rust contracts for controller registration validation, bounded Lua callback scheduling, Rust-backed output batching, and capability enforcement, adds an embedded Lua 5.4 coroutine runtime for imperative callbacks, and wires the live controller runner to Rust-owned window, timer, logging, and synthesized-input host APIs without changing the existing declarative Lua configuration loader.
+Introduce Lua as a controller surface while preserving Rust as the trusted automation core. This increment defines standalone Rust contracts for controller registration validation, bounded Lua callback scheduling, Rust-backed output batching, and capability enforcement, adds an embedded Lua 5.4 coroutine runtime for imperative callbacks, represents `sa.sleep` as scheduled continuation work, and wires the live controller runner to Rust-owned window, timer, logging, and synthesized-input host APIs without changing the existing declarative Lua configuration loader.
 
 ## Technical Context
 

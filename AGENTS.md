@@ -20,4 +20,6 @@ For the PoE2 screen state tracking follow-up, also read
 `specs/017-poe2-state-tracking/plan.md`.
 For the overlay render providers follow-up, also read
 `specs/018-overlay-render-providers/plan.md`.
+For the runner architecture decomposition follow-up, also read
+`specs/019-runner-decomposition/plan.md`.
 <!-- SPECKIT END -->

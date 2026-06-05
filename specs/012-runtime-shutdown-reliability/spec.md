@@ -77,6 +77,9 @@ A user stops the runner while it is idle, waiting on input, or holding grabs and
 - **FR-007**: System MUST report cleanup successes and failures in diagnostics or final summaries.
 - **FR-008**: System MUST keep existing Lua configuration APIs unchanged.
 - **FR-009**: System MUST include automated coverage for SIGINT, SIGTERM, helper-thread signal-mask ordering, shutdown wakeups, and cleanup idempotency.
+- **FR-010**: System MUST run the current-run adapter cleanup path on startup failures after partial resource acquisition, including input observation providers, input grabs, output sessions, portal/screencast sessions, overlays, KDE bridge resources, callbacks, and registrations.
+- **FR-011**: System MUST make startup failure cleanup and normal shutdown cleanup share the same release operations where practical.
+- **FR-012**: System MUST keep cleanup idempotent when startup failure cleanup is followed by later drop or explicit cleanup calls.
 
 ### Key Entities
 
@@ -95,6 +98,8 @@ A user stops the runner while it is idle, waiting on input, or holding grabs and
 - **SC-004**: Cleanup tests show virtual input devices and evdev grabs are released or reported in 100% of covered shutdown cases.
 - **SC-005**: Regression tests show no macro work begins after shutdown starts.
 - **SC-006**: Feature verification passes with documented Nix commands or records unavailable Nix checks with the exact failure.
+- **SC-007**: Partial startup failure tests show configured evdev observation providers are closed and later cleanup calls remain safe.
+- **SC-008**: Registration failure tests show successful handles and current-run adapter sessions are both released before the original registration error is returned.
 
 ## Assumptions
 

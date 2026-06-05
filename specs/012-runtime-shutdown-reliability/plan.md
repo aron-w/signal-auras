@@ -6,7 +6,7 @@
 
 ## Summary
 
-Harden runtime shutdown so SIGINT and SIGTERM are blocked before helper threads spawn, routed through the runtime signal fd, and converted into prompt main-loop shutdown. Cleanup remains current-run only and releases virtual input devices, evdev grabs, KDE bridge scripts, callbacks, and shortcut registrations with diagnosable summaries.
+Harden runtime shutdown and startup-failure cleanup so SIGINT and SIGTERM are blocked before helper threads spawn, routed through the runtime signal fd, and converted into prompt main-loop shutdown. Cleanup remains current-run only and releases virtual input devices, evdev observation providers, evdev grabs, portal/screencast sessions, overlays, KDE bridge scripts, callbacks, and shortcut registrations with diagnosable summaries.
 
 ## Technical Context
 
@@ -16,7 +16,7 @@ Harden runtime shutdown so SIGINT and SIGTERM are blocked before helper threads 
 
 **Storage**: Repository files only. No persistent shutdown state, daemon state, IPC state, or signal registry.
 
-**Testing**: `nix develop -c cargo fmt --check`, `nix develop -c cargo clippy --all-targets -- -D warnings`, `nix develop -c cargo test`, and `nix flake check` when feasible. Automated tests cover SIGINT/SIGTERM routing, signal-mask startup ordering, helper-thread inheritance, prompt wakeups, no-new-work-after-shutdown, and cleanup idempotency.
+**Testing**: `nix develop -c cargo fmt --check`, `nix develop -c cargo clippy --all-targets -- -D warnings`, `nix develop -c cargo test`, and `nix flake check` when feasible. Automated tests cover SIGINT/SIGTERM routing, signal-mask startup ordering, helper-thread inheritance, prompt wakeups, no-new-work-after-shutdown, startup failure after partial input-provider acquisition, and cleanup idempotency.
 
 **Target Platform**: NixOS/Linux/KDE Plasma Wayland with explicit current-run input observation and synthesized input consent.
 

@@ -513,6 +513,11 @@ impl LuaCallbackScheduler {
         }
     }
 
+    pub fn cancel_task(&mut self, task: &LuaCallbackTask) -> CallbackDisposition {
+        self.active_or_pending.remove(&task.registration_label);
+        CallbackDisposition::Cancelled
+    }
+
     pub fn cancel_all(&mut self) -> usize {
         let cancelled = self.pending.len();
         self.pending.clear();
@@ -717,6 +722,39 @@ mod tests {
             scheduler.finish(task, Duration::from_millis(11)),
             CallbackDisposition::Slow
         );
+    }
+
+    #[test]
+    fn callback_scheduler_cancels_active_task_without_clearing_new_work() {
+        let first = hotkey_registration("F5");
+        let second = hotkey_registration("F6");
+        let report = available_capability_report(&first.required_capabilities, "test");
+        let mut scheduler = LuaCallbackScheduler::new(4, Duration::from_millis(10)).unwrap();
+
+        assert_eq!(
+            scheduler
+                .schedule(&first, &report, Instant::now())
+                .disposition,
+            CallbackDisposition::Accepted
+        );
+        let active = scheduler.pop_next().unwrap();
+        assert_eq!(
+            scheduler.cancel_task(&active),
+            CallbackDisposition::Cancelled
+        );
+        assert_eq!(
+            scheduler
+                .schedule(&first, &report, Instant::now())
+                .disposition,
+            CallbackDisposition::Accepted
+        );
+        assert_eq!(
+            scheduler
+                .schedule(&second, &report, Instant::now())
+                .disposition,
+            CallbackDisposition::Accepted
+        );
+        assert_eq!(scheduler.pending_len(), 2);
     }
 
     #[test]

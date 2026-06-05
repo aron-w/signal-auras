@@ -86,6 +86,17 @@
 
 **Verification note**: `examples/poe2.lua` is now a controller-style script with an imperative FilterBlade reload callback. Feature-targeted controller tests pass. `cargo fmt --check`, `cargo test`, `cargo clippy --all-targets -- -D warnings`, and `XDG_CACHE_HOME=/tmp/nix-cache nix flake check` pass.
 
+## Phase 9: Architecture Review Follow-Up - Imperative Callback Responsiveness
+
+**Goal**: Host-yielding imperative Lua callbacks remain pending work instead of blocking the runtime thread.
+
+**Independent Test**: A callback that calls `sa.sleep(100)` is accepted, does not call `ControllerHost::sleep`, emits no later output before a timer wake, and is cancelled cleanly on shutdown.
+
+- [X] T031 [P] [US2] Add active callback cancellation support and tests in `crates/signal-auras-core/src/controller.rs`
+- [X] T032 [P] [US2] Add `sa.sleep` non-blocking/cancellation contract test in `tests/contract/cli_runner.rs`
+- [X] T033 [US2] Add pending continuation queue and timer wake handling in `crates/signal-auras-cli/src/runner.rs`
+- [X] T034 [US2] Update FilterBlade controller test to resume after an explicit timer wake in `tests/contract/cli_runner.rs`
+
 ## Dependencies & Execution Order
 
 - Setup and foundational artifacts precede implementation.

@@ -94,6 +94,8 @@ An operator debugging a missed process-aware binding needs to know whether the d
 - **FR-017**: System MUST configure the live KDE active-process monitor to report the current active window every 1 second while the monitor is installed.
 - **FR-018**: System MUST treat heartbeat callbacks as normal compositor/KWin callbacks with fresh receipt timestamps, while preserving side-effect-free cached reads.
 - **FR-019**: System MUST fail closed rather than fabricate freshness if the KWin heartbeat timer is unavailable, fails to start, or stops emitting callbacks.
+- **FR-020**: System MUST use one core-owned focus freshness policy for hotkey, press, motion, repeat, and scoped pass-through decisions unless a later spec defines an explicit override.
+- **FR-021**: CLI/runtime code MUST receive focus freshness policy through the core policy path and MUST NOT define a separate hard-coded motion freshness threshold.
 
 ### Key Entities
 
@@ -116,6 +118,7 @@ An operator debugging a missed process-aware binding needs to know whether the d
 - **SC-008**: Feature verification passes with documented Nix commands or records unavailable Nix checks with the exact failure.
 - **SC-009**: Live KDE bridge regression coverage proves repeated reads of cached focus state preserve the original timestamp and do not keep matching process metadata fresh forever.
 - **SC-010**: Automated KDE bridge coverage proves the active-process monitor script installs a 1000 ms heartbeat and keeps the existing startup and focus-activation reports.
+- **SC-011**: Runner regression tests show motion and press scope decisions use the same 2-second core default as hotkey and macro decisions.
 
 ## Assumptions
 

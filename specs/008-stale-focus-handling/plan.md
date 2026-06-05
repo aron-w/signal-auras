@@ -6,7 +6,7 @@
 
 ## Summary
 
-Make process-aware macro matching fail closed when focused-process metadata is stale, missing, denied, or otherwise untrusted. The implementation keeps the Lua configuration API unchanged, adds a small Rust freshness and denial model around existing active-process contexts, preserves the original KDE/KWin callback receipt timestamp in the live bridge cache, uses the existing KDE/Wayland provider boundary, refreshes the live KDE active-process snapshot through a 1 second KWin heartbeat callback, and improves diagnostics so stale denials identify the configured rule, age, threshold, and reason without logging private command-line or window text.
+Make process-aware macro matching fail closed when focused-process metadata is stale, missing, denied, or otherwise untrusted. The implementation keeps the Lua configuration API unchanged, adds a small Rust freshness and denial model around existing active-process contexts, preserves the original KDE/KWin callback receipt timestamp in the live bridge cache, uses the existing KDE/Wayland provider boundary, refreshes the live KDE active-process snapshot through a 1 second KWin heartbeat callback, unifies runner focus decisions on the core-owned freshness policy, and improves diagnostics so stale denials identify the configured rule, age, threshold, and reason without logging private command-line or window text.
 
 ## Technical Context
 
@@ -24,7 +24,7 @@ Make process-aware macro matching fail closed when focused-process metadata is s
 
 **Performance Goals**: Scope evaluation remains an in-memory constant-time check for each trigger. No new blocking compositor query is added to the hot path.
 
-**Constraints**: Preserve Lua process-scope syntax, default stale threshold of 2 seconds, explicit current-run process inspection consent, fail-closed behavior for unavailable compositor metadata, privacy-bounded diagnostics, and no hidden global behavior. Reading cached focus state must be side-effect free for freshness; only KWin focus/heartbeat callbacks may create fresh KDE focus snapshots.
+**Constraints**: Preserve Lua process-scope syntax, core-owned default stale threshold of 2 seconds, explicit current-run process inspection consent, fail-closed behavior for unavailable compositor metadata, privacy-bounded diagnostics, and no hidden global behavior. Reading cached focus state must be side-effect free for freshness; only KWin focus/heartbeat callbacks may create fresh KDE focus snapshots.
 
 **Scale/Scope**: One terminal-started runner process, one current focus snapshot at a time from the existing KDE active-window bridge, process-scoped hotkeys and motions, and existing verbose diagnostics.
 

@@ -81,6 +81,8 @@ A user running mixed automation expects callback shortcuts, physical input, repe
 - **FR-010**: System MUST expose diagnostics for callback receipt, dispatch latency, denied callback work, callback burst limiting, unavailable callback support, and shutdown interactions when verbose diagnostics are enabled.
 - **FR-011**: System MUST keep diagnostics privacy-bounded and avoid logging private input payloads or unrelated desktop metadata.
 - **FR-012**: System MUST include automated coverage for idle callback delivery, callback bursts, mixed input and callback events, repeat cancellation interactions, shutdown interactions, unavailable callback support, and diagnostics.
+- **FR-013**: System MUST represent Lua callback sleep/yield as scheduled pending work instead of blocking the runtime thread.
+- **FR-014**: System MUST cancel pending Lua callback continuations on shutdown and report the cancellation.
 
 ### Key Entities
 
@@ -102,6 +104,8 @@ A user running mixed automation expects callback shortcuts, physical input, repe
 - **SC-007**: Diagnostics tests show callback receipt, callback-to-dispatch latency, burst limiting, unavailable callback support, and denial reasons are observable when verbose diagnostics are enabled.
 - **SC-008**: Existing Lua configurations and callback-triggered macros continue to load without migration.
 - **SC-009**: Feature verification passes with documented Nix commands or records unavailable Nix checks with the exact failure.
+- **SC-010**: Controller callback tests show `sa.sleep` does not call the blocking host sleep path before a timer wake resumes the continuation.
+- **SC-011**: Shutdown tests show a sleeping Lua callback is cancelled with no post-sleep output emitted.
 
 ## Assumptions
 

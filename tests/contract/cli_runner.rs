@@ -658,6 +658,7 @@ fn controller_runner_executes_filterblade_reload_after_verified_focus() {
             hotkey: signal_auras_core::HotkeyId::parse("Ctrl+s").unwrap(),
             received_at: Instant::now(),
         },
+        RunnerEvent::TimerElapsed,
         RunnerEvent::Shutdown(ShutdownReason::CtrlC),
     ]);
     let required = CapabilitySet::new([
@@ -688,6 +689,53 @@ fn controller_runner_executes_filterblade_reload_after_verified_focus() {
         ]
     );
     assert_eq!(stats.synthesized_input_emitted_count, 3);
+}
+
+#[test]
+fn controller_runner_sleep_yields_without_blocking_host_sleep() {
+    let lua_file = write_lua(
+        r#"
+        sa.hotkey({
+          trigger = "F5",
+          capabilities = { "global_shortcut", "timer", "synthesized_input" },
+          callback = "delayed",
+        })
+        sa.callback("delayed", function()
+          sa.sleep(100)
+          sa.input.text("after sleep")
+        end)
+        "#,
+    );
+    let mut registrar = RecordingRegistrar::default();
+    let active = StaticActive(None);
+    let mut executor = CountingExecutor::default();
+    let mut lifecycle = ScriptedLifecycle::new(vec![
+        RunnerEvent::Callback {
+            hotkey: signal_auras_core::HotkeyId::parse("F5").unwrap(),
+            received_at: Instant::now(),
+        },
+        RunnerEvent::Shutdown(ShutdownReason::CtrlC),
+    ]);
+    let required = CapabilitySet::new([
+        CapabilityKind::GlobalShortcut,
+        CapabilityKind::Timer,
+        CapabilityKind::SynthesizedInput,
+    ]);
+
+    let stats = start_controller_runner_with_lifecycle(
+        &lua_file,
+        &mut registrar,
+        &active,
+        &mut executor,
+        &mut lifecycle,
+        available_capability_report(&required, "test"),
+    )
+    .unwrap();
+
+    assert_eq!(executor.sleep_calls, 0);
+    assert_eq!(executor.actions, 0);
+    assert_eq!(stats.cancelled_macro_run_count, 1);
+    assert_eq!(stats.macro_success_count, 0);
 }
 
 #[test]
@@ -800,6 +848,7 @@ impl ActiveProcessProvider for StaticActive {
 #[derive(Default)]
 struct CountingExecutor {
     actions: usize,
+    sleep_calls: usize,
     emitted: Vec<MacroAction>,
     active_title: Option<String>,
     found_window: Option<String>,
@@ -856,6 +905,7 @@ impl MacroExecutor for CountingExecutor {
 
 impl ControllerHost for CountingExecutor {
     fn sleep(&mut self, _duration: Duration) -> Result<(), DiagnosableError> {
+        self.sleep_calls += 1;
         Ok(())
     }
 

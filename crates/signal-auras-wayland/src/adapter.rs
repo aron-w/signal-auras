@@ -1051,6 +1051,7 @@ impl MacroExecutor for RealWaylandAdapter {
     fn cancel_pending(&mut self) -> Result<(), DiagnosableError> {
         self.cleanup_overlays()?;
         self.release_input_grab()?;
+        self.evdev_provider = None;
         if let Some(session) = &mut self.portal_session {
             let _ = session.close();
         }

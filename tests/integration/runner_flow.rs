@@ -1094,17 +1094,24 @@ fn kde_bridge_cleanup_after_setup_failure_is_idempotent() {
 
 #[test]
 fn kde_partial_registration_failure_cleans_up_successful_handles() {
-    let lua_file = write_lua(
-        r#"
+    let device = write_temp_input_device();
+    let source = r#"
         return {
+          input_provider = {
+            backend = "evdev",
+            mode = "observe",
+            output = "portal",
+            devices = { "__DEVICE__" },
+          },
           scope = { processes = { "kate" } },
           hotkeys = {
             ["F5"] = macro { delay(1) },
             ["F6"] = macro { delay(1) },
           },
         }
-        "#,
-    );
+        "#
+    .replace("__DEVICE__", &device.display().to_string());
+    let lua_file = write_lua(&source);
     let mut prompt = Prompt::new(ConsentDecision::Cancel);
     let mut adapter = signal_auras_wayland::RealWaylandAdapter::from_environment(
         signal_auras_wayland::capability::KdeEnvironment {
@@ -1129,6 +1136,7 @@ fn kde_partial_registration_failure_cleans_up_successful_handles() {
 
     assert_eq!(error.phase, ErrorPhase::Registration);
     assert_eq!(adapter.cleanup_report().attempted, 0);
+    assert!(adapter.input_provider_summary().is_none());
 }
 
 #[test]

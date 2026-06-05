@@ -59,6 +59,18 @@
 - [x] T020 Run `cargo test`
 - [x] T021 Run `nix flake check` when feasible
 
+## Phase 7: Architecture Review Follow-Up - Startup Failure Cleanup
+
+**Goal**: Startup failures after partial resource acquisition release the same current-run sessions as normal shutdown where practical.
+
+**Independent Test**: Configure an evdev input provider, fail a later registration, and verify the provider is closed while successful registrations are also cleaned up.
+
+- [x] T022 [P] [US3] Add startup-failure cleanup regression coverage for closing evdev observation providers through `tests/integration/runner_flow.rs`
+- [x] T023 [US3] Close evdev observation providers in `RealWaylandAdapter::cancel_pending` in `crates/signal-auras-wayland/src/adapter.rs`
+- [x] T024 [P] [US3] Add partial registration failure coverage for adapter session cleanup in `tests/integration/runner_flow.rs`
+- [x] T025 [US3] Route real-runner configuration, capability, active-process setup, registration, and runtime-error failures through shared adapter cleanup in `crates/signal-auras-cli/src/runner.rs`
+- [x] T026 [US3] Add cleanup progress/failure tracing in `crates/signal-auras-cli/src/runner.rs`
+
 ## Dependencies and Order
 
 - Setup and foundational signal guard work block all user stories.

@@ -10,8 +10,9 @@ Make compositor shortcut callbacks a first-class wake source for the live runner
 so KDE callback delivery is prompt even when no physical input, repeat timer, or
 shutdown signal arrives. The implementation keeps the Lua API unchanged, adds a
 bounded callback queue and wake fd behind the KDE bridge boundary, records
-privacy-bounded callback latency/disposition metrics, and updates the live
-runtime loop to sleep until real callback, input, timer, hotplug, or shutdown
+privacy-bounded callback latency/disposition metrics, represents Lua callback
+sleep as scheduled pending work, and updates the live runtime loop to sleep
+until real callback, input, timer, Lua continuation, hotplug, or shutdown
 readiness.
 
 ## Technical Context

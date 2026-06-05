@@ -107,6 +107,16 @@
 - [x] T029 [US2] Run focused KDE bridge tests and workspace verification commands
 - [x] T030 [US2] Mark heartbeat follow-up tasks complete in `specs/008-stale-focus-handling/tasks.md`
 
+## Phase 9: Architecture Review Follow-Up - Focus Policy Unification
+
+**Goal**: Hotkey, press, motion, repeat, and scoped pass-through decisions use the same core-owned stale focus policy.
+
+**Independent Test**: Motion scope tests deny metadata just beyond the core 2-second default and report that same threshold in diagnostics.
+
+- [x] T031 [P] [US1] Add runner regression coverage for motion decisions using the core freshness policy in `crates/signal-auras-cli/src/runner.rs`
+- [x] T032 [US1] Remove the CLI-local motion focus threshold from `crates/signal-auras-cli/src/runner.rs`
+- [x] T033 [US1] Route live press, motion trigger, motion repeat, and test scope decisions through the core-owned `FocusFreshnessPolicy::default()` path in `crates/signal-auras-cli/src/runner.rs`
+
 ## Dependencies & Execution Order
 
 - Setup before foundational work.

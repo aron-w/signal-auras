@@ -6,7 +6,7 @@
 
 ## Summary
 
-Make process-scoped automation inactive outside trusted focused-process scope. While inactive, scoped callbacks, composite triggers, motion sequences, repeat ticks, queued output, and input-grab prevention must not affect the focused application. The implementation extends existing Rust scope/freshness decisions into an explicit scoped-focus state, uses that state before scheduling or consuming scoped work, cancels scoped pending work on deactivation, and emits privacy-bounded info logs on active/inactive transitions.
+Make process-scoped automation inactive outside trusted focused-process scope. While inactive, scoped callbacks, composite triggers, motion sequences, repeat ticks, queued output, and input-grab prevention must not affect the focused application. The implementation extends existing Rust scope/freshness decisions into an explicit scoped-focus state, uses the core-owned focus freshness policy before scheduling or consuming scoped work, cancels scoped pending work on deactivation, and emits privacy-bounded info logs on active/inactive transitions.
 
 ## Technical Context
 

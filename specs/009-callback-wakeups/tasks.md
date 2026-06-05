@@ -52,6 +52,17 @@
 - [x] T018 Run cargo fmt, cargo clippy --all-targets -- -D warnings, cargo test, and nix flake check where feasible
 - [x] T019 Review FR-001 through FR-012 against implementation and mark all tasks complete
 
+## Phase 7: Architecture Review Follow-Up - Lua Callback Continuations
+
+**Goal**: Lua callback sleep/yield behavior remains serviceable by the runtime loop and shutdown.
+
+**Independent Test**: A callback that yields `sa.sleep` stays pending without calling host sleep, emits no post-sleep output until a timer wake resumes it, and is cancellable during shutdown.
+
+- [x] T020 [P] [US3] Add controller callback sleep cancellation coverage in `tests/contract/cli_runner.rs`
+- [x] T021 [P] [US3] Add active callback cancellation support to `LuaCallbackScheduler` in `crates/signal-auras-core/src/controller.rs`
+- [x] T022 [US3] Add pending Lua callback continuation state and timer wake integration in `crates/signal-auras-cli/src/runner.rs`
+- [x] T023 [US3] Update controller runner tests to resume `sa.sleep` callbacks through an explicit timer wake in `tests/contract/cli_runner.rs`
+
 ## Dependencies
 
 Setup (T001-T002) before foundational tasks. Foundational tasks (T003-T006) block all user stories. US1 (T007-T010) is MVP and should complete before US2/US3. US2 (T011-T013) and US3 (T014-T016) can proceed after US1 but touch runner behavior and must be integrated carefully. Polish follows all stories.
