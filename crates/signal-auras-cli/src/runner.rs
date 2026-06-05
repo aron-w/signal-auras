@@ -2415,12 +2415,27 @@ fn poll_live_state_trackers(
             .map(|tracker| tracker.detector.kind())
             .unwrap_or("unknown");
         if let Some(state) = runtime.poller.latest_state(&id).cloned() {
+            let roi = tracker
+                .map(|tracker| tracker.detector.roi())
+                .map(|roi| format!("roi={}x{}+{}+{}", roi.w, roi.h, roi.x, roi.y))
+                .unwrap_or_else(|| "roi=unknown".to_string());
+            let sample = outcome.sample.as_ref().map_or_else(
+                || "sample=none".to_string(),
+                |sample| {
+                    format!(
+                        "sample={}x{} stride={} format={:?}",
+                        sample.width, sample.height, sample.stride, sample.pixel_format
+                    )
+                },
+            );
             let message = format!(
-                "event=state_tracker id={} detector={} confidence={} samples={} {}",
+                "event=state_tracker id={} detector={} confidence={} samples={} {} {} {}",
                 id,
                 detector_kind,
                 state.confidence(),
                 outcome.screen_samples,
+                roi,
+                sample,
                 state.summary()
             );
             match runtime.log_level_for_update(&id, &state) {

@@ -3,8 +3,8 @@ use signal_auras_core::{
     CapabilitySet, CapabilityStatus, CleanupReport, DiagnosableError, ErrorPhase, HotkeyBinding,
     HotkeyRegistrar, InputEmission, InputProviderBackend, InputProviderConfig, MacroAction,
     MacroExecutor, MotionInputEvent, MotionToken, OverlayProviderReport, OverlaySnapshot,
-    ProcessName, RegistrationId, ScreenPixelColor, ScreenPixelFormat, ScreenSample,
-    ScreenSampleProvider, SynthesizedInputRequest,
+    ProcessName, RegistrationId, ScreenCoordinateScale, ScreenPixelColor, ScreenPixelFormat,
+    ScreenSample, ScreenSampleProvider, SynthesizedInputRequest,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -111,6 +111,35 @@ fn sanitize_log_value(value: &str) -> String {
             _ => character,
         })
         .collect()
+}
+
+fn coordinate_scale_from_windows(
+    sample: &ScreenSample,
+    active_window: Option<&PointerWindowDiagnostic>,
+    pointed_window: Option<&PointerWindowDiagnostic>,
+) -> ScreenCoordinateScale {
+    [active_window, pointed_window]
+        .into_iter()
+        .flatten()
+        .find_map(|window| coordinate_scale_from_window(sample, window))
+        .unwrap_or_else(ScreenCoordinateScale::identity)
+}
+
+fn coordinate_scale_from_window(
+    sample: &ScreenSample,
+    window: &PointerWindowDiagnostic,
+) -> Option<ScreenCoordinateScale> {
+    if window.x != 0 || window.y != 0 || window.width <= 0 || window.height <= 0 {
+        return None;
+    }
+    ScreenCoordinateScale::new(
+        f64::from(sample.width) / f64::from(window.width),
+        f64::from(sample.height) / f64::from(window.height),
+    )
+}
+
+fn scale_logical_i32(value: i32, scale: f64) -> i32 {
+    (f64::from(value) * scale).round() as i32
 }
 
 impl OverlaySmokeTestReport {
@@ -222,6 +251,7 @@ pub struct RealWaylandAdapter {
     overlay_renderer: crate::overlay::NativeOverlayRenderer,
     overlay_placements: BTreeMap<String, crate::overlay::OverlayWindowPlacement>,
     overlay_placement_attempts: BTreeMap<String, (crate::overlay::OverlayWindowPlacement, u8)>,
+    screen_coordinate_scale: Option<ScreenCoordinateScale>,
 }
 
 impl RealWaylandAdapter {
@@ -238,6 +268,7 @@ impl RealWaylandAdapter {
             overlay_renderer: crate::overlay::NativeOverlayRenderer::live(),
             overlay_placements: BTreeMap::new(),
             overlay_placement_attempts: BTreeMap::new(),
+            screen_coordinate_scale: None,
         }
     }
 
@@ -254,6 +285,7 @@ impl RealWaylandAdapter {
             overlay_renderer: crate::overlay::NativeOverlayRenderer::in_memory(),
             overlay_placements: BTreeMap::new(),
             overlay_placement_attempts: BTreeMap::new(),
+            screen_coordinate_scale: None,
         }
     }
 
@@ -392,10 +424,17 @@ impl RealWaylandAdapter {
             Ok(sample) => {
                 report.sample_width = Some(sample.width);
                 report.sample_height = Some(sample.height);
-                if pointer.x < 0 || pointer.y < 0 {
+                let scale = coordinate_scale_from_windows(
+                    &sample,
+                    report.active_window.as_ref(),
+                    report.pointed_window.as_ref(),
+                );
+                let pixel_x = scale_logical_i32(report.x, scale.x);
+                let pixel_y = scale_logical_i32(report.y, scale.y);
+                if pixel_x < 0 || pixel_y < 0 {
                     report.pixel_error = Some("cursor coordinates are negative".to_string());
                 } else {
-                    report.pixel = sample.pixel_color(pointer.x as u32, pointer.y as u32);
+                    report.pixel = sample.pixel_color(pixel_x as u32, pixel_y as u32);
                     if report.pixel.is_none() {
                         report.pixel_error =
                             Some("cursor is outside the selected screen sample".to_string());
@@ -1301,6 +1340,64 @@ impl ScreenSampleProvider for RealWaylandAdapter {
             .expect("screen cast session was initialized")
             .capture_latest()
     }
+
+    fn coordinate_scale_for_sample(
+        &mut self,
+        sample: &ScreenSample,
+        _active_context: &ActiveProcessContext,
+    ) -> ScreenCoordinateScale {
+        if let Some(scale) = self.screen_coordinate_scale {
+            return scale;
+        }
+        if self.environment.is_some() {
+            return ScreenCoordinateScale::identity();
+        }
+        if self.shortcut_bridge.is_none() {
+            match crate::kde_bridge::KwinShortcutBridge::connect() {
+                Ok(bridge) => self.shortcut_bridge = Some(bridge),
+                Err(error) => {
+                    tracing::debug!(
+                        event = "screen_coordinate_scale",
+                        result = "unavailable",
+                        error = %error,
+                    );
+                    return ScreenCoordinateScale::identity();
+                }
+            }
+        }
+        let pointer = match self
+            .shortcut_bridge
+            .as_mut()
+            .expect("shortcut bridge was initialized")
+            .pointer_diagnostic()
+        {
+            Ok(pointer) => pointer,
+            Err(error) => {
+                tracing::debug!(
+                    event = "screen_coordinate_scale",
+                    result = "unavailable",
+                    error = %error,
+                );
+                return ScreenCoordinateScale::identity();
+            }
+        };
+        let active_window = pointer.active_window.map(PointerWindowDiagnostic::from);
+        let pointed_window = pointer.pointed_window.map(PointerWindowDiagnostic::from);
+        let scale =
+            coordinate_scale_from_windows(sample, active_window.as_ref(), pointed_window.as_ref());
+        if !scale.is_identity() {
+            tracing::info!(
+                event = "screen_coordinate_scale",
+                scale_x = scale.x,
+                scale_y = scale.y,
+                sample_width = sample.width,
+                sample_height = sample.height,
+                "logical tracker coordinates will be scaled for physical screen samples"
+            );
+            self.screen_coordinate_scale = Some(scale);
+        }
+        scale
+    }
 }
 
 #[cfg(test)]
@@ -1374,6 +1471,35 @@ mod tests {
         adapter.overlay_renderer = crate::overlay::NativeOverlayRenderer::live();
 
         assert!(adapter.overlay_renderer.uses_compositor_layer_surface());
+    }
+
+    #[test]
+    fn coordinate_scale_maps_kwin_logical_geometry_to_screen_pixels() {
+        let sample = ScreenSample::from_pixels(
+            3840,
+            2160,
+            3840 * 4,
+            ScreenPixelFormat::Bgra8888,
+            0,
+            Vec::new(),
+        );
+        let window = PointerWindowDiagnostic {
+            handle: "steam_app_2694490".to_string(),
+            app_id: "steam_app_2694490".to_string(),
+            window_class: String::new(),
+            pid: Some(1001214),
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1440,
+        };
+
+        let scale = coordinate_scale_from_windows(&sample, Some(&window), None);
+
+        assert_eq!(scale_logical_i32(314, scale.x), 471);
+        assert_eq!(scale_logical_i32(1253, scale.y), 1880);
+        assert!((scale.x - 1.5).abs() < f64::EPSILON);
+        assert!((scale.y - 1.5).abs() < f64::EPSILON);
     }
 
     #[test]

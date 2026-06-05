@@ -20,7 +20,7 @@ sa.state.track({
   poll_ms = 50,
   detector = {
     kind = "radial_cooldown",
-    roi = { x = 2850, y = 2030, w = 96, h = 92 },
+    roi = { x = 1913, y = 1359, w = 54, h = 54 },
     mask = { shape = "circle", inset = 10 },
   },
 })
@@ -32,7 +32,7 @@ sa.state.track({
   poll_ms = 50,
   detector = {
     kind = "horizontal_progress_bar",
-    roi = { x = 1540, y = 1560, w = 820, h = 42 },
+    roi = { x = 315, y = 1252, w = 312, h = 1 },
     fill = { direction = "left_to_right" },
   },
 })

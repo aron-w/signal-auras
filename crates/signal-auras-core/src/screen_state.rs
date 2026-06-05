@@ -27,6 +27,57 @@ impl Roi {
     pub fn pixels(&self) -> u32 {
         self.w.saturating_mul(self.h)
     }
+
+    pub fn scaled(&self, scale: ScreenCoordinateScale) -> Self {
+        Self {
+            x: scale.scale_x_u32(self.x),
+            y: scale.scale_y_u32(self.y),
+            w: scale.scale_x_u32(self.w).max(1),
+            h: scale.scale_y_u32(self.h).max(1),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenCoordinateScale {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl ScreenCoordinateScale {
+    pub fn identity() -> Self {
+        Self { x: 1.0, y: 1.0 }
+    }
+
+    pub fn new(x: f64, y: f64) -> Option<Self> {
+        if x.is_finite() && y.is_finite() && x > 0.0 && y > 0.0 {
+            Some(Self { x, y })
+        } else {
+            None
+        }
+    }
+
+    pub fn is_identity(self) -> bool {
+        (self.x - 1.0).abs() < f64::EPSILON && (self.y - 1.0).abs() < f64::EPSILON
+    }
+
+    fn scale_x_u32(self, value: u32) -> u32 {
+        (f64::from(value) * self.x)
+            .round()
+            .clamp(0.0, f64::from(u32::MAX)) as u32
+    }
+
+    fn scale_y_u32(self, value: u32) -> u32 {
+        (f64::from(value) * self.y)
+            .round()
+            .clamp(0.0, f64::from(u32::MAX)) as u32
+    }
+
+    fn scale_uniform_u32(self, value: u32) -> u32 {
+        (f64::from(value) * ((self.x + self.y) / 2.0))
+            .round()
+            .clamp(0.0, f64::from(u32::MAX)) as u32
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +119,27 @@ impl DetectorDefinition {
     pub fn roi(&self) -> &Roi {
         match self {
             Self::RadialCooldown { roi, .. } | Self::HorizontalProgressBar { roi, .. } => roi,
+        }
+    }
+
+    pub fn scaled_for_sample(&self, scale: ScreenCoordinateScale) -> Self {
+        if scale.is_identity() {
+            return self.clone();
+        }
+        match self {
+            Self::RadialCooldown { roi, mask } => Self::RadialCooldown {
+                roi: roi.scaled(scale),
+                mask: mask.as_ref().map(|mask| CircularMask {
+                    inset: scale.scale_uniform_u32(mask.inset),
+                }),
+            },
+            Self::HorizontalProgressBar {
+                roi,
+                fill_direction,
+            } => Self::HorizontalProgressBar {
+                roi: roi.scaled(scale),
+                fill_direction: *fill_direction,
+            },
         }
     }
 }
@@ -562,6 +634,33 @@ fn rgb_luminance(r: u8, g: u8, b: u8) -> u64 {
 
 pub trait ScreenSampleProvider {
     fn capture_screen_sample(&mut self) -> Result<ScreenSample, DiagnosableError>;
+
+    fn coordinate_scale_for_sample(
+        &mut self,
+        _sample: &ScreenSample,
+        _active_context: &ActiveProcessContext,
+    ) -> ScreenCoordinateScale {
+        ScreenCoordinateScale::identity()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenSampleDiagnostic {
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub pixel_format: ScreenPixelFormat,
+}
+
+impl From<&ScreenSample> for ScreenSampleDiagnostic {
+    fn from(sample: &ScreenSample) -> Self {
+        Self {
+            width: sample.width,
+            height: sample.height,
+            stride: sample.stride,
+            pixel_format: sample.pixel_format,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -569,6 +668,7 @@ pub struct PollOutcome {
     pub due_trackers: usize,
     pub screen_samples: usize,
     pub updated: Vec<String>,
+    pub sample: Option<ScreenSampleDiagnostic>,
 }
 
 #[derive(Debug, Clone)]
@@ -632,6 +732,7 @@ impl StateTrackerPoller {
                 due_trackers: 0,
                 screen_samples: 0,
                 updated: Vec::new(),
+                sample: None,
             };
         }
 
@@ -676,6 +777,7 @@ impl StateTrackerPoller {
                 due_trackers: due_ids.len(),
                 screen_samples: 0,
                 updated,
+                sample: None,
             };
         }
 
@@ -692,9 +794,12 @@ impl StateTrackerPoller {
                     due_trackers: due_ids.len(),
                     screen_samples: 0,
                     updated,
+                    sample: None,
                 };
             }
         };
+        let sample_diagnostic = ScreenSampleDiagnostic::from(&sample);
+        let coordinate_scale = sample_provider.coordinate_scale_for_sample(&sample, active_context);
         for id in &active_due_ids {
             let Some(tracker) = self
                 .trackers
@@ -704,13 +809,14 @@ impl StateTrackerPoller {
             else {
                 continue;
             };
-            let state = match tracker.detector {
+            let detector = tracker.detector.scaled_for_sample(coordinate_scale);
+            let state = match &detector {
                 DetectorDefinition::RadialCooldown { .. } => {
                     let history = self.cooldown_history.entry(id.clone()).or_default();
-                    detect_radial_cooldown_with_roi(&sample, Some(&tracker.detector), history)
+                    detect_radial_cooldown_with_roi(&sample, Some(&detector), history)
                 }
                 DetectorDefinition::HorizontalProgressBar { .. } => {
-                    detect_horizontal_progress_bar_with_roi(&sample, Some(&tracker.detector))
+                    detect_horizontal_progress_bar_with_roi(&sample, Some(&detector))
                 }
             };
             self.latest.insert(id.clone(), state);
@@ -721,6 +827,7 @@ impl StateTrackerPoller {
             due_trackers: due_ids.len(),
             screen_samples: 1,
             updated,
+            sample: Some(sample_diagnostic),
         }
     }
 
@@ -745,6 +852,7 @@ impl StateTrackerPoller {
             due_trackers: due_ids.len(),
             screen_samples: 0,
             updated: due_ids.to_vec(),
+            sample: None,
         }
     }
 }
@@ -1005,6 +1113,27 @@ mod tests {
         }
     }
 
+    struct ScalingProvider {
+        captures: usize,
+        sample: ScreenSample,
+        scale: ScreenCoordinateScale,
+    }
+
+    impl ScreenSampleProvider for ScalingProvider {
+        fn capture_screen_sample(&mut self) -> Result<ScreenSample, DiagnosableError> {
+            self.captures += 1;
+            Ok(self.sample.clone())
+        }
+
+        fn coordinate_scale_for_sample(
+            &mut self,
+            _sample: &ScreenSample,
+            _active_context: &ActiveProcessContext,
+        ) -> ScreenCoordinateScale {
+            self.scale
+        }
+    }
+
     #[test]
     fn poller_reports_time_until_next_due_tracker() {
         let set = StateTrackerDefinitionSet::new([
@@ -1051,6 +1180,15 @@ mod tests {
 
         assert_eq!(outcome.due_trackers, 2);
         assert_eq!(outcome.screen_samples, 1);
+        assert_eq!(
+            outcome.sample,
+            Some(ScreenSampleDiagnostic {
+                width: 1,
+                height: 1,
+                stride: 1,
+                pixel_format: ScreenPixelFormat::Luma8,
+            })
+        );
         assert_eq!(provider.captures, 1);
     }
 
@@ -1075,6 +1213,41 @@ mod tests {
                     0, 0, 0, // outside ROI
                 ],
             ),
+        };
+        let mut poller = StateTrackerPoller::new(set);
+        let active_context =
+            ActiveProcessContext::name_only(ProcessName::parse("steam_app_2694490").unwrap());
+
+        poller.poll_due(0, &report, &active_context, &mut provider);
+
+        assert!(matches!(
+            poller.latest_state("heavy_stun"),
+            Some(TrackerState::HorizontalProgressBar {
+                visible: true,
+                progress_percent: 100,
+                confidence: 95,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn poller_scales_logical_detector_roi_to_physical_screen_sample() {
+        let detector = progress_detector_with_roi(Roi::new(2, 2, 2, 1).unwrap());
+        let set = StateTrackerDefinitionSet::new([tracker("heavy_stun", detector)]).unwrap();
+        let required = set.required_capabilities().clone();
+        let report = available_capability_report(&required, "test");
+        let mut pixels = vec![0u8; 6 * 6 * 3];
+        for y in 3..5 {
+            for x in 3..6 {
+                let offset = y * 18 + x * 3;
+                pixels[offset..offset + 3].copy_from_slice(&[255, 255, 255]);
+            }
+        }
+        let mut provider = ScalingProvider {
+            captures: 0,
+            sample: ScreenSample::from_pixels(6, 6, 18, ScreenPixelFormat::Rgb888, 0, pixels),
+            scale: ScreenCoordinateScale::new(1.5, 1.5).unwrap(),
         };
         let mut poller = StateTrackerPoller::new(set);
         let active_context =
