@@ -37,8 +37,8 @@
 **Independent Test**: Callback, input, repeat, focus pass-through, and shutdown wake tests pass before and after extraction.
 
 - [X] T010 [P] [US2] Add runtime loop coordinator tests in `crates/signal-auras-cli/src/runner/runtime_loop.rs`
-- [ ] T011 [US2] Extract input/callback/timer/hotplug/repeat/shutdown coordination into `crates/signal-auras-cli/src/runner/runtime_loop.rs`
-- [ ] T012 [US2] Preserve runtime diagnostics fields while moving loop coordination out of `crates/signal-auras-cli/src/runner.rs`
+- [X] T011 [US2] Extract input/callback/timer/hotplug/repeat/shutdown coordination into `crates/signal-auras-cli/src/runner/runtime_loop.rs`
+- [X] T012 [US2] Preserve runtime diagnostics fields while moving loop coordination out of `crates/signal-auras-cli/src/runner.rs`
 
 ## Phase 5: User Story 3 - Separate Controller Execution From CLI Orchestration (P3)
 
@@ -46,9 +46,9 @@
 
 **Independent Test**: Lua controller runtime tests and CLI runner tests cover the same controller execution dispositions.
 
-- [ ] T013 [P] [US3] Add controller execution boundary tests in `crates/signal-auras-cli/src/runner/controller.rs`
-- [ ] T014 [US3] Extract Lua controller execution wiring into `crates/signal-auras-cli/src/runner/controller.rs`
-- [ ] T015 [US3] Keep capability denial, sleep/yield, budgets, and diagnostics behavior unchanged through extracted boundary
+- [X] T013 [P] [US3] Add controller execution boundary tests in `crates/signal-auras-cli/src/runner/controller.rs`
+- [X] T014 [US3] Extract Lua controller execution wiring into `crates/signal-auras-cli/src/runner/controller.rs`
+- [X] T015 [US3] Keep capability denial, sleep/yield, budgets, and diagnostics behavior unchanged through extracted boundary
 
 ## Phase 6: Polish and Verification
 

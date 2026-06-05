@@ -8,28 +8,30 @@ mod diagnostics;
 mod lifecycle;
 mod runtime_loop;
 
+use controller::{drain_controller_callbacks, ControllerCallbackContinuations};
 use lifecycle::{
     cleanup_after_error, LiveRealControllerLifecycleArgs, LiveRealLifecycleArgs,
     RealAdapterCleanupSession,
 };
-use runtime_loop::{idle_wait_timeout, next_live_wait_timeout};
+use runtime_loop::{
+    classify_wait_outcome, idle_wait_timeout, next_live_wait_timeout, RuntimeWaitOutcome,
+    RuntimeWakeFds,
+};
 use signal_auras_core::{
-    execute_plan_with_inter_action_delay, queue_controller_callback_outputs, ActiveProcessProvider,
-    BindingMode, BindingTrigger, CallbackDisposition, CapabilityKind, CapabilityReport,
-    CapabilitySet, ControllerProgram, ControllerRegistration, ControllerRegistrationKind,
-    DeveloperDiagnosticShortcut, DeveloperDiagnosticState, DiagnosableError, ErrorPhase,
-    FocusFreshnessPolicy, HotkeyBinding, HotkeyId, HotkeyRegistrar, InputProviderConfig,
-    InputProviderMode, InputProviderOutput, KeyToken, LoopBody, LoopDefinition, LoopInterval,
-    LoopRepeat, LuaCallbackScheduler, MacroAction, MacroDefinition, MacroExecutor, MacroRunId,
-    MacroRunPoll, MacroRunState, MacroScheduler, MotionDefinition, MotionDiscardReason,
-    MotionInputEvent, MotionInputState, MotionRuntime, MotionRuntimeEvent, MotionToken,
-    MotionTrigger, RegistrationState, RuntimeMotion, RuntimePress, RuntimeStats,
-    RustOperationBatch, ScopeSelection, ShutdownReason, StateTrackerDefinitionSet,
-    StateTrackerPoller, SynthesizedInputRequest, TrackerState,
+    execute_plan_with_inter_action_delay, ActiveProcessProvider, BindingMode, BindingTrigger,
+    CallbackDisposition, CapabilityKind, CapabilityReport, CapabilitySet, ControllerProgram,
+    ControllerRegistration, ControllerRegistrationKind, DeveloperDiagnosticShortcut,
+    DeveloperDiagnosticState, DiagnosableError, ErrorPhase, FocusFreshnessPolicy, HotkeyBinding,
+    HotkeyId, HotkeyRegistrar, InputProviderConfig, InputProviderMode, InputProviderOutput,
+    KeyToken, LoopBody, LoopDefinition, LoopInterval, LoopRepeat, LuaCallbackScheduler,
+    MacroAction, MacroDefinition, MacroExecutor, MacroRunId, MacroRunPoll, MacroRunState,
+    MacroScheduler, MotionDefinition, MotionDiscardReason, MotionInputEvent, MotionInputState,
+    MotionRuntime, MotionRuntimeEvent, MotionToken, MotionTrigger, RegistrationState,
+    RuntimeMotion, RuntimePress, RuntimeStats, ScopeSelection, ShutdownReason,
+    StateTrackerDefinitionSet, StateTrackerPoller, SynthesizedInputRequest, TrackerState,
 };
 use signal_auras_lua::{
     load_lua_controller_program_file, load_lua_file, ActiveWindowMetadata, ImperativeLuaController,
-    LuaCallbackStep, LuaHostRequest, LuaHostResponse, LuaLogLevel,
 };
 use signal_auras_wayland::{
     evdev::{EvdevInputWaitOutcome, EvdevObservationProvider, KernelEventTimestamp},
@@ -37,7 +39,7 @@ use signal_auras_wayland::{
     RealWaylandAdapter,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     io,
     path::{Path, PathBuf},
@@ -1874,338 +1876,6 @@ where
         && registration.mode == BindingMode::Consume)
 }
 
-struct PendingControllerCallback {
-    task: signal_auras_core::LuaCallbackTask,
-    coroutine: signal_auras_lua::LuaCallbackCoroutine,
-    response: LuaHostResponse,
-    ready_at: Instant,
-    execution_elapsed: Duration,
-}
-
-#[derive(Default)]
-struct ControllerCallbackContinuations {
-    pending: VecDeque<PendingControllerCallback>,
-}
-
-impl ControllerCallbackContinuations {
-    fn push(
-        &mut self,
-        task: signal_auras_core::LuaCallbackTask,
-        coroutine: signal_auras_lua::LuaCallbackCoroutine,
-        response: LuaHostResponse,
-        ready_at: Instant,
-        execution_elapsed: Duration,
-    ) {
-        self.pending.push_back(PendingControllerCallback {
-            task,
-            coroutine,
-            response,
-            ready_at,
-            execution_elapsed,
-        });
-    }
-
-    fn pop_ready(&mut self) -> Option<PendingControllerCallback> {
-        let now = Instant::now();
-        let index = self
-            .pending
-            .iter()
-            .position(|pending| pending.ready_at <= now)?;
-        self.pending.remove(index)
-    }
-
-    fn next_wait_timeout(&self) -> Duration {
-        let now = Instant::now();
-        self.pending
-            .iter()
-            .map(|pending| pending.ready_at.saturating_duration_since(now))
-            .min()
-            .unwrap_or_else(idle_wait_timeout)
-    }
-
-    fn force_ready(&mut self) {
-        let now = Instant::now();
-        for pending in &mut self.pending {
-            pending.ready_at = now;
-        }
-    }
-
-    fn cancel_all(&mut self, scheduler: &mut LuaCallbackScheduler) -> usize {
-        let mut cancelled = 0;
-        while let Some(pending) = self.pending.pop_front() {
-            if scheduler.cancel_task(&pending.task) == CallbackDisposition::Cancelled {
-                cancelled += 1;
-            }
-        }
-        cancelled
-    }
-}
-
-enum ControllerTaskExecution {
-    Complete,
-    PendingSleep {
-        coroutine: signal_auras_lua::LuaCallbackCoroutine,
-        response: LuaHostResponse,
-        ready_at: Instant,
-    },
-}
-
-fn drain_controller_callbacks<E>(
-    program: &ControllerProgram,
-    runtime: Option<&ImperativeLuaController>,
-    scheduler: &mut LuaCallbackScheduler,
-    continuations: &mut ControllerCallbackContinuations,
-    capabilities: &CapabilityReport,
-    executor: &mut E,
-    stats: &mut RuntimeStats,
-) -> Result<(), DiagnosableError>
-where
-    E: ControllerHost,
-{
-    while let Some(mut pending) = continuations.pop_ready() {
-        let started_at = Instant::now();
-        let result = resume_imperative_controller_task(
-            runtime.ok_or_else(|| {
-                DiagnosableError::new(
-                    ErrorPhase::ScriptValidation,
-                    format!(
-                        "controller callback '{}' has no imperative runtime",
-                        pending.task.callback
-                    ),
-                )
-            })?,
-            pending.coroutine,
-            pending.response,
-            capabilities,
-            executor,
-            stats,
-        );
-        pending.execution_elapsed += started_at.elapsed();
-        match result? {
-            ControllerTaskExecution::Complete => {
-                let disposition = scheduler.finish(pending.task, pending.execution_elapsed);
-                if disposition == CallbackDisposition::Slow {
-                    tracing::warn!(event = "callback_received", disposition = "slow");
-                }
-            }
-            ControllerTaskExecution::PendingSleep {
-                coroutine,
-                response,
-                ready_at,
-            } => continuations.push(
-                pending.task,
-                coroutine,
-                response,
-                ready_at,
-                pending.execution_elapsed,
-            ),
-        }
-    }
-    while let Some(task) = scheduler.pop_next() {
-        let started_at = Instant::now();
-        let result =
-            execute_controller_task(program, runtime, &task, capabilities, executor, stats);
-        let execution_elapsed = started_at.elapsed();
-        match result? {
-            ControllerTaskExecution::Complete => {
-                let disposition = scheduler.finish(task, execution_elapsed);
-                if disposition == CallbackDisposition::Slow {
-                    tracing::warn!(event = "callback_received", disposition = "slow");
-                }
-            }
-            ControllerTaskExecution::PendingSleep {
-                coroutine,
-                response,
-                ready_at,
-            } => {
-                continuations.push(task, coroutine, response, ready_at, execution_elapsed);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn execute_controller_task<E>(
-    program: &ControllerProgram,
-    runtime: Option<&ImperativeLuaController>,
-    task: &signal_auras_core::LuaCallbackTask,
-    capabilities: &CapabilityReport,
-    executor: &mut E,
-    stats: &mut RuntimeStats,
-) -> Result<ControllerTaskExecution, DiagnosableError>
-where
-    E: ControllerHost,
-{
-    let callback = program.callback(&task.callback).ok_or_else(|| {
-        DiagnosableError::new(
-            ErrorPhase::ScriptValidation,
-            format!("controller callback '{}' is unavailable", task.callback),
-        )
-    })?;
-    if callback.actions.is_empty() {
-        if let Some(runtime) = runtime {
-            return execute_imperative_controller_task(
-                runtime,
-                &task.callback,
-                capabilities,
-                executor,
-                stats,
-            );
-        }
-    }
-    let mut batch = RustOperationBatch::new(256)?;
-    queue_controller_callback_outputs(callback, capabilities, &mut batch)?;
-    stats.record_output_queue_depth(batch.len() as u64);
-    for request in batch.drain() {
-        match executor.execute_input_request(request)? {
-            signal_auras_core::InputEmission::Emitted => stats.record_synthesized_input_emitted(),
-            signal_auras_core::InputEmission::Denied => {
-                stats.record_synthesized_input_denied();
-                return Err(DiagnosableError::new(
-                    ErrorPhase::MacroExecution,
-                    "controller synthesized input was denied",
-                ));
-            }
-            signal_auras_core::InputEmission::Failed => {
-                return Err(DiagnosableError::new(
-                    ErrorPhase::MacroExecution,
-                    "controller synthesized input failed",
-                ));
-            }
-            signal_auras_core::InputEmission::Cancelled => {
-                return Err(DiagnosableError::new(
-                    ErrorPhase::Shutdown,
-                    "controller synthesized input was cancelled",
-                ));
-            }
-        }
-    }
-    stats.macro_success_count += 1;
-    Ok(ControllerTaskExecution::Complete)
-}
-
-fn execute_imperative_controller_task<E>(
-    runtime: &ImperativeLuaController,
-    callback_name: &str,
-    capabilities: &CapabilityReport,
-    executor: &mut E,
-    stats: &mut RuntimeStats,
-) -> Result<ControllerTaskExecution, DiagnosableError>
-where
-    E: ControllerHost,
-{
-    let coroutine = runtime.start_callback(callback_name)?;
-    resume_imperative_controller_task(
-        runtime,
-        coroutine,
-        LuaHostResponse::Unit,
-        capabilities,
-        executor,
-        stats,
-    )
-}
-
-fn resume_imperative_controller_task<E>(
-    runtime: &ImperativeLuaController,
-    coroutine: signal_auras_lua::LuaCallbackCoroutine,
-    mut response: LuaHostResponse,
-    capabilities: &CapabilityReport,
-    executor: &mut E,
-    stats: &mut RuntimeStats,
-) -> Result<ControllerTaskExecution, DiagnosableError>
-where
-    E: ControllerHost,
-{
-    let declared = runtime.registrations().required_capabilities();
-    loop {
-        match runtime.resume_callback(&coroutine, response, declared)? {
-            LuaCallbackStep::Complete => {
-                stats.macro_success_count += 1;
-                return Ok(ControllerTaskExecution::Complete);
-            }
-            LuaCallbackStep::Yielded(request) => {
-                if let Some(required) = request.required_capability() {
-                    let required = CapabilitySet::new([required]);
-                    if let Some(error) = capabilities.first_blocking_error(&required) {
-                        stats.record_permission_failure();
-                        stats.denied_action_count += 1;
-                        return Err(error);
-                    }
-                }
-                if let LuaHostRequest::Sleep { duration_ms } = request {
-                    let duration = Duration::from_millis(duration_ms);
-                    return Ok(ControllerTaskExecution::PendingSleep {
-                        coroutine,
-                        response: LuaHostResponse::Unit,
-                        ready_at: Instant::now() + duration,
-                    });
-                }
-                response = execute_lua_host_request(request, executor, stats)?;
-            }
-        }
-    }
-}
-
-fn execute_lua_host_request<E>(
-    request: LuaHostRequest,
-    executor: &mut E,
-    stats: &mut RuntimeStats,
-) -> Result<LuaHostResponse, DiagnosableError>
-where
-    E: ControllerHost,
-{
-    match request {
-        LuaHostRequest::Sleep { duration_ms } => {
-            executor.sleep(Duration::from_millis(duration_ms))?;
-            Ok(LuaHostResponse::Unit)
-        }
-        LuaHostRequest::Log { level, message } => {
-            match level {
-                LuaLogLevel::Debug => tracing::debug!(event = "lua_log", message = %message),
-                LuaLogLevel::Info => tracing::info!(event = "lua_log", message = %message),
-                LuaLogLevel::Warn => tracing::warn!(event = "lua_log", message = %message),
-            }
-            Ok(LuaHostResponse::Unit)
-        }
-        LuaHostRequest::ActiveWindow { include_title } => executor
-            .active_window(include_title)
-            .map(LuaHostResponse::ActiveWindow),
-        LuaHostRequest::FindWindow { processes } => executor
-            .find_window(&processes)
-            .map(LuaHostResponse::WindowHandle),
-        LuaHostRequest::ActivateWindow { handle } => {
-            executor.activate_window(&handle).map(LuaHostResponse::Bool)
-        }
-        LuaHostRequest::WaitActive { handle, timeout_ms } => executor
-            .wait_active_window(&handle, Duration::from_millis(timeout_ms))
-            .map(LuaHostResponse::Bool),
-        LuaHostRequest::Input { action } => {
-            let request = SynthesizedInputRequest::new(action, 0);
-            match executor.execute_input_request(request)? {
-                signal_auras_core::InputEmission::Emitted => {
-                    stats.record_synthesized_input_emitted();
-                    Ok(LuaHostResponse::Unit)
-                }
-                signal_auras_core::InputEmission::Denied => {
-                    stats.record_synthesized_input_denied();
-                    Err(DiagnosableError::new(
-                        ErrorPhase::MacroExecution,
-                        "controller synthesized input was denied",
-                    ))
-                }
-                signal_auras_core::InputEmission::Failed => Err(DiagnosableError::new(
-                    ErrorPhase::MacroExecution,
-                    "controller synthesized input failed",
-                )),
-                signal_auras_core::InputEmission::Cancelled => Err(DiagnosableError::new(
-                    ErrorPhase::Shutdown,
-                    "controller synthesized input was cancelled",
-                )),
-            }
-        }
-    }
-}
-
 fn load_imperative_controller_runtime(
     lua_file: &Path,
 ) -> Result<Option<ImperativeLuaController>, DiagnosableError> {
@@ -2274,12 +1944,16 @@ fn run_live_real_lifecycle(
             next_live_wait_timeout(&repeat_ticks, &last_repeat_ticks, &motion_runtime)
                 .min(macro_queue.next_wait_timeout());
         timer_fd.arm_after(wait_timeout)?;
-        let mut runtime_fds = vec![signal_fd.as_raw_fd(), timer_fd.as_raw_fd()];
-        if let Some(fd) = adapter.callback_wake_fd() {
-            runtime_fds.push(fd);
-        }
-        match adapter.wait_next_input_or_runtime_fd(wait_timeout, &runtime_fds)? {
-            signal_auras_wayland::evdev::EvdevInputWaitOutcome::Input(event) => {
+        let wake_fds = RuntimeWakeFds::new(
+            signal_fd.as_raw_fd(),
+            timer_fd.as_raw_fd(),
+            adapter.callback_wake_fd(),
+        );
+        match classify_wait_outcome(
+            adapter.wait_next_input_or_runtime_fd(wait_timeout, &wake_fds.poll_fds())?,
+            wake_fds,
+        ) {
+            RuntimeWaitOutcome::Input(event) => {
                 let mut context = LiveMotionInputContext {
                     motions,
                     presses,
@@ -2293,9 +1967,7 @@ fn run_live_real_lifecycle(
                 };
                 handle_observed_input(event, &mut context)?;
             }
-            signal_auras_wayland::evdev::EvdevInputWaitOutcome::RuntimeFd(fd)
-                if fd == signal_fd.as_raw_fd() =>
-            {
+            RuntimeWaitOutcome::Signal => {
                 if let Some(reason) = signal_fd.drain_shutdown_reason()? {
                     for cancelled in motion_runtime.cancel_active_loops() {
                         stats.record_motion_repeat_cancel();
@@ -2310,14 +1982,10 @@ fn run_live_real_lifecycle(
                     return Ok(reason);
                 }
             }
-            signal_auras_wayland::evdev::EvdevInputWaitOutcome::RuntimeFd(fd)
-                if fd == timer_fd.as_raw_fd() =>
-            {
+            RuntimeWaitOutcome::Timer => {
                 timer_fd.drain()?;
             }
-            signal_auras_wayland::evdev::EvdevInputWaitOutcome::RuntimeFd(fd)
-                if adapter.callback_wake_fd() == Some(fd) =>
-            {
+            RuntimeWaitOutcome::Callback => {
                 adapter.drain_callback_wake_fd()?;
                 drain_live_shortcut_callbacks(
                     bindings,
@@ -2329,8 +1997,7 @@ fn run_live_real_lifecycle(
                     log,
                 )?;
             }
-            signal_auras_wayland::evdev::EvdevInputWaitOutcome::RuntimeFd(_) => {}
-            signal_auras_wayland::evdev::EvdevInputWaitOutcome::Timeout => {}
+            RuntimeWaitOutcome::UnknownRuntimeFd | RuntimeWaitOutcome::Timeout => {}
         }
         while let Some(event) = adapter.next_input_event()? {
             let mut context = LiveMotionInputContext {
@@ -2472,14 +2139,16 @@ fn run_live_real_controller_lifecycle(
                 ))
                 .min(continuations.next_wait_timeout());
         timer_fd.arm_after(wait_timeout)?;
-        let mut runtime_fds = vec![signal_fd.as_raw_fd(), timer_fd.as_raw_fd()];
-        if let Some(fd) = adapter.callback_wake_fd() {
-            runtime_fds.push(fd);
-        }
-        match adapter.wait_next_input_or_runtime_fd(wait_timeout, &runtime_fds)? {
-            signal_auras_wayland::evdev::EvdevInputWaitOutcome::RuntimeFd(fd)
-                if fd == signal_fd.as_raw_fd() =>
-            {
+        let wake_fds = RuntimeWakeFds::new(
+            signal_fd.as_raw_fd(),
+            timer_fd.as_raw_fd(),
+            adapter.callback_wake_fd(),
+        );
+        match classify_wait_outcome(
+            adapter.wait_next_input_or_runtime_fd(wait_timeout, &wake_fds.poll_fds())?,
+            wake_fds,
+        ) {
+            RuntimeWaitOutcome::Signal => {
                 if let Some(reason) = signal_fd.drain_shutdown_reason()? {
                     let cancelled =
                         scheduler.cancel_all() + continuations.cancel_all(&mut scheduler);
@@ -2489,14 +2158,10 @@ fn run_live_real_controller_lifecycle(
                     return Ok(reason);
                 }
             }
-            signal_auras_wayland::evdev::EvdevInputWaitOutcome::RuntimeFd(fd)
-                if fd == timer_fd.as_raw_fd() =>
-            {
+            RuntimeWaitOutcome::Timer => {
                 timer_fd.drain()?;
             }
-            signal_auras_wayland::evdev::EvdevInputWaitOutcome::RuntimeFd(fd)
-                if adapter.callback_wake_fd() == Some(fd) =>
-            {
+            RuntimeWaitOutcome::Callback => {
                 adapter.drain_callback_wake_fd()?;
                 drain_live_controller_shortcut_callbacks(
                     program,
@@ -2508,7 +2173,7 @@ fn run_live_real_controller_lifecycle(
                     log,
                 )?;
             }
-            signal_auras_wayland::evdev::EvdevInputWaitOutcome::Input(event) => {
+            RuntimeWaitOutcome::Input(event) => {
                 let mut context = LiveControllerInputContext {
                     program,
                     adapter,
@@ -2521,8 +2186,7 @@ fn run_live_real_controller_lifecycle(
                 };
                 handle_live_controller_observed_input(event, &mut context)?;
             }
-            signal_auras_wayland::evdev::EvdevInputWaitOutcome::RuntimeFd(_)
-            | signal_auras_wayland::evdev::EvdevInputWaitOutcome::Timeout => {}
+            RuntimeWaitOutcome::UnknownRuntimeFd | RuntimeWaitOutcome::Timeout => {}
         }
         while let Some(event) = adapter.next_input_event()? {
             let mut context = LiveControllerInputContext {

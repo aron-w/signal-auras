@@ -1,5 +1,77 @@
 use signal_auras_core::{MotionRuntime, MotionTrigger};
-use std::{collections::BTreeMap, time::Duration, time::Instant};
+use signal_auras_wayland::evdev::{EvdevInputWaitOutcome, ObservedInputEvent};
+use std::{collections::BTreeMap, os::fd::RawFd, time::Duration, time::Instant};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RuntimeWake {
+    Signal,
+    Timer,
+    Callback,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RuntimeWakeFds {
+    signal_fd: RawFd,
+    timer_fd: RawFd,
+    callback_fd: Option<RawFd>,
+}
+
+#[derive(Debug)]
+pub(super) enum RuntimeWaitOutcome {
+    Input(ObservedInputEvent),
+    Signal,
+    Timer,
+    Callback,
+    Timeout,
+    UnknownRuntimeFd,
+}
+
+impl RuntimeWakeFds {
+    pub(super) fn new(signal_fd: RawFd, timer_fd: RawFd, callback_fd: Option<RawFd>) -> Self {
+        Self {
+            signal_fd,
+            timer_fd,
+            callback_fd,
+        }
+    }
+
+    pub(super) fn poll_fds(self) -> Vec<RawFd> {
+        let mut fds = vec![self.signal_fd, self.timer_fd];
+        if let Some(callback_fd) = self.callback_fd {
+            fds.push(callback_fd);
+        }
+        fds
+    }
+
+    pub(super) fn classify(self, fd: RawFd) -> RuntimeWake {
+        if fd == self.signal_fd {
+            RuntimeWake::Signal
+        } else if fd == self.timer_fd {
+            RuntimeWake::Timer
+        } else if self.callback_fd == Some(fd) {
+            RuntimeWake::Callback
+        } else {
+            RuntimeWake::Unknown
+        }
+    }
+}
+
+pub(super) fn classify_wait_outcome(
+    outcome: EvdevInputWaitOutcome,
+    wake_fds: RuntimeWakeFds,
+) -> RuntimeWaitOutcome {
+    match outcome {
+        EvdevInputWaitOutcome::Input(event) => RuntimeWaitOutcome::Input(event),
+        EvdevInputWaitOutcome::RuntimeFd(fd) => match wake_fds.classify(fd) {
+            RuntimeWake::Signal => RuntimeWaitOutcome::Signal,
+            RuntimeWake::Timer => RuntimeWaitOutcome::Timer,
+            RuntimeWake::Callback => RuntimeWaitOutcome::Callback,
+            RuntimeWake::Unknown => RuntimeWaitOutcome::UnknownRuntimeFd,
+        },
+        EvdevInputWaitOutcome::Timeout => RuntimeWaitOutcome::Timeout,
+    }
+}
 
 pub(super) fn next_live_wait_timeout(
     repeat_ticks: &[(MotionTrigger, u64)],
@@ -35,6 +107,80 @@ mod tests {
         BindingMode, LoopBody, LoopDefinition, LoopInterval, LoopRepeat, MacroAction,
         MacroDefinition, MotionDefinition, MotionInputEvent, MotionToken, MouseButton,
     };
+    use signal_auras_wayland::evdev::{KernelEventTimestamp, RawInputEvent};
+    use std::path::PathBuf;
+
+    #[test]
+    fn runtime_wake_fds_include_callback_when_available() {
+        let fds = RuntimeWakeFds::new(1, 2, Some(3));
+
+        assert_eq!(fds.poll_fds(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn runtime_wake_fds_classify_signal_timer_callback_and_unknown() {
+        let fds = RuntimeWakeFds::new(10, 11, Some(12));
+
+        assert_eq!(fds.classify(10), RuntimeWake::Signal);
+        assert_eq!(fds.classify(11), RuntimeWake::Timer);
+        assert_eq!(fds.classify(12), RuntimeWake::Callback);
+        assert_eq!(fds.classify(99), RuntimeWake::Unknown);
+    }
+
+    #[test]
+    fn classify_wait_outcome_preserves_input_events() {
+        let event = ObservedInputEvent {
+            raw: RawInputEvent {
+                event_type: 1,
+                code: 30,
+                value: 1,
+                kernel_timestamp: KernelEventTimestamp::Unavailable,
+            },
+            event: Some(MotionInputEvent::pressed(MotionToken::Key("a".to_string()))),
+            source: PathBuf::from("/dev/input/event0"),
+            grabbed: false,
+            observed_at: Instant::now(),
+        };
+
+        let outcome = classify_wait_outcome(
+            EvdevInputWaitOutcome::Input(event.clone()),
+            RuntimeWakeFds::new(1, 2, None),
+        );
+
+        match outcome {
+            RuntimeWaitOutcome::Input(actual) => {
+                assert_eq!(actual.raw.code, event.raw.code);
+                assert_eq!(actual.event, event.event);
+            }
+            other => panic!("expected input outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_wait_outcome_maps_runtime_fds_and_timeout() {
+        let wake_fds = RuntimeWakeFds::new(10, 11, Some(12));
+
+        assert!(matches!(
+            classify_wait_outcome(EvdevInputWaitOutcome::RuntimeFd(10), wake_fds),
+            RuntimeWaitOutcome::Signal
+        ));
+        assert!(matches!(
+            classify_wait_outcome(EvdevInputWaitOutcome::RuntimeFd(11), wake_fds),
+            RuntimeWaitOutcome::Timer
+        ));
+        assert!(matches!(
+            classify_wait_outcome(EvdevInputWaitOutcome::RuntimeFd(12), wake_fds),
+            RuntimeWaitOutcome::Callback
+        ));
+        assert!(matches!(
+            classify_wait_outcome(EvdevInputWaitOutcome::RuntimeFd(99), wake_fds),
+            RuntimeWaitOutcome::UnknownRuntimeFd
+        ));
+        assert!(matches!(
+            classify_wait_outcome(EvdevInputWaitOutcome::Timeout, wake_fds),
+            RuntimeWaitOutcome::Timeout
+        ));
+    }
 
     #[test]
     fn idle_wait_timeout_is_long_when_no_runtime_work_is_pending() {
