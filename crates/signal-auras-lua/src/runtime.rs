@@ -1,3 +1,4 @@
+use crate::sandbox_policy::install_denied_globals;
 use mlua::{Function, Lua, RegistryKey, Table, Thread, ThreadStatus, Value};
 use signal_auras_core::{
     BindingMode, CapabilityKind, CapabilitySet, ControllerRegistration, ControllerRegistrationKind,
@@ -171,7 +172,7 @@ impl ImperativeLuaController {
     }
 }
 
-fn lua_compatible_controller_source(source: &str) -> String {
+pub(crate) fn lua_compatible_controller_source(source: &str) -> String {
     rewrite_lua_keyword_table_key(source, "repeat")
 }
 
@@ -243,13 +244,7 @@ fn next_non_whitespace(bytes: &[u8], mut index: usize) -> Option<u8> {
 }
 
 fn install_sandbox(lua: &Lua) -> Result<(), DiagnosableError> {
-    let globals = lua.globals();
-    for denied in [
-        "io", "os", "package", "require", "debug", "dofile", "loadfile", "load",
-    ] {
-        globals.set(denied, Value::Nil).map_err(lua_error)?;
-    }
-    Ok(())
+    install_denied_globals(lua)
 }
 
 fn install_sa_api(

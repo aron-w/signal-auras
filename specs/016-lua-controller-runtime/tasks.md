@@ -97,11 +97,24 @@
 - [X] T033 [US2] Add pending continuation queue and timer wake handling in `crates/signal-auras-cli/src/runner.rs`
 - [X] T034 [US2] Update FilterBlade controller test to resume after an explicit timer wake in `tests/contract/cli_runner.rs`
 
+## Phase 10: Architecture Review Follow-Up - Lua Sandbox/Runtime Unification
+
+**Goal**: Controller validation and imperative callback execution share one Lua sandbox policy for denied globals, while declarative Lua compatibility keeps its existing parser fallback through the shared policy.
+
+**Independent Test**: A controller script with `require`, `io.open`, and `debug.traceback` only in local names or strings loads successfully, while actual ambient global access is rejected by structured Lua validation.
+
+- [X] T035 [P] [US4] Add controller sandbox parity tests in `crates/signal-auras-lua/src/sandbox.rs`
+- [X] T036 [US4] Add shared denied-global sandbox policy module in `crates/signal-auras-lua/src/sandbox_policy.rs`
+- [X] T037 [US4] Route `ImperativeLuaController` sandbox installation through the shared policy in `crates/signal-auras-lua/src/runtime.rs`
+- [X] T038 [US4] Route controller loader validation through structured `mlua` execution with no-op registration/import APIs in `crates/signal-auras-lua/src/sandbox.rs`
+- [X] T039 [US4] Keep declarative `load_lua_source` ambient API denial on the shared compatibility token list in `crates/signal-auras-lua/src/sandbox.rs`
+
 ## Dependencies & Execution Order
 
 - Setup and foundational artifacts precede implementation.
 - US1 registration contracts are required before US2 scheduler and US3 output integration.
 - US4 compatibility must remain true throughout all edits.
+- Phase 10 depends on completed controller and imperative runtime APIs from Phases 7-9.
 - Verification tasks run after formatting and implementation.
 
 ## Parallel Opportunities

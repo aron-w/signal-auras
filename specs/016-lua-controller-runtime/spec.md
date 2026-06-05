@@ -98,6 +98,8 @@ A user with existing declarative Lua configuration can continue running it while
 - **FR-013**: `sa.sleep` MUST yield a host timer request and MUST NOT block the runtime/event-loop thread while waiting.
 - **FR-014**: Pending imperative Lua continuations MUST preserve callback overload protection until they complete, fail, or are cancelled.
 - **FR-015**: Shutdown MUST cancel pending imperative Lua continuations and prevent post-cancellation output.
+- **FR-016**: Controller sandbox validation MUST use the same structured Lua denied-global policy as the imperative runtime, allowing harmless local identifiers and strings while rejecting actual ambient API access.
+- **FR-017**: Declarative Lua compatibility loading MUST preserve its existing source-parser behavior, but denied ambient API tokens MUST be owned by the shared sandbox policy rather than duplicated ad hoc constants.
 
 ### Key Entities
 
@@ -119,6 +121,7 @@ A user with existing declarative Lua configuration can continue running it while
 - **SC-006**: Existing Lua compatibility tests and examples continue to pass unchanged.
 - **SC-007**: Verification passes with documented Nix commands for formatting, linting, tests, and flake checks where feasible.
 - **SC-008**: Contract tests show `sa.sleep` creates pending work, resumes only on a timer wake, and is cancellable with no host-thread sleep call.
+- **SC-009**: Controller sandbox tests show ambient globals are denied through `mlua` execution, while denied API names inside strings or local variable names do not fail validation.
 
 ## Assumptions
 

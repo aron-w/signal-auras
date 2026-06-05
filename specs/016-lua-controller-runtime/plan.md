@@ -6,7 +6,7 @@
 
 ## Summary
 
-Introduce Lua as a controller surface while preserving Rust as the trusted automation core. This increment defines standalone Rust contracts for controller registration validation, bounded Lua callback scheduling, Rust-backed output batching, and capability enforcement, adds an embedded Lua 5.4 coroutine runtime for imperative callbacks, represents `sa.sleep` as scheduled continuation work, and wires the live controller runner to Rust-owned window, timer, logging, and synthesized-input host APIs without changing the existing declarative Lua configuration loader.
+Introduce Lua as a controller surface while preserving Rust as the trusted automation core. This increment defines standalone Rust contracts for controller registration validation, bounded Lua callback scheduling, Rust-backed output batching, and capability enforcement, adds an embedded Lua 5.4 coroutine runtime for imperative callbacks, represents `sa.sleep` as scheduled continuation work, wires the live controller runner to Rust-owned window, timer, logging, and synthesized-input host APIs, and unifies controller/runtime sandbox denied globals without changing the existing declarative Lua configuration loader.
 
 ## Technical Context
 
@@ -24,7 +24,7 @@ Introduce Lua as a controller surface while preserving Rust as the trusted autom
 
 **Performance Goals**: Registration validation is in-memory and side-effect free. Simulated callback scheduling remains bounded with p95 <= 20 ms and p99 <= 50 ms before Lua execution; per-trigger pending work remains bounded to one active/pending task. Stress tests should record explicit accepted, skipped, denied, dropped, cancelled, failed, completed, or slow disposition.
 
-**Constraints**: Preserve existing declarative Lua API, fail closed on denied or unprobed capabilities, keep all OS-facing work in Rust adapters, deny ambient Lua filesystem/shell/network/debug/package access, avoid hidden global behavior, and do not introduce a daemon, async runtime, persistent state, or ambient dynamic registration.
+**Constraints**: Preserve existing declarative Lua API, fail closed on denied or unprobed capabilities, keep all OS-facing work in Rust adapters, deny ambient Lua filesystem/shell/network/debug/package access through one shared policy, avoid hidden global behavior, and do not introduce a daemon, async runtime, persistent state, or ambient dynamic registration.
 
 **Scale/Scope**: One terminal-started runner process, one main controller script plus local modules rooted at that script directory, current-run registrations, bounded callback queue, bounded output batch, embedded Lua callbacks, KWin-backed active-window lookup/activation on KDE Plasma Wayland, and the existing Wayland adapter capability model.
 
@@ -87,7 +87,7 @@ tests/contract/
 └── rust_library.rs
 ```
 
-**Structure Decision**: Keep trusted controller semantics in `signal-auras-core::controller`; keep restricted source/module loading and static compatibility parsing in `signal-auras-lua::sandbox`; keep embedded coroutine execution in `signal-auras-lua::runtime`; keep all OS-facing sleep, window, logging, and input effects in the CLI runner and Wayland adapter.
+**Structure Decision**: Keep trusted controller semantics in `signal-auras-core::controller`; keep restricted source/module loading and static compatibility parsing in `signal-auras-lua::sandbox`; keep the shared denied-global policy in `signal-auras-lua::sandbox_policy`; keep embedded coroutine execution in `signal-auras-lua::runtime`; keep all OS-facing sleep, window, logging, and input effects in the CLI runner and Wayland adapter.
 
 ## Complexity Tracking
 

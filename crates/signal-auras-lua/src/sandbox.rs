@@ -1,3 +1,11 @@
+use crate::{
+    runtime::lua_compatible_controller_source,
+    sandbox_policy::{
+        contains_denied_token, declarative_denied_tokens, denied_global_tokens, first_denied_token,
+        install_denied_globals,
+    },
+};
+use mlua::{Function, Lua, Table};
 use signal_auras_core::{
     AutomationDefaults, BindingDefinition, BindingMode, BindingTrigger, CapabilityKind,
     CapabilitySet, CircularMask, CompositeTrigger, ControllerCallback, ControllerLoopPolicy,
@@ -19,11 +27,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const DENIED_TOKENS: &[&str] = &[
-    "io.", "os.", "require", "package", "debug", "dofile", "loadfile", "load(", "socket",
-    "luaposix",
-];
-
 pub fn load_lua_file(path: &Path) -> Result<LuaAutomationConfiguration, DiagnosableError> {
     let source = fs::read_to_string(path).map_err(|error| {
         DiagnosableError::new(
@@ -35,7 +38,7 @@ pub fn load_lua_file(path: &Path) -> Result<LuaAutomationConfiguration, Diagnosa
 }
 
 pub fn load_lua_source(source: &str) -> Result<LuaAutomationConfiguration, DiagnosableError> {
-    for token in DENIED_TOKENS {
+    for token in declarative_denied_tokens() {
         if contains_denied_token(source, token) {
             return Err(DiagnosableError::new(
                 ErrorPhase::ScriptValidation,
@@ -124,21 +127,74 @@ pub fn load_lua_controller_program_source(
 }
 
 fn validate_controller_sandbox(source: &str) -> Result<(), DiagnosableError> {
-    for token in DENIED_TOKENS {
-        if contains_denied_token(source, token) {
-            return Err(DiagnosableError::new(
-                ErrorPhase::ScriptValidation,
-                format!("Lua controller sandbox denies ambient API token '{token}'"),
-            ));
-        }
-    }
-    if source.contains("require(") || source.contains("package.") {
-        return Err(DiagnosableError::new(
-            ErrorPhase::ScriptValidation,
-            "Lua controller imports must use sa.import rooted at the main script directory",
-        ));
-    }
+    let lua = Lua::new();
+    install_denied_globals(&lua)?;
+    install_controller_validation_api(&lua)?;
+    let source = lua_compatible_controller_source(source);
+    lua.load(&source)
+        .set_name("signal-auras-controller-validation")
+        .exec()
+        .map_err(controller_lua_error)?;
     Ok(())
+}
+
+fn install_controller_validation_api(lua: &Lua) -> Result<(), DiagnosableError> {
+    let sa = lua.create_table().map_err(controller_lua_error)?;
+    for name in ["hotkey", "motion", "press", "timer", "shutdown"] {
+        sa.set(
+            name,
+            lua.create_function(|_, _: Table| Ok(()))
+                .map_err(controller_lua_error)?,
+        )
+        .map_err(controller_lua_error)?;
+    }
+    sa.set(
+        "callback",
+        lua.create_function(|_, (_name, _function): (String, Function)| Ok(()))
+            .map_err(controller_lua_error)?,
+    )
+    .map_err(controller_lua_error)?;
+    sa.set(
+        "import",
+        lua.create_function(|_, _module: String| Ok(()))
+            .map_err(controller_lua_error)?,
+    )
+    .map_err(controller_lua_error)?;
+
+    sa.set("input", lua.create_table().map_err(controller_lua_error)?)
+        .map_err(controller_lua_error)?;
+    sa.set("window", lua.create_table().map_err(controller_lua_error)?)
+        .map_err(controller_lua_error)?;
+
+    let state = lua.create_table().map_err(controller_lua_error)?;
+    state
+        .set(
+            "track",
+            lua.create_function(|_, _: Table| Ok(()))
+                .map_err(controller_lua_error)?,
+        )
+        .map_err(controller_lua_error)?;
+    sa.set("state", state).map_err(controller_lua_error)?;
+
+    let overlay = lua.create_table().map_err(controller_lua_error)?;
+    overlay
+        .set(
+            "mount",
+            lua.create_function(|_, _: Table| Ok(()))
+                .map_err(controller_lua_error)?,
+        )
+        .map_err(controller_lua_error)?;
+    sa.set("overlay", overlay).map_err(controller_lua_error)?;
+
+    lua.globals().set("sa", sa).map_err(controller_lua_error)?;
+    Ok(())
+}
+
+fn controller_lua_error(error: mlua::Error) -> DiagnosableError {
+    DiagnosableError::new(
+        ErrorPhase::ScriptValidation,
+        format!("Lua controller sandbox rejected source: {error}"),
+    )
 }
 
 fn parse_controller_registration_set(
@@ -789,6 +845,12 @@ fn parse_controller_callbacks(source: &str) -> Result<Vec<ControllerCallback>, D
 }
 
 fn parse_controller_output_actions(source: &str) -> Result<Vec<MacroAction>, DiagnosableError> {
+    if let Some(token) = first_denied_token(source, denied_global_tokens()) {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            format!("Lua controller callback sandbox denies ambient API token '{token}'"),
+        ));
+    }
     if source.contains("sa.sleep") || source.contains("sa.window.") {
         return Ok(Vec::new());
     }
@@ -1158,28 +1220,6 @@ fn controller_required_capabilities(
         required.push(CapabilityKind::ActiveProcessMetadata);
     }
     CapabilitySet::new(required)
-}
-
-fn contains_denied_token(source: &str, token: &str) -> bool {
-    if token
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
-        let bytes = source.as_bytes();
-        let token_bytes = token.as_bytes();
-        let mut index = 0;
-        while index + token_bytes.len() <= bytes.len() {
-            if bytes[index..].starts_with(token_bytes)
-                && is_identifier_boundary(bytes, index, token_bytes.len())
-            {
-                return true;
-            }
-            index += 1;
-        }
-        false
-    } else {
-        source.contains(token)
-    }
 }
 
 fn parse_scope(source: &str) -> Result<Option<ScriptScope>, DiagnosableError> {
@@ -2090,6 +2130,56 @@ mod tests {
             assert!(
                 load_lua_controller_source(source).is_err(),
                 "source should be denied: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn controller_loader_allows_denied_words_in_safe_lua_values() {
+        let controller = load_lua_controller_source(
+            r#"
+            local require = "documentation only"
+            local note = "io.open and debug.traceback are not executed"
+            sa.hotkey({ trigger = "F5", callback = "ok" })
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(controller.registrations().len(), 1);
+    }
+
+    #[test]
+    fn controller_loader_denies_structured_ambient_globals() {
+        for source in [
+            r#"sa.hotkey({ trigger = "F5", callback = "ok" }); io.open("/etc/passwd")"#,
+            r#"sa.hotkey({ trigger = "F5", callback = "ok" }); load("return 1")"#,
+            r#"sa.hotkey({ trigger = "F5", callback = "ok" }); dofile("other.lua")"#,
+        ] {
+            assert!(
+                load_lua_controller_source(source).is_err(),
+                "source should be denied: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn controller_program_denies_ambient_apis_inside_callbacks() {
+        for body in [
+            r#"io.open("/etc/passwd")"#,
+            r#"load("return 1")"#,
+            r#"debug.traceback()"#,
+        ] {
+            let source = format!(
+                r#"
+                sa.hotkey({{ trigger = "F5", callback = "ok" }})
+                sa.callback("ok", function()
+                  {body}
+                end)
+                "#
+            );
+            assert!(
+                load_lua_controller_program_source(&source).is_err(),
+                "callback body should be denied: {body}"
             );
         }
     }

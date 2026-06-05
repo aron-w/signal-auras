@@ -68,3 +68,11 @@ Existing declarative scripts loaded through `load_lua_source` and `load_lua_file
 ## Denied Ambient APIs
 
 The controller surface MUST deny `io`, `os`, `package`, `require`, `debug`, `dofile`, `loadfile`, dynamic `load`, socket APIs, and unrestricted Lua package loading. Local multi-file controllers MUST use `sa.import`.
+
+Controller startup validation MUST execute registration/import source in a restricted
+`mlua` environment that installs the same denied globals as the imperative runtime.
+Denied API names inside harmless local variables or strings MUST NOT fail controller
+startup validation. Callback bodies MUST NOT be executed during load; loader-side
+callback validation therefore keeps a bounded denied-token fallback for ambient API
+references, while runtime execution still denies the same globals through the
+structured Lua environment.
