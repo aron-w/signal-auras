@@ -29,6 +29,7 @@ use signal_auras_core::{
     MotionRuntime, MotionRuntimeEvent, MotionToken, MotionTrigger, RegistrationState,
     RuntimeMotion, RuntimePress, RuntimeStats, ScopeSelection, ShutdownReason,
     StateTrackerDefinitionSet, StateTrackerPoller, SynthesizedInputRequest, TrackerState,
+    DEFAULT_LUA_CALLBACK_BUDGET,
 };
 use signal_auras_lua::{
     load_lua_controller_program_file, load_lua_controller_runtime_source_file, load_lua_file,
@@ -1696,7 +1697,7 @@ where
     E: ControllerHost,
     L: RunnerLifecycle,
 {
-    let mut scheduler = LuaCallbackScheduler::new(64, Duration::from_millis(50))?;
+    let mut scheduler = LuaCallbackScheduler::new(64, DEFAULT_LUA_CALLBACK_BUDGET)?;
     let mut continuations = ControllerCallbackContinuations::default();
     loop {
         let force_ready = match lifecycle.next_event()? {
@@ -1862,6 +1863,7 @@ where
         }
         CallbackDisposition::Completed
         | CallbackDisposition::Slow
+        | CallbackDisposition::Preempted
         | CallbackDisposition::Failed
         | CallbackDisposition::Cancelled => {}
     }
@@ -2082,7 +2084,7 @@ fn run_live_real_controller_lifecycle(
         developer_diagnostics,
     } = args;
     let timer_fd = RuntimeTimerFd::new()?;
-    let mut scheduler = LuaCallbackScheduler::new(64, Duration::from_millis(50))?;
+    let mut scheduler = LuaCallbackScheduler::new(64, DEFAULT_LUA_CALLBACK_BUDGET)?;
     let mut continuations = ControllerCallbackContinuations::default();
     let mut motion_runtime = MotionRuntime::new(controller_motion_definitions(program)?);
     let mut repeat_ticks = controller_repeat_ticks(program)?;

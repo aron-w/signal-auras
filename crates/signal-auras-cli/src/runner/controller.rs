@@ -5,7 +5,8 @@ use signal_auras_core::{
     RustOperationBatch, SynthesizedInputRequest,
 };
 use signal_auras_lua::{
-    ImperativeLuaController, LuaCallbackStep, LuaHostRequest, LuaHostResponse, LuaLogLevel,
+    ImperativeLuaController, LuaCallbackStep, LuaExecutionBudget, LuaHostRequest, LuaHostResponse,
+    LuaLogLevel,
 };
 use std::{
     collections::VecDeque,
@@ -80,11 +81,17 @@ impl ControllerCallbackContinuations {
 }
 
 enum ControllerTaskExecution {
-    Complete,
+    Complete {
+        execution_elapsed: Duration,
+    },
+    Preempted {
+        execution_elapsed: Duration,
+    },
     PendingSleep {
         coroutine: signal_auras_lua::LuaCallbackCoroutine,
         response: LuaHostResponse,
         ready_at: Instant,
+        execution_elapsed: Duration,
     },
 }
 
@@ -101,7 +108,6 @@ where
     E: ControllerHost,
 {
     while let Some(mut pending) = continuations.pop_ready() {
-        let started_at = Instant::now();
         let result = resume_imperative_controller_task(
             runtime.ok_or_else(|| {
                 DiagnosableError::new(
@@ -117,44 +123,60 @@ where
             capabilities,
             executor,
             stats,
+            pending
+                .task
+                .budget
+                .saturating_sub(pending.execution_elapsed),
         );
-        pending.execution_elapsed += started_at.elapsed();
         match result? {
-            ControllerTaskExecution::Complete => {
+            ControllerTaskExecution::Complete { execution_elapsed } => {
+                pending.execution_elapsed += execution_elapsed;
                 let disposition = scheduler.finish(pending.task, pending.execution_elapsed);
                 if disposition == CallbackDisposition::Slow {
                     tracing::warn!(event = "callback_received", disposition = "slow");
                 }
             }
-            ControllerTaskExecution::PendingSleep {
-                coroutine,
-                response,
-                ready_at,
-            } => continuations.push(
-                pending.task,
-                coroutine,
-                response,
-                ready_at,
-                pending.execution_elapsed,
-            ),
-        }
-    }
-    while let Some(task) = scheduler.pop_next() {
-        let started_at = Instant::now();
-        let result =
-            execute_controller_task(program, runtime, &task, capabilities, executor, stats);
-        let execution_elapsed = started_at.elapsed();
-        match result? {
-            ControllerTaskExecution::Complete => {
-                let disposition = scheduler.finish(task, execution_elapsed);
-                if disposition == CallbackDisposition::Slow {
-                    tracing::warn!(event = "callback_received", disposition = "slow");
-                }
+            ControllerTaskExecution::Preempted { execution_elapsed } => {
+                pending.execution_elapsed += execution_elapsed;
+                record_preempted_callback(
+                    scheduler,
+                    &pending.task,
+                    pending.execution_elapsed,
+                    stats,
+                );
             }
             ControllerTaskExecution::PendingSleep {
                 coroutine,
                 response,
                 ready_at,
+                execution_elapsed,
+            } => continuations.push(
+                pending.task,
+                coroutine,
+                response,
+                ready_at,
+                pending.execution_elapsed + execution_elapsed,
+            ),
+        }
+    }
+    while let Some(task) = scheduler.pop_next() {
+        let result =
+            execute_controller_task(program, runtime, &task, capabilities, executor, stats);
+        match result? {
+            ControllerTaskExecution::Complete { execution_elapsed } => {
+                let disposition = scheduler.finish(task, execution_elapsed);
+                if disposition == CallbackDisposition::Slow {
+                    tracing::warn!(event = "callback_received", disposition = "slow");
+                }
+            }
+            ControllerTaskExecution::Preempted { execution_elapsed } => {
+                record_preempted_callback(scheduler, &task, execution_elapsed, stats);
+            }
+            ControllerTaskExecution::PendingSleep {
+                coroutine,
+                response,
+                ready_at,
+                execution_elapsed,
             } => {
                 continuations.push(task, coroutine, response, ready_at, execution_elapsed);
             }
@@ -174,6 +196,7 @@ fn execute_controller_task<E>(
 where
     E: ControllerHost,
 {
+    let started_at = Instant::now();
     let callback = program.callback(&task.callback).ok_or_else(|| {
         DiagnosableError::new(
             ErrorPhase::ScriptValidation,
@@ -184,7 +207,7 @@ where
         if let Some(runtime) = runtime {
             return execute_imperative_controller_task(
                 runtime,
-                &task.callback,
+                task,
                 capabilities,
                 executor,
                 stats,
@@ -219,12 +242,14 @@ where
         }
     }
     stats.macro_success_count += 1;
-    Ok(ControllerTaskExecution::Complete)
+    Ok(ControllerTaskExecution::Complete {
+        execution_elapsed: started_at.elapsed(),
+    })
 }
 
 fn execute_imperative_controller_task<E>(
     runtime: &ImperativeLuaController,
-    callback_name: &str,
+    task: &signal_auras_core::LuaCallbackTask,
     capabilities: &CapabilityReport,
     executor: &mut E,
     stats: &mut RuntimeStats,
@@ -232,7 +257,7 @@ fn execute_imperative_controller_task<E>(
 where
     E: ControllerHost,
 {
-    let coroutine = runtime.start_callback(callback_name)?;
+    let coroutine = runtime.start_callback(&task.callback)?;
     resume_imperative_controller_task(
         runtime,
         coroutine,
@@ -240,6 +265,7 @@ where
         capabilities,
         executor,
         stats,
+        task.budget,
     )
 }
 
@@ -250,16 +276,36 @@ fn resume_imperative_controller_task<E>(
     capabilities: &CapabilityReport,
     executor: &mut E,
     stats: &mut RuntimeStats,
+    mut remaining_budget: Duration,
 ) -> Result<ControllerTaskExecution, DiagnosableError>
 where
     E: ControllerHost,
 {
     let declared = runtime.registrations().required_capabilities();
+    let mut active_elapsed = Duration::ZERO;
     loop {
-        match runtime.resume_callback(&coroutine, response, declared)? {
+        if remaining_budget.is_zero() {
+            return Ok(ControllerTaskExecution::Preempted {
+                execution_elapsed: active_elapsed,
+            });
+        }
+        let budget = LuaExecutionBudget::with_default_hook_interval(remaining_budget)?;
+        let resume_started_at = Instant::now();
+        let step = runtime.resume_callback_with_budget(&coroutine, response, declared, budget);
+        let resume_elapsed = resume_started_at.elapsed();
+        active_elapsed += resume_elapsed;
+        remaining_budget = remaining_budget.saturating_sub(resume_elapsed);
+        match step? {
             LuaCallbackStep::Complete => {
                 stats.macro_success_count += 1;
-                return Ok(ControllerTaskExecution::Complete);
+                return Ok(ControllerTaskExecution::Complete {
+                    execution_elapsed: active_elapsed,
+                });
+            }
+            LuaCallbackStep::Preempted => {
+                return Ok(ControllerTaskExecution::Preempted {
+                    execution_elapsed: active_elapsed,
+                });
             }
             LuaCallbackStep::Yielded(request) => {
                 if let Some(required) = request.required_capability() {
@@ -276,12 +322,33 @@ where
                         coroutine,
                         response: LuaHostResponse::Unit,
                         ready_at: Instant::now() + duration,
+                        execution_elapsed: active_elapsed,
                     });
                 }
                 response = execute_lua_host_request(request, executor, stats)?;
             }
         }
     }
+}
+
+fn record_preempted_callback(
+    scheduler: &mut LuaCallbackScheduler,
+    task: &signal_auras_core::LuaCallbackTask,
+    execution_elapsed: Duration,
+    stats: &mut RuntimeStats,
+) {
+    let disposition = scheduler.preempt_task(task);
+    stats.record_lua_callback_preempted();
+    stats.macro_failure_count += 1;
+    tracing::warn!(
+        event = "callback_received",
+        trigger = %task.registration_label,
+        callback = %task.callback,
+        disposition = ?disposition,
+        budget_ms = task.budget.as_millis(),
+        elapsed_ms = execution_elapsed.as_millis(),
+        queue_depth = scheduler.pending_len()
+    );
 }
 
 fn execute_lua_host_request<E>(
@@ -347,7 +414,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use signal_auras_core::{InputEmission, MacroAction, MacroExecutor};
+    use signal_auras_core::{
+        available_capability_report, InputEmission, MacroAction, MacroExecutor,
+    };
 
     #[derive(Default)]
     struct RecordingHost {
@@ -433,5 +502,57 @@ mod tests {
         assert_eq!(error.phase, ErrorPhase::MacroExecution);
         assert_eq!(stats.synthesized_input_emitted_count, 0);
         assert_eq!(stats.synthesized_input_denied_count, 1);
+    }
+
+    #[test]
+    fn drain_callbacks_preempts_runaway_imperative_callback_and_releases_scheduler() {
+        let source = r#"
+        sa.hotkey({
+          trigger = "F5",
+          capabilities = { "global_shortcut", "synthesized_input" },
+          callback = "spin",
+        })
+
+        sa.callback("spin", function()
+          while true do
+          end
+          sa.input.text("after")
+        end)
+        "#;
+        let program = signal_auras_lua::load_lua_controller_program_source(source).unwrap();
+        let runtime = ImperativeLuaController::load_source(source).unwrap();
+        let registration = program.registrations().registrations()[0].clone();
+        let capabilities = available_capability_report(program.required_capabilities(), "test");
+        let mut scheduler = LuaCallbackScheduler::new(2, Duration::from_millis(1)).unwrap();
+        let mut continuations = ControllerCallbackContinuations::default();
+        let mut host = RecordingHost::default();
+        let mut stats = RuntimeStats::new();
+
+        assert_eq!(
+            scheduler
+                .schedule(&registration, &capabilities, Instant::now())
+                .disposition,
+            CallbackDisposition::Accepted
+        );
+        drain_controller_callbacks(
+            &program,
+            Some(&runtime),
+            &mut scheduler,
+            &mut continuations,
+            &capabilities,
+            &mut host,
+            &mut stats,
+        )
+        .unwrap();
+
+        assert_eq!(host.input_calls, 0);
+        assert_eq!(stats.macro_success_count, 0);
+        assert_eq!(stats.lua_callback_preempted_count, 1);
+        assert_eq!(
+            scheduler
+                .schedule(&registration, &capabilities, Instant::now())
+                .disposition,
+            CallbackDisposition::Accepted
+        );
     }
 }

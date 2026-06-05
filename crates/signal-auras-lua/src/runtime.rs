@@ -1,13 +1,20 @@
 use crate::sandbox_policy::install_denied_globals;
-use mlua::{Function, Lua, RegistryKey, Table, Thread, ThreadStatus, Value};
+use mlua::{
+    Error as LuaError, Function, HookTriggers, Lua, RegistryKey, Table, Thread, ThreadStatus,
+    Value, VmState,
+};
 use signal_auras_core::{
     BindingMode, CapabilityKind, CapabilitySet, ControllerRegistration, ControllerRegistrationKind,
     ControllerRegistrationSet, DiagnosableError, ErrorPhase, HeldCondition, MacroAction,
-    MouseButton, ProcessName, ScopeSelection,
+    MouseButton, ProcessName, ScopeSelection, DEFAULT_LUA_CALLBACK_BUDGET,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
+
+const DEFAULT_LUA_HOOK_INSTRUCTION_INTERVAL: u32 = 1_000;
+const LUA_CALLBACK_PREEMPTED_SENTINEL: &str = "__signal_auras_lua_callback_preempted__";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveWindowMetadata {
@@ -72,6 +79,60 @@ pub enum LuaHostResponse {
 pub enum LuaCallbackStep {
     Yielded(LuaHostRequest),
     Complete,
+    Preempted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LuaExecutionBudget {
+    max_active_duration: Duration,
+    hook_instruction_interval: u32,
+}
+
+impl LuaExecutionBudget {
+    pub fn new(
+        max_active_duration: Duration,
+        hook_instruction_interval: u32,
+    ) -> Result<Self, DiagnosableError> {
+        if max_active_duration.is_zero() {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                "Lua callback execution budget must be greater than zero",
+            ));
+        }
+        if hook_instruction_interval == 0 {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                "Lua callback hook instruction interval must be greater than zero",
+            ));
+        }
+        Ok(Self {
+            max_active_duration,
+            hook_instruction_interval,
+        })
+    }
+
+    pub fn with_default_hook_interval(
+        max_active_duration: Duration,
+    ) -> Result<Self, DiagnosableError> {
+        Self::new(max_active_duration, DEFAULT_LUA_HOOK_INSTRUCTION_INTERVAL)
+    }
+
+    pub fn max_active_duration(&self) -> Duration {
+        self.max_active_duration
+    }
+
+    pub fn hook_instruction_interval(&self) -> u32 {
+        self.hook_instruction_interval
+    }
+}
+
+impl Default for LuaExecutionBudget {
+    fn default() -> Self {
+        Self {
+            max_active_duration: DEFAULT_LUA_CALLBACK_BUDGET,
+            hook_instruction_interval: DEFAULT_LUA_HOOK_INSTRUCTION_INTERVAL,
+        }
+    }
 }
 
 pub struct LuaCallbackCoroutine {
@@ -145,6 +206,21 @@ impl ImperativeLuaController {
         response: LuaHostResponse,
         capabilities: &CapabilitySet,
     ) -> Result<LuaCallbackStep, DiagnosableError> {
+        self.resume_callback_with_budget(
+            coroutine,
+            response,
+            capabilities,
+            LuaExecutionBudget::default(),
+        )
+    }
+
+    pub fn resume_callback_with_budget(
+        &self,
+        coroutine: &LuaCallbackCoroutine,
+        response: LuaHostResponse,
+        capabilities: &CapabilitySet,
+        budget: LuaExecutionBudget,
+    ) -> Result<LuaCallbackStep, DiagnosableError> {
         let thread = self
             .lua
             .registry_value::<Thread>(&coroutine.thread)
@@ -152,9 +228,32 @@ impl ImperativeLuaController {
         if thread.status() == ThreadStatus::Finished {
             return Ok(LuaCallbackStep::Complete);
         }
-        let value: Value = thread
-            .resume(lua_response(&self.lua, response)?)
-            .map_err(lua_error)?;
+        let response = lua_response(&self.lua, response)?;
+        let deadline = Instant::now() + budget.max_active_duration();
+        let preempted = Rc::new(Cell::new(false));
+        let hook_preempted = Rc::clone(&preempted);
+        thread.set_hook(
+            HookTriggers::new().every_nth_instruction(budget.hook_instruction_interval()),
+            move |_, _| {
+                if Instant::now() >= deadline {
+                    hook_preempted.set(true);
+                    Err(LuaError::RuntimeError(
+                        LUA_CALLBACK_PREEMPTED_SENTINEL.to_string(),
+                    ))
+                } else {
+                    Ok(VmState::Continue)
+                }
+            },
+        );
+        let value = thread.resume(response);
+        self.lua.remove_hook();
+        let value: Value = match value {
+            Ok(value) => value,
+            Err(error) if preempted.get() && is_lua_callback_preempted(&error) => {
+                return Ok(LuaCallbackStep::Preempted);
+            }
+            Err(error) => return Err(lua_error(error)),
+        };
         if thread.status() == ThreadStatus::Finished {
             return Ok(LuaCallbackStep::Complete);
         }
@@ -586,6 +685,22 @@ fn lua_error(error: mlua::Error) -> DiagnosableError {
     DiagnosableError::new(ErrorPhase::ScriptValidation, error.to_string())
 }
 
+fn is_lua_callback_preempted(error: &LuaError) -> bool {
+    error.to_string().contains(LUA_CALLBACK_PREEMPTED_SENTINEL)
+}
+
 fn mlua_error(error: DiagnosableError) -> mlua::Error {
     mlua::Error::RuntimeError(error.message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lua_execution_budget_requires_nonzero_duration_and_hook_interval() {
+        assert!(LuaExecutionBudget::new(Duration::ZERO, 1_000).is_err());
+        assert!(LuaExecutionBudget::new(Duration::from_millis(1), 0).is_err());
+        assert!(LuaExecutionBudget::new(Duration::from_millis(1), 1_000).is_ok());
+    }
 }

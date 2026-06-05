@@ -5,9 +5,10 @@ use signal_auras_core::{
 use signal_auras_lua::{
     load_lua_controller_program_file, load_lua_controller_program_source,
     load_lua_controller_runtime_source_file, load_lua_file, load_lua_source, ActiveWindowMetadata,
-    ImperativeLuaController, LuaCallbackStep, LuaHostRequest, LuaHostResponse, LuaLogLevel,
+    ImperativeLuaController, LuaCallbackStep, LuaExecutionBudget, LuaHostRequest, LuaHostResponse,
+    LuaLogLevel,
 };
-use std::{fs, path::Path};
+use std::{fs, path::Path, time::Duration};
 
 #[test]
 fn lua_api_accepts_v1_sample() {
@@ -1014,6 +1015,126 @@ fn imperative_lua_logs_without_sensitive_capability() {
     assert_eq!(
         runtime
             .resume_callback(&run, LuaHostResponse::Unit, &capabilities)
+            .unwrap(),
+        LuaCallbackStep::Complete
+    );
+}
+
+#[test]
+fn imperative_lua_preempts_non_yielding_callback_before_first_host_request() {
+    let runtime = ImperativeLuaController::load_source(
+        r#"
+        sa.press({
+          trigger = "S",
+          capabilities = { "synthesized_input" },
+          callback = "spin",
+        })
+
+        sa.callback("spin", function()
+          while true do
+          end
+          sa.input.text("after")
+        end)
+        "#,
+    )
+    .unwrap();
+    let run = runtime.start_callback("spin").unwrap();
+    let budget = LuaExecutionBudget::new(Duration::from_millis(1), 100).unwrap();
+
+    assert_eq!(
+        runtime
+            .resume_callback_with_budget(
+                &run,
+                LuaHostResponse::Unit,
+                &CapabilitySet::new([CapabilityKind::SynthesizedInput]),
+                budget
+            )
+            .unwrap(),
+        LuaCallbackStep::Preempted
+    );
+}
+
+#[test]
+fn imperative_lua_preempts_non_yielding_callback_after_sleep_resume() {
+    let runtime = ImperativeLuaController::load_source(
+        r#"
+        sa.press({
+          trigger = "S",
+          capabilities = { "timer", "synthesized_input" },
+          callback = "spin",
+        })
+
+        sa.callback("spin", function()
+          sa.sleep(10)
+          while true do
+          end
+          sa.input.text("after")
+        end)
+        "#,
+    )
+    .unwrap();
+    let run = runtime.start_callback("spin").unwrap();
+    let capabilities =
+        CapabilitySet::new([CapabilityKind::Timer, CapabilityKind::SynthesizedInput]);
+    let budget = LuaExecutionBudget::new(Duration::from_millis(1), 100).unwrap();
+
+    assert_eq!(
+        runtime
+            .resume_callback_with_budget(&run, LuaHostResponse::Unit, &capabilities, budget)
+            .unwrap(),
+        LuaCallbackStep::Yielded(LuaHostRequest::Sleep { duration_ms: 10 })
+    );
+    assert_eq!(
+        runtime
+            .resume_callback_with_budget(&run, LuaHostResponse::Unit, &capabilities, budget)
+            .unwrap(),
+        LuaCallbackStep::Preempted
+    );
+}
+
+#[test]
+fn imperative_lua_preserves_bounded_work_and_sleep_with_budget() {
+    let runtime = ImperativeLuaController::load_source(
+        r#"
+        sa.press({
+          trigger = "S",
+          capabilities = { "timer", "synthesized_input" },
+          callback = "bounded",
+        })
+
+        sa.callback("bounded", function()
+          local sum = 0
+          for i = 1, 100 do
+            sum = sum + i
+          end
+          sa.sleep(5)
+          sa.input.text(tostring(sum))
+        end)
+        "#,
+    )
+    .unwrap();
+    let run = runtime.start_callback("bounded").unwrap();
+    let capabilities =
+        CapabilitySet::new([CapabilityKind::Timer, CapabilityKind::SynthesizedInput]);
+    let budget = LuaExecutionBudget::new(Duration::from_millis(50), 100).unwrap();
+
+    assert_eq!(
+        runtime
+            .resume_callback_with_budget(&run, LuaHostResponse::Unit, &capabilities, budget)
+            .unwrap(),
+        LuaCallbackStep::Yielded(LuaHostRequest::Sleep { duration_ms: 5 })
+    );
+    assert_eq!(
+        runtime
+            .resume_callback_with_budget(&run, LuaHostResponse::Unit, &capabilities, budget)
+            .unwrap(),
+        LuaCallbackStep::Yielded(LuaHostRequest::Input {
+            action: MacroAction::text("5050").unwrap()
+        })
+    );
+    assert_eq!(
+        runtime
+            .resume_callback_with_budget(&run, LuaHostResponse::Unit, &capabilities, budget)
             .unwrap(),
         LuaCallbackStep::Complete
     );

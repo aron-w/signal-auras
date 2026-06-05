@@ -23,6 +23,7 @@ pub use controller::{
     CallbackDisposition, CallbackOverloadPolicy, CallbackScheduleResult, ControllerCallback,
     ControllerLoopPolicy, ControllerProgram, ControllerRegistration, ControllerRegistrationKind,
     ControllerRegistrationSet, LuaCallbackScheduler, LuaCallbackTask, RustOperationBatch,
+    DEFAULT_LUA_CALLBACK_BUDGET,
 };
 pub use dev_diagnostics::{
     tracker_ghost_auras, DeveloperDiagnosticShortcut, DeveloperDiagnosticState, ScreenPixelColor,

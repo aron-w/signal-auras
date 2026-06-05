@@ -31,6 +31,7 @@ pub struct RuntimeStats {
     pub callback_event_received_count: u64,
     pub callback_event_dispatched_count: u64,
     pub callback_event_dropped_count: u64,
+    pub lua_callback_preempted_count: u64,
     pub max_callback_dispatch_latency_ms: u64,
     callback_dispatch_latency_total_ms: u64,
     callback_dispatch_latency_buckets: [u64; CALLBACK_LATENCY_BUCKETS_MS.len()],
@@ -92,6 +93,7 @@ impl RuntimeStats {
             callback_event_received_count: 0,
             callback_event_dispatched_count: 0,
             callback_event_dropped_count: 0,
+            lua_callback_preempted_count: 0,
             max_callback_dispatch_latency_ms: 0,
             callback_dispatch_latency_total_ms: 0,
             callback_dispatch_latency_buckets: [0; CALLBACK_LATENCY_BUCKETS_MS.len()],
@@ -187,6 +189,10 @@ impl RuntimeStats {
 
     pub fn record_callback_dropped(&mut self, count: u64) {
         self.callback_event_dropped_count += count;
+    }
+
+    pub fn record_lua_callback_preempted(&mut self) {
+        self.lua_callback_preempted_count += 1;
     }
 
     pub fn record_shortcut_ignored(&mut self) {
@@ -412,7 +418,7 @@ impl RuntimeStats {
 
     pub fn render_summary(&self, reason: ShutdownReason) -> String {
         format!(
-            "final_summary reason={reason:?} elapsed_ms={} triggers={} successes={} failures={} denials={} permission_failures={} scope_mismatches={} capability_probe_successes={} capability_probe_failures={} ignored_events={} callbacks_received={} callbacks_dispatched={} callbacks_dropped={} avg_callback_dispatch_latency_ms={} p95_callback_dispatch_latency_ms={} p99_callback_dispatch_latency_ms={} max_callback_dispatch_latency_ms={} active_process_matches={} active_process_non_matches={} metadata_unavailable={} input_emitted={} input_denied={} consumed_events={} passthrough_events={} motion_inputs={} repeat_ticks={} repeat_skipped_or_coalesced={} repeat_cancels={} motion_discards={} non_repeat_skipped_or_denied={} avg_motion_dispatch_latency_ms={} p95_motion_dispatch_latency_ms={} p99_motion_dispatch_latency_ms={} max_motion_dispatch_latency_ms={} motion_event_age_samples={} motion_event_age_unavailable={} avg_motion_event_age_ms={} p95_motion_event_age_ms={} p99_motion_event_age_ms={} max_motion_event_age_ms={} event_loop_wakeups={} hotplug_adds={} hotplug_removes={} output_queue_failures={} cancelled_macro_runs={} max_output_queue_depth={} kde_bridge_setups={} kde_bridge_cleanups={} cleanup_successes={} cleanup_failures={}",
+            "final_summary reason={reason:?} elapsed_ms={} triggers={} successes={} failures={} denials={} permission_failures={} scope_mismatches={} capability_probe_successes={} capability_probe_failures={} ignored_events={} callbacks_received={} callbacks_dispatched={} callbacks_dropped={} lua_callbacks_preempted={} avg_callback_dispatch_latency_ms={} p95_callback_dispatch_latency_ms={} p99_callback_dispatch_latency_ms={} max_callback_dispatch_latency_ms={} active_process_matches={} active_process_non_matches={} metadata_unavailable={} input_emitted={} input_denied={} consumed_events={} passthrough_events={} motion_inputs={} repeat_ticks={} repeat_skipped_or_coalesced={} repeat_cancels={} motion_discards={} non_repeat_skipped_or_denied={} avg_motion_dispatch_latency_ms={} p95_motion_dispatch_latency_ms={} p99_motion_dispatch_latency_ms={} max_motion_dispatch_latency_ms={} motion_event_age_samples={} motion_event_age_unavailable={} avg_motion_event_age_ms={} p95_motion_event_age_ms={} p99_motion_event_age_ms={} max_motion_event_age_ms={} event_loop_wakeups={} hotplug_adds={} hotplug_removes={} output_queue_failures={} cancelled_macro_runs={} max_output_queue_depth={} kde_bridge_setups={} kde_bridge_cleanups={} cleanup_successes={} cleanup_failures={}",
             self.elapsed_runtime().as_millis(),
             self.total_triggers(),
             self.macro_success_count,
@@ -426,6 +432,7 @@ impl RuntimeStats {
             self.callback_event_received_count,
             self.callback_event_dispatched_count,
             self.callback_event_dropped_count,
+            self.lua_callback_preempted_count,
             self.average_callback_dispatch_latency_ms(),
             self.callback_dispatch_latency_p95_ms(),
             self.callback_dispatch_latency_p99_ms(),
@@ -522,6 +529,18 @@ mod tests {
         assert!(summary.contains("denials=1"));
         assert!(summary.contains("permission_failures=1"));
         assert!(summary.contains("scope_mismatches=1"));
+    }
+
+    #[test]
+    fn callback_preemption_count_is_recorded_in_summary() {
+        let mut stats = RuntimeStats::new();
+
+        stats.record_lua_callback_preempted();
+
+        assert_eq!(stats.lua_callback_preempted_count, 1);
+        assert!(stats
+            .render_summary(ShutdownReason::RuntimeError)
+            .contains("lua_callbacks_preempted=1"));
     }
 
     #[test]

@@ -5,7 +5,7 @@ pub mod sandbox;
 
 pub use runtime::{
     ActiveWindowMetadata, ImperativeLuaController, LuaCallbackCoroutine, LuaCallbackStep,
-    LuaHostRequest, LuaHostResponse, LuaLogLevel,
+    LuaExecutionBudget, LuaHostRequest, LuaHostResponse, LuaLogLevel,
 };
 pub use sandbox::{
     load_lua_controller_file, load_lua_controller_program_file, load_lua_controller_program_source,

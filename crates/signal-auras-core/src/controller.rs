@@ -7,6 +7,8 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
+pub const DEFAULT_LUA_CALLBACK_BUDGET: Duration = Duration::from_millis(50);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ControllerRegistrationKind {
     Hotkey,
@@ -393,6 +395,7 @@ pub enum CallbackDisposition {
     Dropped,
     Completed,
     Slow,
+    Preempted,
     Failed,
     Cancelled,
 }
@@ -516,6 +519,11 @@ impl LuaCallbackScheduler {
     pub fn cancel_task(&mut self, task: &LuaCallbackTask) -> CallbackDisposition {
         self.active_or_pending.remove(&task.registration_label);
         CallbackDisposition::Cancelled
+    }
+
+    pub fn preempt_task(&mut self, task: &LuaCallbackTask) -> CallbackDisposition {
+        self.active_or_pending.remove(&task.registration_label);
+        CallbackDisposition::Preempted
     }
 
     pub fn cancel_all(&mut self) -> usize {
@@ -755,6 +763,32 @@ mod tests {
             CallbackDisposition::Accepted
         );
         assert_eq!(scheduler.pending_len(), 2);
+    }
+
+    #[test]
+    fn callback_scheduler_releases_active_task_after_preemption() {
+        let registration = hotkey_registration("F5");
+        let report = available_capability_report(&registration.required_capabilities, "test");
+        let mut scheduler = LuaCallbackScheduler::new(2, Duration::from_millis(10)).unwrap();
+
+        assert_eq!(
+            scheduler
+                .schedule(&registration, &report, Instant::now())
+                .disposition,
+            CallbackDisposition::Accepted
+        );
+        let active = scheduler.pop_next().unwrap();
+        assert_eq!(
+            scheduler.preempt_task(&active),
+            CallbackDisposition::Preempted
+        );
+        assert_eq!(
+            scheduler
+                .schedule(&registration, &report, Instant::now())
+                .disposition,
+            CallbackDisposition::Accepted
+        );
+        assert_eq!(scheduler.pending_len(), 1);
     }
 
     #[test]
