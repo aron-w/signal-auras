@@ -1,6 +1,6 @@
 use crate::{DetectorDefinition, DiagnosableError, HotkeyId, Roi, StateTrackerDefinitionSet};
 
-pub const DEV_MODE_TOGGLE_HOTKEY: &str = "Ctrl+Shift+]";
+pub const DEV_MODE_TOGGLE_HOTKEY: &str = "Ctrl+/";
 pub const POINTER_DIAGNOSTIC_HOTKEY: &str = "Num1";
 pub const TRACKER_GHOST_HOTKEY: &str = "Num2";
 
@@ -149,7 +149,7 @@ mod tests {
     fn developer_diagnostic_hotkeys_are_canonicalized() {
         assert_eq!(
             DeveloperDiagnosticState::toggle_hotkey().unwrap().as_str(),
-            "Ctrl+Shift+]"
+            "Ctrl+/"
         );
         assert_eq!(
             DeveloperDiagnosticState::pointer_diagnostic_hotkey()

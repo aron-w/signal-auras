@@ -1257,6 +1257,7 @@ mod tests {
     fn kde_shortcut_sequence_maps_num_keypad_notation_for_qt() {
         assert_eq!(kde_shortcut_sequence("Num1"), "Num+1");
         assert_eq!(kde_shortcut_sequence("Ctrl+Alt+Num1"), "Ctrl+Alt+Num+1");
+        assert_eq!(kde_shortcut_sequence("Ctrl+/"), "Ctrl+/");
         assert_eq!(kde_shortcut_sequence("Ctrl+Shift+]"), "Ctrl+Shift+}");
         assert_eq!(kde_shortcut_sequence("Ctrl+Shift+["), "Ctrl+Shift+{");
         assert_eq!(kde_shortcut_sequence("Ctrl+Alt+]"), "Ctrl+Alt+]");
