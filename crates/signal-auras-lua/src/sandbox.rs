@@ -486,6 +486,12 @@ fn parse_overlay_visual(source: &str) -> Result<VisualDefinition, DiagnosableErr
                     table_body_field_after(source, "ready")?
                         .map(parse_overlay_style)
                         .transpose()?,
+                    table_body_field_after(source, "activated")?
+                        .map(parse_overlay_style)
+                        .transpose()?,
+                    table_body_field_after(source, "active")?
+                        .map(parse_overlay_style)
+                        .transpose()?,
                     table_body_field_after(source, "inactive")?
                         .map(parse_overlay_style)
                         .transpose()?,
@@ -662,6 +668,14 @@ fn parse_radial_phase_rule(
     phase: RadialCooldownPhase,
     source: &str,
 ) -> Result<RadialPhaseRule, DiagnosableError> {
+    for forbidden in ["fill", "background", "opacity"] {
+        if top_level_field_index(source, forbidden).is_some() {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                format!("radial_cooldown phase style field '{forbidden}' is not accepted"),
+            ));
+        }
+    }
     let sample_body = table_body_field_after(source, "sample")?.ok_or_else(|| {
         DiagnosableError::new(
             ErrorPhase::ScriptValidation,
@@ -703,9 +717,6 @@ fn parse_radial_phase_rule(
             }
         },
         max_fill_until_ready: field_f32(source, "max_fill_until_ready")?,
-        fill: field_string(source, "fill").map(str::to_string),
-        background: field_string(source, "background").map(str::to_string),
-        opacity: field_f32(source, "opacity")?,
     })
 }
 
@@ -2113,6 +2124,114 @@ mod tests {
         assert!(!program
             .required_capabilities()
             .contains(CapabilityKind::SynthesizedInput));
+    }
+
+    #[test]
+    fn rejects_radial_detector_phase_style_fields() {
+        for field in [
+            r##"fill = "#f97316""##,
+            r##"background = "#7f1d1d""##,
+            "opacity = 0.85",
+        ] {
+            let source = format!(
+                r#"
+                sa.state.track({{
+                  id = "refutation_cooldown",
+                  capabilities = {{ "screen_read" }},
+                  poll_ms = 50,
+                  detector = {{
+                    kind = "radial_cooldown",
+                    roi = {{ x = 0, y = 0, w = 36, h = 36 }},
+                    phases = {{
+                      order = {{ "ready" }},
+                      fallback = "unknown",
+                      ready = {{
+                        sample = {{ kind = "clock_probe", angle_deg = 352, radius_px = 15, w = 3, h = 3 }},
+                        min_luminance_percent = 44,
+                        min_saturation = 85,
+                        progress_fill = "full",
+                        {field},
+                      }},
+                    }},
+                  }},
+                }})
+                "#
+            );
+            let error = load_lua_controller_program_source(&source).unwrap_err();
+            assert!(
+                error.message.contains("radial_cooldown phase style field"),
+                "unexpected error for {field}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_overlay_activated_and_active_visual_styles() {
+        let program = load_lua_controller_program_source(
+            r##"
+            poe = { processes = { "PathOfExileSteam.exe" } }
+
+            sa.state.track({
+              id = "refutation_cooldown",
+              scope = poe,
+              capabilities = { "screen_read" },
+              poll_ms = 50,
+              detector = {
+                kind = "radial_cooldown",
+                roi = { x = 0, y = 0, w = 36, h = 36 },
+                phases = {
+                  order = { "ready" },
+                  fallback = "unknown",
+                  ready = {
+                    sample = { kind = "clock_probe", angle_deg = 352, radius_px = 15, w = 3, h = 3 },
+                    min_luminance_percent = 44,
+                    min_saturation = 85,
+                    progress_fill = "full",
+                  },
+                },
+              },
+            })
+
+            sa.overlay.mount({
+              id = "poe2_status",
+              scope = poe,
+              provider = "native",
+              surface = "overlay",
+              visuals = {
+                {
+                  id = "refutation",
+                  kind = "progress_bar",
+                  bind = { tracker = "refutation_cooldown", field = "remaining_ms" },
+                  rect = { x = 1200, y = 930, w = 150, h = 22 },
+                  opacity = 0.72,
+                  fill = "#5aa7ff",
+                  background = "#101820",
+                  activated = { fill = "#f97316", background = "#7f1d1d", opacity = 0.85 },
+                  active = { fill = "#38bdf8", background = "#082f49", opacity = 0.8 },
+                },
+              },
+            })
+            "##,
+        )
+        .unwrap();
+
+        let visual = match &program.overlays().overlays()[0].visuals[0] {
+            VisualDefinition::ProgressBar(visual) => visual,
+        };
+        assert_eq!(
+            visual
+                .activated_style
+                .as_ref()
+                .and_then(|style| style.fill.as_deref()),
+            Some("#f97316")
+        );
+        assert_eq!(
+            visual
+                .active_style
+                .as_ref()
+                .and_then(|style| style.background.as_deref()),
+            Some("#082f49")
+        );
     }
 
     #[test]

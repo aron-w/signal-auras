@@ -178,6 +178,8 @@ pub struct ProgressBarVisualDefinition {
     pub background: String,
     pub label_visible: bool,
     pub ready_style: Option<OverlayStyle>,
+    pub activated_style: Option<OverlayStyle>,
+    pub active_style: Option<OverlayStyle>,
     pub inactive_style: Option<OverlayStyle>,
 }
 
@@ -192,6 +194,8 @@ impl ProgressBarVisualDefinition {
         background: impl Into<String>,
         label_visible: bool,
         ready_style: Option<OverlayStyle>,
+        activated_style: Option<OverlayStyle>,
+        active_style: Option<OverlayStyle>,
         inactive_style: Option<OverlayStyle>,
     ) -> Result<Self, DiagnosableError> {
         validate_opacity(opacity)?;
@@ -204,6 +208,8 @@ impl ProgressBarVisualDefinition {
             background: validate_color(background.into())?,
             label_visible,
             ready_style,
+            activated_style,
+            active_style,
             inactive_style,
         })
     }
@@ -620,14 +626,10 @@ fn visual_snapshot(
                     }
                 }
                 RadialCooldownPhase::Activated => {
-                    snapshot.fill = "#f97316".to_string();
-                    snapshot.background = "#7f1d1d".to_string();
-                    snapshot.opacity = snapshot.opacity.max(0.85);
+                    apply_activated_style(visual, &mut snapshot);
                 }
                 RadialCooldownPhase::Active => {
-                    snapshot.fill = "#38bdf8".to_string();
-                    snapshot.background = "#082f49".to_string();
-                    snapshot.opacity = snapshot.opacity.max(0.8);
+                    apply_active_style(visual, &mut snapshot);
                 }
                 RadialCooldownPhase::Unknown => {
                     apply_inactive_style(visual, &mut snapshot);
@@ -670,6 +672,26 @@ fn apply_inactive_style(visual: &ProgressBarVisualDefinition, snapshot: &mut Vis
         style.apply_to(snapshot);
     }
     snapshot.active = false;
+}
+
+fn apply_activated_style(visual: &ProgressBarVisualDefinition, snapshot: &mut VisualSnapshot) {
+    if let Some(style) = &visual.activated_style {
+        style.apply_to(snapshot);
+    } else {
+        snapshot.fill = "#f97316".to_string();
+        snapshot.background = "#7f1d1d".to_string();
+        snapshot.opacity = snapshot.opacity.max(0.85);
+    }
+}
+
+fn apply_active_style(visual: &ProgressBarVisualDefinition, snapshot: &mut VisualSnapshot) {
+    if let Some(style) = &visual.active_style {
+        style.apply_to(snapshot);
+    } else {
+        snapshot.fill = "#38bdf8".to_string();
+        snapshot.background = "#082f49".to_string();
+        snapshot.opacity = snapshot.opacity.max(0.8);
+    }
 }
 
 fn closed_snapshot(
@@ -738,6 +760,18 @@ fn validate_overlay_bindings(
                 ),
             ));
         }
+        let VisualDefinition::ProgressBar(progress_bar) = visual;
+        if !matches!(tracker.detector, DetectorDefinition::RadialCooldown { .. })
+            && (progress_bar.activated_style.is_some() || progress_bar.active_style.is_some())
+        {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                format!(
+                    "overlay visual '{}' phase styles require a radial_cooldown remaining_ms binding",
+                    progress_bar.id
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -782,4 +816,90 @@ fn normalize_id(value: String, field: &'static str) -> Result<String, Diagnosabl
         ));
     }
     Ok(value.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn radial_visual(
+        activated_style: Option<OverlayStyle>,
+        active_style: Option<OverlayStyle>,
+    ) -> VisualDefinition {
+        VisualDefinition::ProgressBar(
+            ProgressBarVisualDefinition::new(
+                "refutation",
+                StateBinding::new("refutation_cooldown", StateField::RemainingMs).unwrap(),
+                OverlayRect::new(10, 10, 150, 22).unwrap(),
+                0.72,
+                "#5aa7ff",
+                "#101820",
+                true,
+                Some(OverlayStyle::new(Some("#4ade80"), None::<&str>, Some(0.85), None).unwrap()),
+                activated_style,
+                active_style,
+                Some(OverlayStyle::new(None::<&str>, None::<&str>, Some(0.25), None).unwrap()),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn radial_state(phase: RadialCooldownPhase) -> TrackerState {
+        TrackerState::RadialCooldown {
+            phase,
+            ready: phase == RadialCooldownPhase::Ready,
+            cooldown_fraction: 50,
+            remaining_ms: Some(4_000),
+            total_estimated_ms: Some(8_000),
+            predicted_remaining_ms: Some(4_000),
+            predicted_duration_ms: Some(8_000),
+            confidence: 95,
+            freshness_ms: 0,
+        }
+    }
+
+    #[test]
+    fn overlay_progress_bar_applies_radial_activated_and_active_style_overrides() {
+        let visual = radial_visual(
+            Some(
+                OverlayStyle::new(Some("#111111"), Some("#222222"), Some(0.41), Some(false))
+                    .unwrap(),
+            ),
+            Some(
+                OverlayStyle::new(Some("#333333"), Some("#444444"), Some(0.42), Some(false))
+                    .unwrap(),
+            ),
+        );
+
+        let activated =
+            visual_snapshot(&visual, &radial_state(RadialCooldownPhase::Activated), 0).unwrap();
+        assert_eq!(activated.fill, "#111111");
+        assert_eq!(activated.background, "#222222");
+        assert!((activated.opacity - 0.41).abs() < f32::EPSILON);
+        assert!(!activated.label_visible);
+
+        let active =
+            visual_snapshot(&visual, &radial_state(RadialCooldownPhase::Active), 0).unwrap();
+        assert_eq!(active.fill, "#333333");
+        assert_eq!(active.background, "#444444");
+        assert!((active.opacity - 0.42).abs() < f32::EPSILON);
+        assert!(!active.label_visible);
+    }
+
+    #[test]
+    fn overlay_progress_bar_preserves_radial_phase_fallback_styles_without_overrides() {
+        let visual = radial_visual(None, None);
+
+        let activated =
+            visual_snapshot(&visual, &radial_state(RadialCooldownPhase::Activated), 0).unwrap();
+        assert_eq!(activated.fill, "#f97316");
+        assert_eq!(activated.background, "#7f1d1d");
+        assert!((activated.opacity - 0.85).abs() < f32::EPSILON);
+
+        let active =
+            visual_snapshot(&visual, &radial_state(RadialCooldownPhase::Active), 0).unwrap();
+        assert_eq!(active.fill, "#38bdf8");
+        assert_eq!(active.background, "#082f49");
+        assert!((active.opacity - 0.8).abs() < f32::EPSILON);
+    }
 }

@@ -688,6 +688,8 @@ fn overlay_progress_visual(
             "#101820",
             true,
             Some(OverlayStyle::new(Some("#4ade80"), None::<&str>, Some(0.85), None).unwrap()),
+            None,
+            None,
             Some(OverlayStyle::new(None::<&str>, None::<&str>, Some(0.25), None).unwrap()),
         )
         .unwrap(),

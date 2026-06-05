@@ -79,6 +79,21 @@ fn lua_api_accepts_poe2_controller_example() {
     assert_eq!(loop_motion.repeat_every_ms, 40);
     assert_eq!(loop_motion.repeat_callback, "click_left");
     assert!(program.callback("ctrl_click").is_some());
+
+    let refutation_visual = program.overlays().overlays()[0]
+        .visuals
+        .iter()
+        .find_map(|visual| match visual {
+            signal_auras_core::VisualDefinition::ProgressBar(visual)
+                if visual.id == "refutation" =>
+            {
+                Some(visual)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(refutation_visual.activated_style.is_some());
+    assert!(refutation_visual.active_style.is_some());
 }
 
 #[test]
@@ -156,6 +171,52 @@ fn overlay_api_accepts_poe2_progress_bars_without_macro_reactions() {
 }
 
 #[test]
+fn overlay_api_accepts_radial_activated_and_active_styles() {
+    let program = load_lua_controller_program_source(&overlay_source("native")).unwrap();
+    let refutation = program.overlays().overlays()[0]
+        .visuals
+        .iter()
+        .find_map(|visual| match visual {
+            signal_auras_core::VisualDefinition::ProgressBar(visual)
+                if visual.id == "refutation" =>
+            {
+                Some(visual)
+            }
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        refutation
+            .activated_style
+            .as_ref()
+            .and_then(|style| style.fill.as_deref()),
+        Some("#f97316")
+    );
+    assert_eq!(
+        refutation
+            .activated_style
+            .as_ref()
+            .and_then(|style| style.background.as_deref()),
+        Some("#7f1d1d")
+    );
+    assert_eq!(
+        refutation
+            .active_style
+            .as_ref()
+            .and_then(|style| style.fill.as_deref()),
+        Some("#38bdf8")
+    );
+    assert_eq!(
+        refutation
+            .active_style
+            .as_ref()
+            .and_then(|style| style.background.as_deref()),
+        Some("#082f49")
+    );
+}
+
+#[test]
 fn overlay_api_accepts_future_provider_ids_as_declarations() {
     for provider in ["webview", "tauri_window", "tool_window"] {
         let program = load_lua_controller_program_source(&overlay_source(provider)).unwrap();
@@ -224,6 +285,20 @@ fn overlay_api_rejects_invalid_provider_duplicate_visuals_rects_opacity_and_bind
               opacity = 0.7,
               fill = "#d8b84c",
               background = "#101820",
+            },
+            "##,
+        ),
+        overlay_source_with_visuals(
+            r##"
+            {
+              id = "phase_style_wrong_tracker",
+              kind = "progress_bar",
+              bind = { tracker = "heavy_stun", field = "progress_percent" },
+              rect = { x = 0, y = 0, w = 100, h = 20 },
+              opacity = 0.7,
+              fill = "#d8b84c",
+              background = "#101820",
+              active = { fill = "#38bdf8" },
             },
             "##,
         ),
@@ -334,8 +409,6 @@ fn radial_cooldown_lua_phases_are_required_and_validated() {
             max_luminance_percent = 12,
             max_saturation = 20,
             progress_fill = "empty",
-            fill = "#f97316",
-            background = "#7f1d1d",
           },
           active = {
             sample = { kind = "clock_probe", angle_deg = 8, radius_px = 15, w = 3, h = 3 },
@@ -374,6 +447,37 @@ fn radial_cooldown_lua_phases_are_required_and_validated() {
         assert!(
             load_lua_controller_program_source(&invalid).is_err(),
             "source should be rejected: {invalid}"
+        );
+    }
+}
+
+#[test]
+fn radial_cooldown_lua_phases_reject_visual_style_fields() {
+    for field in [
+        r##"fill = "#f97316""##,
+        r##"background = "#7f1d1d""##,
+        "opacity = 0.85",
+    ] {
+        let source = radial_tracker_source(&format!(
+            r#"
+            phases = {{
+              order = {{ "ready" }},
+              fallback = "unknown",
+              ready = {{
+                sample = {{ kind = "clock_probe", angle_deg = 352, radius_px = 15, w = 3, h = 3 }},
+                min_luminance_percent = 44,
+                min_saturation = 85,
+                progress_fill = "full",
+                {field},
+              }},
+            }},
+            "#
+        ));
+        let err = load_lua_controller_program_source(&source).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("radial_cooldown phase style field"),
+            "unexpected error for {field}: {err}"
         );
     }
 }
@@ -524,6 +628,8 @@ fn overlay_visuals() -> String {
               background = "#101820",
               label = { visible = true },
               ready = { fill = "#4ade80", opacity = 0.85 },
+              activated = { fill = "#f97316", background = "#7f1d1d", opacity = 0.85 },
+              active = { fill = "#38bdf8", background = "#082f49", opacity = 0.8 },
               inactive = { opacity = 0.25 },
             },
     "##
