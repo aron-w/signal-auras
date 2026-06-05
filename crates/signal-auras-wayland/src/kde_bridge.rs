@@ -730,10 +730,25 @@ fn kde_shortcut_sequence(shortcut: &str) -> String {
     let Some((prefix, key)) = shortcut.rsplit_once('+') else {
         return kde_shortcut_key(shortcut).unwrap_or_else(|| shortcut.to_string());
     };
-    match kde_shortcut_key(key) {
+    match kde_shortcut_key_with_modifiers(prefix, key) {
         Some(key) => format!("{prefix}+{key}"),
         None => shortcut.to_string(),
     }
+}
+
+fn kde_shortcut_key_with_modifiers(prefix: &str, key: &str) -> Option<String> {
+    if prefix
+        .split('+')
+        .map(str::trim)
+        .any(|modifier| modifier == "Shift")
+    {
+        match key {
+            "[" => return Some("{".to_string()),
+            "]" => return Some("}".to_string()),
+            _ => {}
+        }
+    }
+    kde_shortcut_key(key)
 }
 
 fn kde_shortcut_key(key: &str) -> Option<String> {
@@ -1242,6 +1257,8 @@ mod tests {
     fn kde_shortcut_sequence_maps_num_keypad_notation_for_qt() {
         assert_eq!(kde_shortcut_sequence("Num1"), "Num+1");
         assert_eq!(kde_shortcut_sequence("Ctrl+Alt+Num1"), "Ctrl+Alt+Num+1");
+        assert_eq!(kde_shortcut_sequence("Ctrl+Shift+]"), "Ctrl+Shift+}");
+        assert_eq!(kde_shortcut_sequence("Ctrl+Shift+["), "Ctrl+Shift+{");
         assert_eq!(kde_shortcut_sequence("Ctrl+Alt+]"), "Ctrl+Alt+]");
     }
 
