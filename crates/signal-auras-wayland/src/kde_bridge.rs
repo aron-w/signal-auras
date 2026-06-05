@@ -117,6 +117,7 @@ struct KwinScriptHandle {
 impl KwinShortcutBridge {
     pub fn connect() -> Result<Self, DiagnosableError> {
         let connection = zbus::blocking::Connection::session().map_err(bridge_error)?;
+        let _ = purge_stale_signal_auras_shortcuts(&connection);
         let callback_bus_name = format!("org.signalAuras.Runner{}", std::process::id());
         let callback_object_path = "/org/signalAuras/Runner".to_string();
         let callback_wake_fd = crate::event_loop::RuntimeWakeFd::new()?;
@@ -468,6 +469,75 @@ impl KwinShortcutBridge {
             failed: usize::from(!unloaded || !unregistered),
         })
     }
+}
+
+fn purge_stale_signal_auras_shortcuts(
+    connection: &zbus::blocking::Connection,
+) -> Result<CleanupReport, DiagnosableError> {
+    let kglobalaccel = kglobalaccel_proxy(connection)?;
+    let actions = kglobalaccel
+        .call::<_, _, Vec<Vec<String>>>("allActionsForComponent", &(vec!["kwin"]))
+        .map_err(bridge_error)?;
+    let stale_actions = stale_signal_auras_action_names(&actions, |pid| {
+        std::path::Path::new("/proc").join(pid.to_string()).exists()
+    });
+    if stale_actions.is_empty() {
+        return Ok(CleanupReport::empty());
+    }
+    let proxy = kwin_scripting_proxy(connection)?;
+    let mut failures = 0usize;
+    for action_name in &stale_actions {
+        let script_id = signal_auras_script_id_for_action(action_name);
+        let unloaded = proxy
+            .call::<_, _, bool>("unloadScript", &script_id.as_str())
+            .unwrap_or(false);
+        let unregistered = kglobalaccel
+            .call::<_, _, bool>("unregister", &("kwin", action_name.as_str()))
+            .unwrap_or(false);
+        let _ = fs::remove_file(std::env::temp_dir().join(format!("{script_id}.js")));
+        if !unloaded || !unregistered {
+            failures += 1;
+        }
+    }
+    Ok(CleanupReport {
+        attempted: stale_actions.len(),
+        succeeded: stale_actions.len().saturating_sub(failures),
+        failed: failures,
+    })
+}
+
+fn stale_signal_auras_action_names(
+    actions: &[Vec<String>],
+    process_alive: impl Fn(u32) -> bool,
+) -> Vec<String> {
+    actions
+        .iter()
+        .filter_map(|action| {
+            let component = action.first()?;
+            let action_name = action.get(1)?;
+            let description = action.get(3)?;
+            if component != "kwin" || !description.starts_with("Signal Auras ") {
+                return None;
+            }
+            let pid = signal_auras_action_pid(action_name)?;
+            (!process_alive(pid)).then(|| action_name.clone())
+        })
+        .collect()
+}
+
+fn signal_auras_action_pid(action_name: &str) -> Option<u32> {
+    let mut parts = action_name.split('_');
+    (parts.next()? == "SignalAuras").then_some(())?;
+    let pid = parts.next()?.parse::<u32>().ok()?;
+    parts.next()?.parse::<usize>().ok()?;
+    parts.next().is_none().then_some(pid)
+}
+
+fn signal_auras_script_id_for_action(action_name: &str) -> String {
+    action_name
+        .strip_prefix("SignalAuras_")
+        .map(|suffix| format!("signal-auras-{}", suffix.replace('_', "-")))
+        .unwrap_or_else(|| action_name.to_string())
 }
 
 impl Drop for KwinShortcutBridge {
@@ -1261,6 +1331,44 @@ mod tests {
         assert_eq!(kde_shortcut_sequence("Ctrl+Shift+]"), "Ctrl+Shift+}");
         assert_eq!(kde_shortcut_sequence("Ctrl+Shift+["), "Ctrl+Shift+{");
         assert_eq!(kde_shortcut_sequence("Ctrl+Alt+]"), "Ctrl+Alt+]");
+    }
+
+    #[test]
+    fn stale_signal_auras_shortcuts_selects_dead_pid_actions_only() {
+        let actions = vec![
+            vec![
+                "kwin".to_string(),
+                "SignalAuras_111_2".to_string(),
+                "KWin".to_string(),
+                "Signal Auras Ctrl+/".to_string(),
+            ],
+            vec![
+                "kwin".to_string(),
+                "SignalAuras_222_3".to_string(),
+                "KWin".to_string(),
+                "Signal Auras Num1".to_string(),
+            ],
+            vec![
+                "kwin".to_string(),
+                "Window Close".to_string(),
+                "KWin".to_string(),
+                "Close Window".to_string(),
+            ],
+            vec![
+                "kwin".to_string(),
+                "SignalAuras_bad_2".to_string(),
+                "KWin".to_string(),
+                "Signal Auras Num2".to_string(),
+            ],
+        ];
+
+        let stale = stale_signal_auras_action_names(&actions, |pid| pid == 222);
+
+        assert_eq!(stale, vec!["SignalAuras_111_2".to_string()]);
+        assert_eq!(
+            signal_auras_script_id_for_action("SignalAuras_111_2"),
+            "signal-auras-111-2"
+        );
     }
 
     fn event(action_name: &str) -> KwinBridgeEvent {
