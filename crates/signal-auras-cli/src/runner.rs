@@ -7,12 +7,13 @@ use signal_auras_core::{
     execute_plan_with_inter_action_delay, queue_controller_callback_outputs, ActiveProcessProvider,
     BindingMode, BindingTrigger, CallbackDisposition, CapabilityKind, CapabilityReport,
     CapabilitySet, ControllerProgram, ControllerRegistration, ControllerRegistrationKind,
-    DiagnosableError, ErrorPhase, FocusFreshnessPolicy, HotkeyBinding, HotkeyId, HotkeyRegistrar,
-    InputProviderConfig, InputProviderMode, InputProviderOutput, KeyToken, LoopBody,
-    LoopDefinition, LoopInterval, LoopRepeat, LuaCallbackScheduler, MacroAction, MacroDefinition,
-    MacroExecutor, MacroRunId, MacroRunPoll, MacroRunState, MacroScheduler, MotionDefinition,
-    MotionDiscardReason, MotionInputEvent, MotionInputState, MotionRuntime, MotionRuntimeEvent,
-    MotionToken, MotionTrigger, RegistrationState, RuntimeMotion, RuntimePress, RuntimeStats,
+    DeveloperDiagnosticShortcut, DeveloperDiagnosticState, DiagnosableError, ErrorPhase,
+    FocusFreshnessPolicy, HotkeyBinding, HotkeyId, HotkeyRegistrar, InputProviderConfig,
+    InputProviderMode, InputProviderOutput, KeyToken, LoopBody, LoopDefinition, LoopInterval,
+    LoopRepeat, LuaCallbackScheduler, MacroAction, MacroDefinition, MacroExecutor, MacroRunId,
+    MacroRunPoll, MacroRunState, MacroScheduler, MotionDefinition, MotionDiscardReason,
+    MotionInputEvent, MotionInputState, MotionRuntime, MotionRuntimeEvent, MotionToken,
+    MotionTrigger, RegistrationState, RuntimeMotion, RuntimePress, RuntimeStats,
     RustOperationBatch, ScopeSelection, ShutdownReason, StateTrackerPoller,
     SynthesizedInputRequest, TrackerState,
 };
@@ -1156,6 +1157,9 @@ pub fn start_live_real_controller_runner_with_options(
         }
     }
 
+    let mut developer_diagnostics = DeveloperDiagnosticRuntime::default();
+    developer_diagnostics.register_toggle(adapter, log);
+
     let shutdown_reason = match run_live_real_controller_lifecycle(
         &program,
         runtime.as_ref(),
@@ -1164,6 +1168,7 @@ pub fn start_live_real_controller_runner_with_options(
         &mut stats,
         log,
         signal_fd,
+        &mut developer_diagnostics,
     ) {
         Ok(reason) => reason,
         Err(error) => {
@@ -1286,8 +1291,18 @@ pub fn start_live_real_runner_with_options(
         }
     }
 
+    let mut developer_diagnostics = DeveloperDiagnosticRuntime::default();
+    developer_diagnostics.register_toggle(adapter, log);
+
     let shutdown_reason = match run_live_real_lifecycle(
-        &bindings, &motions, &presses, adapter, &mut stats, log, signal_fd,
+        &bindings,
+        &motions,
+        &presses,
+        adapter,
+        &mut stats,
+        log,
+        signal_fd,
+        &mut developer_diagnostics,
     ) {
         Ok(reason) => reason,
         Err(error) => {
@@ -1999,6 +2014,7 @@ fn run_live_real_lifecycle(
     stats: &mut RuntimeStats,
     log: RuntimeLog,
     mut signal_fd: RuntimeSignalFd,
+    developer_diagnostics: &mut DeveloperDiagnosticRuntime,
 ) -> Result<ShutdownReason, DiagnosableError> {
     let timer_fd = RuntimeTimerFd::new()?;
     let mut macro_queue = LiveMacroQueue::default();
@@ -2029,6 +2045,7 @@ fn run_live_real_lifecycle(
             adapter,
             &mut macro_queue,
             &mut focus_tracker,
+            developer_diagnostics,
             stats,
             log,
         )?;
@@ -2086,6 +2103,7 @@ fn run_live_real_lifecycle(
                     adapter,
                     &mut macro_queue,
                     &mut focus_tracker,
+                    developer_diagnostics,
                     stats,
                     log,
                 )?;
@@ -2177,6 +2195,7 @@ fn run_live_real_controller_lifecycle(
     stats: &mut RuntimeStats,
     log: RuntimeLog,
     mut signal_fd: RuntimeSignalFd,
+    developer_diagnostics: &mut DeveloperDiagnosticRuntime,
 ) -> Result<ShutdownReason, DiagnosableError> {
     let timer_fd = RuntimeTimerFd::new()?;
     let mut scheduler = LuaCallbackScheduler::new(64, Duration::from_millis(50))?;
@@ -2199,6 +2218,7 @@ fn run_live_real_controller_lifecycle(
             adapter,
             &mut scheduler,
             capabilities,
+            developer_diagnostics,
             stats,
             log,
         )?;
@@ -2253,6 +2273,7 @@ fn run_live_real_controller_lifecycle(
                     adapter,
                     &mut scheduler,
                     capabilities,
+                    developer_diagnostics,
                     stats,
                     log,
                 )?;
@@ -2797,6 +2818,7 @@ fn drain_live_controller_shortcut_callbacks(
     adapter: &mut RealWaylandAdapter,
     scheduler: &mut LuaCallbackScheduler,
     capabilities: &CapabilityReport,
+    developer_diagnostics: &mut DeveloperDiagnosticRuntime,
     stats: &mut RuntimeStats,
     log: RuntimeLog,
 ) -> Result<(), DiagnosableError> {
@@ -2816,6 +2838,9 @@ fn drain_live_controller_shortcut_callbacks(
             "event=controller_callback_received hotkey={} dispatch_latency_ms={dispatch_latency_ms}",
             event.hotkey.as_str()
         ));
+        if developer_diagnostics.handle_shortcut(&event.hotkey, adapter, log)? {
+            continue;
+        }
         if let Some(registration) = controller_registration_for_hotkey(program, &event.hotkey) {
             let _ = schedule_controller_callback(
                 registration,
@@ -2841,6 +2866,7 @@ fn drain_live_shortcut_callbacks(
     adapter: &mut RealWaylandAdapter,
     macro_queue: &mut LiveMacroQueue,
     focus_tracker: &mut ScopedFocusTracker,
+    developer_diagnostics: &mut DeveloperDiagnosticRuntime,
     stats: &mut RuntimeStats,
     log: RuntimeLog,
 ) -> Result<(), DiagnosableError> {
@@ -2860,6 +2886,9 @@ fn drain_live_shortcut_callbacks(
             "event=callback_received hotkey={} dispatch_latency_ms={dispatch_latency_ms}",
             event.hotkey.as_str()
         ));
+        if developer_diagnostics.handle_shortcut(&event.hotkey, adapter, log)? {
+            continue;
+        }
         if let Some(binding) = bindings
             .iter()
             .find(|binding| binding.trigger == BindingTrigger::Keyboard(event.hotkey.clone()))
@@ -2917,6 +2946,123 @@ struct LiveMacroRun {
 struct ScopedFocusTracker {
     active: Option<bool>,
     deactivated: bool,
+}
+
+#[derive(Default)]
+struct DeveloperDiagnosticRuntime {
+    state: DeveloperDiagnosticState,
+    toggle_registration: Option<signal_auras_core::RegistrationId>,
+    pointer_registration: Option<signal_auras_core::RegistrationId>,
+}
+
+impl DeveloperDiagnosticRuntime {
+    fn register_toggle(&mut self, adapter: &mut RealWaylandAdapter, log: RuntimeLog) {
+        let Ok(hotkey) = DeveloperDiagnosticState::toggle_hotkey() else {
+            log.warn("event=developer_diagnostic_registration result=failed reason=invalid_toggle_hotkey");
+            return;
+        };
+        match adapter.register_internal_hotkey(hotkey) {
+            Ok(id) => {
+                log.info(format!(
+                    "event=developer_diagnostic_registration shortcut=toggle hotkey={} id={}",
+                    signal_auras_core::DEV_MODE_TOGGLE_HOTKEY,
+                    id.as_str()
+                ));
+                self.toggle_registration = Some(id);
+            }
+            Err(error) => {
+                log.warn(format!(
+                    "event=developer_diagnostic_registration shortcut=toggle result=failed error={error}"
+                ));
+            }
+        }
+    }
+
+    fn handle_shortcut(
+        &mut self,
+        hotkey: &HotkeyId,
+        adapter: &mut RealWaylandAdapter,
+        log: RuntimeLog,
+    ) -> Result<bool, DiagnosableError> {
+        let Some(shortcut) = DeveloperDiagnosticShortcut::from_hotkey(hotkey)? else {
+            return Ok(false);
+        };
+        match shortcut {
+            DeveloperDiagnosticShortcut::ToggleDevMode => {
+                let enabled = self.state.toggle();
+                log.info(format!(
+                    "event=developer_mode_toggle enabled={enabled} hotkey={}",
+                    hotkey.as_str()
+                ));
+                if enabled {
+                    self.enable_pointer_shortcut(adapter, log)?;
+                } else {
+                    self.disable_pointer_shortcut(adapter, log)?;
+                }
+            }
+            DeveloperDiagnosticShortcut::PointerUnderMouse => {
+                if !self.state.pointer_diagnostic_enabled() {
+                    log.debug(format!(
+                        "event=developer_pointer_diagnostic disposition=ignored reason=dev_mode_disabled hotkey={}",
+                        hotkey.as_str()
+                    ));
+                    return Ok(true);
+                }
+                match adapter.pointer_diagnostic() {
+                    Ok(report) => log.info(report.render_log_line()),
+                    Err(error) => log.warn(format!(
+                        "event=developer_pointer_diagnostic disposition=failed error={error}"
+                    )),
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    fn enable_pointer_shortcut(
+        &mut self,
+        adapter: &mut RealWaylandAdapter,
+        log: RuntimeLog,
+    ) -> Result<(), DiagnosableError> {
+        if self.pointer_registration.is_some() {
+            return Ok(());
+        }
+        let hotkey = DeveloperDiagnosticState::pointer_diagnostic_hotkey()?;
+        match adapter.register_internal_hotkey(hotkey) {
+            Ok(id) => {
+                log.info(format!(
+                    "event=developer_diagnostic_registration shortcut=pointer hotkey={} id={}",
+                    signal_auras_core::POINTER_DIAGNOSTIC_HOTKEY,
+                    id.as_str()
+                ));
+                self.pointer_registration = Some(id);
+            }
+            Err(error) => {
+                log.warn(format!(
+                    "event=developer_diagnostic_registration shortcut=pointer result=failed error={error}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn disable_pointer_shortcut(
+        &mut self,
+        adapter: &mut RealWaylandAdapter,
+        log: RuntimeLog,
+    ) -> Result<(), DiagnosableError> {
+        let Some(id) = self.pointer_registration.take() else {
+            return Ok(());
+        };
+        let report = adapter.unregister_internal_hotkey(&id)?;
+        log.info(format!(
+            "event=developer_diagnostic_unregistration shortcut=pointer id={} attempted={} failed={}",
+            id.as_str(),
+            report.attempted,
+            report.failed
+        ));
+        Ok(())
+    }
 }
 
 impl ScopedFocusTracker {

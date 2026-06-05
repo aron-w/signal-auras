@@ -1,6 +1,7 @@
 mod config;
 mod consent;
 mod controller;
+mod dev_diagnostics;
 mod error;
 mod hotkey;
 mod key;
@@ -22,6 +23,10 @@ pub use controller::{
     CallbackDisposition, CallbackOverloadPolicy, CallbackScheduleResult, ControllerCallback,
     ControllerLoopPolicy, ControllerProgram, ControllerRegistration, ControllerRegistrationKind,
     ControllerRegistrationSet, LuaCallbackScheduler, LuaCallbackTask, RustOperationBatch,
+};
+pub use dev_diagnostics::{
+    DeveloperDiagnosticShortcut, DeveloperDiagnosticState, ScreenPixelColor,
+    DEV_MODE_TOGGLE_HOTKEY, POINTER_DIAGNOSTIC_HOTKEY,
 };
 pub use error::{
     AdapterDiagnostic, Capability, CapabilityAvailability, CapabilityKind, CapabilityReport,

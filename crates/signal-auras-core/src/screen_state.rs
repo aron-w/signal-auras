@@ -1,7 +1,7 @@
 use crate::{
     ActiveProcessContext, AdapterDiagnostic, CapabilityAvailability, CapabilityKind,
     CapabilityReport, CapabilitySet, CapabilityStatus, DiagnosableError, ErrorPhase, ScopeDecision,
-    ScopeSelection,
+    ScopeSelection, ScreenPixelColor,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -231,6 +231,37 @@ impl ScreenSample {
 
     pub fn synthetic_percent(captured_at_ms: u64, percent: u8) -> Self {
         Self::new(captured_at_ms, [percent.min(100)])
+    }
+
+    pub fn pixel_color(&self, x: u32, y: u32) -> Option<ScreenPixelColor> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let bytes_per_pixel = self.pixel_format.bytes_per_pixel();
+        let stride = self.stride as usize;
+        if stride < self.width as usize * bytes_per_pixel {
+            return None;
+        }
+        let offset = y as usize * stride + x as usize * bytes_per_pixel;
+        let pixel = self.pixels.get(offset..offset + bytes_per_pixel)?;
+        match self.pixel_format {
+            ScreenPixelFormat::Luma8 => {
+                let value = pixel[0];
+                Some(ScreenPixelColor::rgb(value, value, value))
+            }
+            ScreenPixelFormat::Rgb888 | ScreenPixelFormat::Rgbx8888 => {
+                Some(ScreenPixelColor::rgb(pixel[0], pixel[1], pixel[2]))
+            }
+            ScreenPixelFormat::Bgr888 | ScreenPixelFormat::Bgrx8888 => {
+                Some(ScreenPixelColor::rgb(pixel[2], pixel[1], pixel[0]))
+            }
+            ScreenPixelFormat::Rgba8888 => Some(ScreenPixelColor::rgba(
+                pixel[0], pixel[1], pixel[2], pixel[3],
+            )),
+            ScreenPixelFormat::Bgra8888 => Some(ScreenPixelColor::rgba(
+                pixel[2], pixel[1], pixel[0], pixel[3],
+            )),
+        }
     }
 }
 
@@ -758,6 +789,26 @@ mod tests {
             roi,
             fill_direction: ProgressFillDirection::LeftToRight,
         }
+    }
+
+    #[test]
+    fn screen_sample_returns_pixel_color_for_supported_formats() {
+        let sample = ScreenSample::from_pixels(
+            2,
+            2,
+            8,
+            ScreenPixelFormat::Bgra8888,
+            0,
+            vec![
+                0, 0, 0, 255, 10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 128,
+            ],
+        );
+
+        assert_eq!(
+            sample.pixel_color(1, 1),
+            Some(ScreenPixelColor::rgba(90, 80, 70, 128))
+        );
+        assert_eq!(sample.pixel_color(3, 1), None);
     }
 
     fn tracker(id: &str, detector: DetectorDefinition) -> StateTrackerDefinition {

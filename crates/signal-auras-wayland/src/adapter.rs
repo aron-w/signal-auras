@@ -3,8 +3,8 @@ use signal_auras_core::{
     CapabilitySet, CapabilityStatus, CleanupReport, DiagnosableError, ErrorPhase, HotkeyBinding,
     HotkeyRegistrar, InputEmission, InputProviderBackend, InputProviderConfig, MacroAction,
     MacroExecutor, MotionInputEvent, MotionToken, OverlayProviderReport, OverlaySnapshot,
-    ProcessName, RegistrationId, ScreenPixelFormat, ScreenSample, ScreenSampleProvider,
-    SynthesizedInputRequest,
+    ProcessName, RegistrationId, ScreenPixelColor, ScreenPixelFormat, ScreenSample,
+    ScreenSampleProvider, SynthesizedInputRequest,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -17,6 +17,100 @@ use crate::overlay::OverlayRendererAdapter;
 pub struct OverlaySmokeTestReport {
     pub overlay_id: String,
     pub pixel_report: crate::overlay::OverlaySmokePixelReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PointerDiagnosticReport {
+    pub x: i32,
+    pub y: i32,
+    pub pixel: Option<ScreenPixelColor>,
+    pub pixel_error: Option<String>,
+    pub sample_width: Option<u32>,
+    pub sample_height: Option<u32>,
+    pub active_window: Option<PointerWindowDiagnostic>,
+    pub pointed_window: Option<PointerWindowDiagnostic>,
+}
+
+impl PointerDiagnosticReport {
+    pub fn render_log_line(&self) -> String {
+        let pixel = self
+            .pixel
+            .as_ref()
+            .map(ScreenPixelColor::hex_rgb)
+            .unwrap_or_else(|| "unavailable".to_string());
+        let sample = match (self.sample_width, self.sample_height) {
+            (Some(width), Some(height)) => format!("{width}x{height}"),
+            _ => "unavailable".to_string(),
+        };
+        let pixel_error = self.pixel_error.as_deref().unwrap_or("none");
+        format!(
+            "event=developer_pointer_diagnostic x={} y={} pixel={} sample={} pixel_error={} active_window={} pointed_window={}",
+            self.x,
+            self.y,
+            pixel,
+            sample,
+            sanitize_log_value(pixel_error),
+            render_pointer_window(self.active_window.as_ref()),
+            render_pointer_window(self.pointed_window.as_ref())
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PointerWindowDiagnostic {
+    pub handle: String,
+    pub app_id: String,
+    pub window_class: String,
+    pub pid: Option<u32>,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl From<crate::kde_bridge::KwinPointerWindowInfo> for PointerWindowDiagnostic {
+    fn from(value: crate::kde_bridge::KwinPointerWindowInfo) -> Self {
+        Self {
+            handle: value.handle,
+            app_id: value.app_id,
+            window_class: value.window_class,
+            pid: value.pid,
+            x: value.x,
+            y: value.y,
+            width: value.width,
+            height: value.height,
+        }
+    }
+}
+
+fn render_pointer_window(window: Option<&PointerWindowDiagnostic>) -> String {
+    let Some(window) = window else {
+        return "none".to_string();
+    };
+    format!(
+        "handle:{};app_id:{};class:{};pid:{};geometry:{}x{}+{}+{}",
+        sanitize_log_value(&window.handle),
+        sanitize_log_value(&window.app_id),
+        sanitize_log_value(&window.window_class),
+        window
+            .pid
+            .map(|pid| pid.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        window.width,
+        window.height,
+        window.x,
+        window.y
+    )
+}
+
+fn sanitize_log_value(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            ' ' | '\n' | '\r' | '\t' | '|' => '_',
+            _ => character,
+        })
+        .collect()
 }
 
 impl OverlaySmokeTestReport {
@@ -167,6 +261,34 @@ impl RealWaylandAdapter {
         self.rejected_hotkeys.insert(hotkey.into());
     }
 
+    pub fn register_internal_hotkey(
+        &mut self,
+        hotkey: signal_auras_core::HotkeyId,
+    ) -> Result<RegistrationId, DiagnosableError> {
+        let binding = HotkeyBinding {
+            trigger: signal_auras_core::BindingTrigger::keyboard(hotkey),
+            mode: signal_auras_core::BindingMode::Consume,
+            scope: signal_auras_core::ScopeSelection::ExplicitGlobal,
+            macro_definition: signal_auras_core::MacroDefinition::new(vec![
+                signal_auras_core::MacroAction::delay(1)?,
+            ])?,
+            registration_state: signal_auras_core::RegistrationState::Pending,
+        };
+        self.register(binding)
+    }
+
+    pub fn unregister_internal_hotkey(
+        &mut self,
+        registration_id: &RegistrationId,
+    ) -> Result<CleanupReport, DiagnosableError> {
+        self.registrations
+            .retain(|existing| existing.as_str() != registration_id.as_str());
+        if let Some(bridge) = &mut self.shortcut_bridge {
+            return bridge.unregister_shortcut_script(registration_id);
+        }
+        Ok(CleanupReport::all_succeeded(1))
+    }
+
     pub fn ensure_active_process_provider(&mut self) -> Result<(), DiagnosableError> {
         if self.environment.is_some() {
             return Ok(());
@@ -233,6 +355,58 @@ impl RealWaylandAdapter {
             .as_mut()
             .expect("shortcut bridge was initialized")
             .active_window_matches(handle)
+    }
+
+    pub fn pointer_diagnostic(&mut self) -> Result<PointerDiagnosticReport, DiagnosableError> {
+        if self.environment.is_some() {
+            return Ok(PointerDiagnosticReport {
+                x: 0,
+                y: 0,
+                pixel: None,
+                pixel_error: Some("KWin pointer diagnostic unavailable in mock environment".into()),
+                sample_width: None,
+                sample_height: None,
+                active_window: None,
+                pointed_window: None,
+            });
+        }
+        if self.shortcut_bridge.is_none() {
+            self.shortcut_bridge = Some(crate::kde_bridge::KwinShortcutBridge::connect()?);
+        }
+        let pointer = self
+            .shortcut_bridge
+            .as_mut()
+            .expect("shortcut bridge was initialized")
+            .pointer_diagnostic()?;
+        let mut report = PointerDiagnosticReport {
+            x: pointer.x,
+            y: pointer.y,
+            pixel: None,
+            pixel_error: None,
+            sample_width: None,
+            sample_height: None,
+            active_window: pointer.active_window.map(PointerWindowDiagnostic::from),
+            pointed_window: pointer.pointed_window.map(PointerWindowDiagnostic::from),
+        };
+        match self.capture_screen_sample() {
+            Ok(sample) => {
+                report.sample_width = Some(sample.width);
+                report.sample_height = Some(sample.height);
+                if pointer.x < 0 || pointer.y < 0 {
+                    report.pixel_error = Some("cursor coordinates are negative".to_string());
+                } else {
+                    report.pixel = sample.pixel_color(pointer.x as u32, pointer.y as u32);
+                    if report.pixel.is_none() {
+                        report.pixel_error =
+                            Some("cursor is outside the selected screen sample".to_string());
+                    }
+                }
+            }
+            Err(error) => {
+                report.pixel_error = Some(error.message);
+            }
+        }
+        Ok(report)
     }
 
     pub fn configure_input_provider(

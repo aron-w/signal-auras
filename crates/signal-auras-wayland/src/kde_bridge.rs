@@ -161,9 +161,10 @@ impl KwinShortcutBridge {
         let action_name = format!("SignalAuras_{}_{}", std::process::id(), self.next_index);
         let script_id = format!("signal-auras-{}-{}", std::process::id(), self.next_index);
         let script_path = std::env::temp_dir().join(format!("{script_id}.js"));
+        let shortcut_sequence = kde_shortcut_sequence(hotkey.as_str());
         let script = kwin_shortcut_script(
             &action_name,
-            hotkey.as_str(),
+            &shortcut_sequence,
             &format!("Signal Auras {}", hotkey.as_str()),
             &self.callback_bus_name,
             &self.callback_object_path,
@@ -309,6 +310,11 @@ impl KwinShortcutBridge {
         .map(|result| result.found)
     }
 
+    pub fn pointer_diagnostic(&mut self) -> Result<KwinPointerDiagnostic, DiagnosableError> {
+        self.run_window_script(kwin_pointer_diagnostic_script)
+            .and_then(|result| parse_kwin_pointer_diagnostic(&result.value))
+    }
+
     pub fn configure_overlay_window(
         &mut self,
         placement: &crate::overlay::OverlayWindowPlacement,
@@ -426,6 +432,42 @@ impl KwinShortcutBridge {
             failed: failures,
         })
     }
+
+    pub fn unregister_shortcut_script(
+        &mut self,
+        registration_id: &signal_auras_core::RegistrationId,
+    ) -> Result<CleanupReport, DiagnosableError> {
+        let Some(script_id) = registration_id
+            .as_str()
+            .strip_prefix("kde-kwin-script:")
+            .and_then(|rest| rest.split(':').next())
+        else {
+            return Ok(CleanupReport::empty());
+        };
+        let Some(index) = self
+            .scripts
+            .iter()
+            .position(|script| script.script_id == script_id)
+        else {
+            return Ok(CleanupReport::empty());
+        };
+        let script = self.scripts.remove(index);
+        let proxy = kwin_scripting_proxy(&self.connection)?;
+        let kglobalaccel = kglobalaccel_proxy(&self.connection)?;
+        let unloaded = proxy
+            .call::<_, _, bool>("unloadScript", &script.script_id.as_str())
+            .unwrap_or(false);
+        let unregistered = kglobalaccel
+            .call::<_, _, bool>("unregister", &("kwin", script.action_name.as_str()))
+            .unwrap_or(false);
+        self.actions.remove(&script.action_name);
+        let _ = fs::remove_file(script.script_path);
+        Ok(CleanupReport {
+            attempted: 1,
+            succeeded: usize::from(unloaded && unregistered),
+            failed: usize::from(!unloaded || !unregistered),
+        })
+    }
 }
 
 impl Drop for KwinShortcutBridge {
@@ -446,6 +488,26 @@ struct KwinWindowResult {
     request_id: String,
     found: bool,
     value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KwinPointerDiagnostic {
+    pub x: i32,
+    pub y: i32,
+    pub active_window: Option<KwinPointerWindowInfo>,
+    pub pointed_window: Option<KwinPointerWindowInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KwinPointerWindowInfo {
+    pub handle: String,
+    pub app_id: String,
+    pub window_class: String,
+    pub pid: Option<u32>,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
 }
 
 #[derive(Debug)]
@@ -664,6 +726,24 @@ fn kwin_shortcut_script(
     )
 }
 
+fn kde_shortcut_sequence(shortcut: &str) -> String {
+    let Some((prefix, key)) = shortcut.rsplit_once('+') else {
+        return kde_shortcut_key(shortcut).unwrap_or_else(|| shortcut.to_string());
+    };
+    match kde_shortcut_key(key) {
+        Some(key) => format!("{prefix}+{key}"),
+        None => shortcut.to_string(),
+    }
+}
+
+fn kde_shortcut_key(key: &str) -> Option<String> {
+    key.strip_prefix("Num")
+        .filter(|suffix| {
+            suffix.len() == 1 && suffix.chars().all(|character| character.is_ascii_digit())
+        })
+        .map(|suffix| format!("Num+{suffix}"))
+}
+
 fn kwin_active_process_script(action_name: &str, bus_name: &str, object_path: &str) -> String {
     format!(
         "function signalAurasValue(value) {{ return value === undefined || value === null ? \"\" : value.toString(); }}\n\
@@ -703,8 +783,9 @@ fn kwin_active_process_script(action_name: &str, bus_name: &str, object_path: &s
 
 fn kwin_window_helpers() -> &'static str {
     "function signalAurasValue(value) { return value === undefined || value === null ? \"\" : value.toString(); }\n\
+     function signalAurasSanitizeField(value) { return signalAurasValue(value).replace(/[|,\\n\\r\\t]/g, \"_\"); }\n\
      function signalAurasWindows() { return workspace.windowList ? workspace.windowList() : workspace.windows; }\n\
-     function signalAurasWindowHandle(window) { return signalAurasValue(window.resourceClass || window.windowClass || window.desktopFileName || window.resourceName); }\n\
+     function signalAurasWindowHandle(window) { return signalAurasSanitizeField(window.resourceClass || window.windowClass || window.desktopFileName || window.resourceName); }\n\
      function signalAurasWindowCaption(window) { return signalAurasValue(window.caption || window.captionNormal); }\n\
      function signalAurasWindowMatches(window, handles) {\n\
          var candidates = [window.resourceClass, window.windowClass, window.desktopFileName, window.resourceName];\n\
@@ -801,6 +882,51 @@ fn kwin_active_window_matches_script(
     )
 }
 
+fn kwin_pointer_diagnostic_script(request_id: &str, bus_name: &str, object_path: &str) -> String {
+    format!(
+        "{}\
+         function signalAurasNumber(value) {{ var n = Number(value); return isNaN(n) ? 0 : Math.round(n); }}\n\
+         function signalAurasRect(window) {{ var rect = window ? window.frameGeometry : null; return rect || {{ x: 0, y: 0, width: 0, height: 0 }}; }}\n\
+         function signalAurasWindowField(window, field) {{ return signalAurasSanitizeField(signalAurasValue(window ? window[field] : \"\")); }}\n\
+         function signalAurasWindowInfo(window) {{\n\
+             if (!window) {{ return \"none\"; }}\n\
+             var rect = signalAurasRect(window);\n\
+             return [\n\
+                 signalAurasWindowHandle(window),\n\
+                 signalAurasWindowField(window, \"resourceClass\"),\n\
+                 signalAurasWindowField(window, \"windowClass\"),\n\
+                 signalAurasWindowField(window, \"pid\"),\n\
+                 signalAurasNumber(rect.x),\n\
+                 signalAurasNumber(rect.y),\n\
+                 signalAurasNumber(rect.width),\n\
+                 signalAurasNumber(rect.height)\n\
+             ].join(\",\");\n\
+         }}\n\
+         function signalAurasContains(window, point) {{\n\
+             if (!window) {{ return false; }}\n\
+             var rect = signalAurasRect(window);\n\
+             var x = signalAurasNumber(rect.x);\n\
+             var y = signalAurasNumber(rect.y);\n\
+             var w = signalAurasNumber(rect.width);\n\
+             var h = signalAurasNumber(rect.height);\n\
+             return point.x >= x && point.y >= y && point.x < x + w && point.y < y + h;\n\
+         }}\n\
+         var point = workspace.cursorPos || {{ x: 0, y: 0 }};\n\
+         var windows = workspace.stackingOrder || signalAurasWindows();\n\
+         var pointed = null;\n\
+         for (var i = windows.length - 1; i >= 0; i--) {{\n\
+             if (signalAurasContains(windows[i], point)) {{ pointed = windows[i]; break; }}\n\
+         }}\n\
+         var active = workspace.activeWindow;\n\
+         var value = [signalAurasNumber(point.x), signalAurasNumber(point.y), signalAurasWindowInfo(active), signalAurasWindowInfo(pointed)].join(\"|\");\n\
+         callDBus({bus:?}, {path:?}, \"org.signalAuras.KWinBridge\", \"windowResult\", {request:?}, true, value);\n",
+        kwin_window_helpers(),
+        bus = bus_name,
+        path = object_path,
+        request = request_id,
+    )
+}
+
 fn kwin_configure_overlay_window_script(
     request_id: &str,
     bus_name: &str,
@@ -847,6 +973,51 @@ fn kwin_configure_overlay_window_script(
         path = object_path,
         request = request_id,
     )
+}
+
+fn parse_kwin_pointer_diagnostic(value: &str) -> Result<KwinPointerDiagnostic, DiagnosableError> {
+    let fields = value.split('|').collect::<Vec<_>>();
+    if fields.len() != 4 {
+        return Err(bridge_diagnostic(
+            "KWin pointer diagnostic returned malformed metadata",
+        ));
+    }
+    Ok(KwinPointerDiagnostic {
+        x: parse_i32_field(fields[0])?,
+        y: parse_i32_field(fields[1])?,
+        active_window: parse_kwin_pointer_window_info(fields[2])?,
+        pointed_window: parse_kwin_pointer_window_info(fields[3])?,
+    })
+}
+
+fn parse_kwin_pointer_window_info(
+    value: &str,
+) -> Result<Option<KwinPointerWindowInfo>, DiagnosableError> {
+    if value == "none" || value.is_empty() {
+        return Ok(None);
+    }
+    let fields = value.split(',').collect::<Vec<_>>();
+    if fields.len() != 8 {
+        return Err(bridge_diagnostic(
+            "KWin pointer diagnostic returned malformed window metadata",
+        ));
+    }
+    Ok(Some(KwinPointerWindowInfo {
+        handle: fields[0].to_string(),
+        app_id: fields[1].to_string(),
+        window_class: fields[2].to_string(),
+        pid: fields[3].parse::<u32>().ok().filter(|pid| *pid > 0),
+        x: parse_i32_field(fields[4])?,
+        y: parse_i32_field(fields[5])?,
+        width: parse_i32_field(fields[6])?,
+        height: parse_i32_field(fields[7])?,
+    }))
+}
+
+fn parse_i32_field(value: &str) -> Result<i32, DiagnosableError> {
+    value
+        .parse::<i32>()
+        .map_err(|_| bridge_diagnostic("KWin pointer diagnostic returned invalid coordinates"))
 }
 
 fn js_optional_u32(value: Option<u32>) -> String {
@@ -1036,6 +1207,42 @@ mod tests {
         assert!(!script.contains("moveResize"));
         assert!(!script.contains("registerShortcut"));
         assert!(!script.contains("capture"));
+    }
+
+    #[test]
+    fn pointer_diagnostic_script_reports_cursor_and_sanitized_window_metadata() {
+        let script = kwin_pointer_diagnostic_script(
+            "request-pointer",
+            "org.signalAuras.Runner123",
+            "/org/signalAuras/Runner",
+        );
+
+        assert!(script.contains("workspace.cursorPos"));
+        assert!(script.contains("workspace.stackingOrder"));
+        assert!(script.contains("frameGeometry"));
+        assert!(script.contains("signalAurasSanitizeField"));
+        assert!(script.contains("\"windowResult\", \"request-pointer\", true"));
+        assert!(!script.contains("window.caption);"));
+    }
+
+    #[test]
+    fn pointer_diagnostic_parser_accepts_window_under_pointer() {
+        let parsed = parse_kwin_pointer_diagnostic(
+            "120|240|kate,kate,Kate,42,10,20,800,600|firefox,firefox,firefox,77,100,200,300,400",
+        )
+        .unwrap();
+
+        assert_eq!(parsed.x, 120);
+        assert_eq!(parsed.y, 240);
+        assert_eq!(parsed.active_window.as_ref().unwrap().handle, "kate");
+        assert_eq!(parsed.pointed_window.as_ref().unwrap().pid, Some(77));
+    }
+
+    #[test]
+    fn kde_shortcut_sequence_maps_num_keypad_notation_for_qt() {
+        assert_eq!(kde_shortcut_sequence("Num1"), "Num+1");
+        assert_eq!(kde_shortcut_sequence("Ctrl+Alt+Num1"), "Ctrl+Alt+Num+1");
+        assert_eq!(kde_shortcut_sequence("Ctrl+Alt+]"), "Ctrl+Alt+]");
     }
 
     fn event(action_name: &str) -> KwinBridgeEvent {
