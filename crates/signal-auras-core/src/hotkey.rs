@@ -127,6 +127,10 @@ impl HotkeyId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub(crate) fn internal(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

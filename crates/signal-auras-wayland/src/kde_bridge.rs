@@ -797,6 +797,9 @@ fn kwin_shortcut_script(
 }
 
 fn kde_shortcut_sequence(shortcut: &str) -> String {
+    if shortcut == "Num0+NumEnter" {
+        return "Num+0, Num+Enter".to_string();
+    }
     let Some((prefix, key)) = shortcut.rsplit_once('+') else {
         return kde_shortcut_key(shortcut).unwrap_or_else(|| shortcut.to_string());
     };
@@ -822,6 +825,9 @@ fn kde_shortcut_key_with_modifiers(prefix: &str, key: &str) -> Option<String> {
 }
 
 fn kde_shortcut_key(key: &str) -> Option<String> {
+    if key == "NumEnter" {
+        return Some("Num+Enter".to_string());
+    }
     key.strip_prefix("Num")
         .filter(|suffix| {
             suffix.len() == 1 && suffix.chars().all(|character| character.is_ascii_digit())
@@ -1325,7 +1331,9 @@ mod tests {
 
     #[test]
     fn kde_shortcut_sequence_maps_num_keypad_notation_for_qt() {
+        assert_eq!(kde_shortcut_sequence("Num0+NumEnter"), "Num+0, Num+Enter");
         assert_eq!(kde_shortcut_sequence("Num1"), "Num+1");
+        assert_eq!(kde_shortcut_sequence("NumEnter"), "Num+Enter");
         assert_eq!(kde_shortcut_sequence("Ctrl+Alt+Num1"), "Ctrl+Alt+Num+1");
         assert_eq!(kde_shortcut_sequence("Ctrl+/"), "Ctrl+/");
         assert_eq!(kde_shortcut_sequence("Ctrl+Shift+]"), "Ctrl+Shift+}");
@@ -1340,7 +1348,7 @@ mod tests {
                 "kwin".to_string(),
                 "SignalAuras_111_2".to_string(),
                 "KWin".to_string(),
-                "Signal Auras Ctrl+/".to_string(),
+                "Signal Auras Num0+NumEnter".to_string(),
             ],
             vec![
                 "kwin".to_string(),

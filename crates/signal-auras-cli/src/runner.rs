@@ -2900,7 +2900,7 @@ impl DeveloperDiagnosticRuntime {
         adapter: &mut RealWaylandAdapter,
         log: RuntimeLog,
     ) -> Result<bool, DiagnosableError> {
-        let Some(shortcut) = DeveloperDiagnosticShortcut::from_hotkey(hotkey)? else {
+        let Some(shortcut) = DeveloperDiagnosticShortcut::from_hotkey(&self.state, hotkey)? else {
             return Ok(false);
         };
         match shortcut {

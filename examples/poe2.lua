@@ -23,8 +23,8 @@ sa.state.track({
     roi = { x = 1923, y = 1370, w = 36, h = 36 },
     mask = { shape = "circle", inset = 10 },
     prediction = {
-      duration_ms = 8000,
-      stable_after_ms = 1000,
+      duration_ms = 7000,
+      stable_after_ms = 500,
     },
     phases = {
       order = { "ready", "activated", "active", "recovering" },

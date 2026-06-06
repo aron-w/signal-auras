@@ -1,6 +1,6 @@
 use crate::{DetectorDefinition, DiagnosableError, HotkeyId, Roi, StateTrackerDefinitionSet};
 
-pub const DEV_MODE_TOGGLE_HOTKEY: &str = "Ctrl+/";
+pub const DEV_MODE_TOGGLE_HOTKEY: &str = "Num0+NumEnter";
 pub const POINTER_DIAGNOSTIC_HOTKEY: &str = "Num1";
 pub const TRACKER_GHOST_HOTKEY: &str = "Num2";
 
@@ -32,7 +32,7 @@ impl DeveloperDiagnosticState {
     }
 
     pub fn toggle_hotkey() -> Result<HotkeyId, DiagnosableError> {
-        HotkeyId::parse(DEV_MODE_TOGGLE_HOTKEY)
+        Ok(HotkeyId::internal(DEV_MODE_TOGGLE_HOTKEY))
     }
 
     pub fn pointer_diagnostic_hotkey() -> Result<HotkeyId, DiagnosableError> {
@@ -52,9 +52,15 @@ pub enum DeveloperDiagnosticShortcut {
 }
 
 impl DeveloperDiagnosticShortcut {
-    pub fn from_hotkey(hotkey: &HotkeyId) -> Result<Option<Self>, DiagnosableError> {
+    pub fn from_hotkey(
+        state: &DeveloperDiagnosticState,
+        hotkey: &HotkeyId,
+    ) -> Result<Option<Self>, DiagnosableError> {
         if hotkey == &DeveloperDiagnosticState::toggle_hotkey()? {
             return Ok(Some(Self::ToggleDevMode));
+        }
+        if !state.enabled() {
+            return Ok(None);
         }
         if hotkey == &DeveloperDiagnosticState::pointer_diagnostic_hotkey()? {
             return Ok(Some(Self::PointerUnderMouse));
@@ -149,7 +155,7 @@ mod tests {
     fn developer_diagnostic_hotkeys_are_canonicalized() {
         assert_eq!(
             DeveloperDiagnosticState::toggle_hotkey().unwrap().as_str(),
-            "Ctrl+/"
+            "Num0+NumEnter"
         );
         assert_eq!(
             DeveloperDiagnosticState::pointer_diagnostic_hotkey()
@@ -162,6 +168,33 @@ mod tests {
                 .unwrap()
                 .as_str(),
             "Num2"
+        );
+    }
+
+    #[test]
+    fn developer_diagnostic_shortcuts_ignore_debug_keys_until_enabled() {
+        let mut state = DeveloperDiagnosticState::new();
+        let pointer = DeveloperDiagnosticState::pointer_diagnostic_hotkey().unwrap();
+        let ghost = DeveloperDiagnosticState::tracker_ghost_hotkey().unwrap();
+
+        assert_eq!(
+            DeveloperDiagnosticShortcut::from_hotkey(&state, &pointer).unwrap(),
+            None
+        );
+        assert_eq!(
+            DeveloperDiagnosticShortcut::from_hotkey(&state, &ghost).unwrap(),
+            None
+        );
+
+        state.toggle();
+
+        assert_eq!(
+            DeveloperDiagnosticShortcut::from_hotkey(&state, &pointer).unwrap(),
+            Some(DeveloperDiagnosticShortcut::PointerUnderMouse)
+        );
+        assert_eq!(
+            DeveloperDiagnosticShortcut::from_hotkey(&state, &ghost).unwrap(),
+            Some(DeveloperDiagnosticShortcut::TrackerGhostAuras)
         );
     }
 
