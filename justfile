@@ -69,7 +69,7 @@ run-verbose file="examples/poe2.lua":
     nix develop -c cargo run -p signal-auras-cli -- run --verbose --color=always {{file}}
 
 # Check unsafe input permissions needed by a script without grabbing or emitting input.
-input-doctor file="examples/poe2-legacy.lua":
+input-doctor file="examples/poe2.lua":
     nix develop -c cargo run -p signal-auras-cli -- doctor input {{file}}
 
 # Run native overlay rendering smoke test in a nested virtual KWin session.
@@ -86,11 +86,6 @@ unsafe-input-acl:
     sudo setfacl -m "u:$USER:rw" /dev/uinput
     @printf '%s\n' '# done; run the app as your normal user, not with sudo'
 
-# Run the scope-free sample so the terminal consent prompt is shown.
-run-prompt:
-    @printf '%s\n' '# choose process scope, explicit GLOBAL, or cancel in the terminal prompt'
-    nix develop -c cargo run -p signal-auras-cli -- run examples/prompt-scope.lua
-
 # Send SIGINT to the scoped runner and confirm it prints final Ctrl-C stats.
 sigint-smoke seconds="2":
     @printf '%s\n' '# timeout sends SIGINT; exit 124 from timeout is expected after the runner prints final_summary'
@@ -101,7 +96,7 @@ failures:
     @printf '%s\n' '# zero args: expect argument_validation'
     -nix develop -c cargo run -p signal-auras-cli --
     @printf '\n%s\n' '# two paths: expect argument_validation'
-    -nix develop -c cargo run -p signal-auras-cli -- run examples/poe2.lua examples/prompt-scope.lua
+    -nix develop -c cargo run -p signal-auras-cli -- run examples/poe2.lua examples/poe2.lua
     @printf '\n%s\n' '# invalid Lua shape: expect script_validation'
     @printf '%s' 'not lua' > /tmp/signal-auras-invalid.lua
     -nix develop -c cargo run -p signal-auras-cli -- run /tmp/signal-auras-invalid.lua
@@ -111,8 +106,9 @@ failures:
     @printf '\n%s\n' '# ambient Lua API: expect sandbox denial'
     @printf '%s' 'return { hotkeys = {}, leak = os.getenv("HOME") }' > /tmp/signal-auras-ambient.lua
     -nix develop -c cargo run -p signal-auras-cli -- run /tmp/signal-auras-ambient.lua
-    @printf '\n%s\n' '# non-interactive missing scope: expect scope_prompt error'
-    -nix develop -c cargo run -p signal-auras-cli -- run examples/prompt-scope.lua
+    @printf '\n%s\n' '# missing returned controller function: expect script_validation'
+    @printf '%s' 'aura.press({ trigger = "F5", callback = "missing" })' > /tmp/signal-auras-missing-entrypoint.lua
+    -nix develop -c cargo run -p signal-auras-cli -- run /tmp/signal-auras-missing-entrypoint.lua
 
 # Print the manual Wayland verification procedure.
 manual:

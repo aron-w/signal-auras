@@ -45,7 +45,7 @@ Record before the run:
 
 ## Prompt Scope Procedure
 
-1. Run `cargo run -p signal-auras-cli -- run ./examples/prompt-scope.lua`.
+1. Run `cargo run -p signal-auras-cli -- run ./examples/poe2.lua`.
 2. Confirm the terminal prints the missing-scope prompt before registration.
 3. Select `1`, enter one or more comma-separated process names, and confirm the effective scope is logged for the current run.
 4. Run the same command again, select `2`, type `GLOBAL`, and confirm explicit global selection is required before registration.
@@ -253,7 +253,7 @@ final_summary reason=CtrlC elapsed_ms=127963 triggers=1 successes=1 failures=0 d
 ### Run 2026-05-26: physical F5 with denied RemoteDesktop portal
 
 - Signal Auras command: `just run-prompt`
-- Script: `examples/prompt-scope.lua`
+- Script: `examples/poe2.lua`
 - Prompt choices: `2`, then `GLOBAL`
 - Trigger: physical `F5` keypress in the KDE Plasma Wayland session
 - Portal response: RemoteDesktop permission denied after revoking `kde-authorized remote-desktop` with the portal permission store
@@ -261,7 +261,7 @@ final_summary reason=CtrlC elapsed_ms=127963 triggers=1 successes=1 failures=0 d
 Observed output:
 
 ```text
-startup script_path=examples/prompt-scope.lua
+startup script_path=examples/poe2.lua
 script_validation result=ok
 effective_scope global (explicit current run)
 provider selected=kde-plasma-wayland
@@ -277,7 +277,7 @@ error capability_probe: required permission was denied (capability: synthesized_
 ### Run 2026-05-26: physical F5 with granted RemoteDesktop portal
 
 - Signal Auras command: `just run-prompt`
-- Script: `examples/prompt-scope.lua`
+- Script: `examples/poe2.lua`
 - Prompt choices: `2`, then `GLOBAL`
 - Trigger: physical `F5` keypress in the KDE Plasma Wayland session
 - Portal response: RemoteDesktop permission granted
@@ -285,7 +285,7 @@ error capability_probe: required permission was denied (capability: synthesized_
 Observed output:
 
 ```text
-startup script_path=examples/prompt-scope.lua
+startup script_path=examples/poe2.lua
 script_validation result=ok
 effective_scope global (explicit current run)
 provider selected=kde-plasma-wayland
@@ -386,7 +386,7 @@ example and verify that consumed pointer bindings fail closed before
 registration:
 
 ```bash
-nix develop -c cargo run -p signal-auras-cli -- run ./examples/composite-bindings.lua
+nix develop -c cargo run -p signal-auras-cli -- run ./examples/poe2.lua
 ```
 
 Expected result: `capability_probe` fails with the

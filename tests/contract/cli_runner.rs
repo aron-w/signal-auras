@@ -744,10 +744,12 @@ fn controller_runner_executes_imported_imperative_callback_from_source_tree() {
     std::fs::write(
         root.join("helper.lua"),
         r#"
-        sa.callback("delayed_import", function()
-          sa.sleep(100)
-          sa.input.text("from import")
-        end)
+        function install_helper(aura)
+          aura.callback("delayed_import", function()
+            aura.sleep(100)
+            aura.input.text("from import")
+          end)
+        end
         "#,
     )
     .unwrap();
@@ -755,12 +757,17 @@ fn controller_runner_executes_imported_imperative_callback_from_source_tree() {
     std::fs::write(
         &lua_file,
         r#"
-        sa.import("helper")
-        sa.hotkey({
-          trigger = "F5",
-          capabilities = { "global_shortcut", "timer", "synthesized_input" },
-          callback = "delayed_import",
-        })
+        local function configure(aura)
+          aura.import("helper")
+          install_helper(aura)
+          aura.hotkey({
+            trigger = "F5",
+            capabilities = { "global_shortcut", "timer", "synthesized_input" },
+            callback = "delayed_import",
+          })
+        end
+
+        return configure
         "#,
     )
     .unwrap();
@@ -1009,6 +1016,14 @@ fn write_lua(source: &str) -> PathBuf {
         "signal-auras-cli-runner-{}-{unique}-{sequence}.lua",
         std::process::id()
     ));
+    let source = if source.contains("sa.") {
+        format!(
+            "local function configure(aura)\n{}\nend\n\nreturn configure\n",
+            source.replace("sa.", "aura.")
+        )
+    } else {
+        source.to_string()
+    };
     std::fs::write(&path, source).unwrap();
     path
 }

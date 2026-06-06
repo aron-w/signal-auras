@@ -423,6 +423,13 @@ mod tests {
         available_capability_report, InputEmission, MacroAction, MacroExecutor,
     };
 
+    fn typed_controller(body: &str) -> String {
+        format!(
+            "local function configure(aura)\n{}\nend\n\nreturn configure\n",
+            body.replace("sa.", "aura.")
+        )
+    }
+
     #[derive(Default)]
     struct RecordingHost {
         sleep_calls: usize,
@@ -524,8 +531,9 @@ mod tests {
           sa.input.text("after")
         end)
         "#;
-        let program = signal_auras_lua::load_lua_controller_program_source(source).unwrap();
-        let runtime = ImperativeLuaController::load_source(source).unwrap();
+        let source = typed_controller(source);
+        let program = signal_auras_lua::load_lua_controller_program_source(&source).unwrap();
+        let runtime = ImperativeLuaController::load_source(&source).unwrap();
         let registration = program.registrations().registrations()[0].clone();
         let capabilities = available_capability_report(program.required_capabilities(), "test");
         let mut scheduler = LuaCallbackScheduler::new(2, Duration::from_millis(1)).unwrap();
@@ -578,8 +586,9 @@ mod tests {
           sa.input.text("after")
         end)
         "#;
-        let program = signal_auras_lua::load_lua_controller_program_source(source).unwrap();
-        let runtime = ImperativeLuaController::load_source(source).unwrap();
+        let source = typed_controller(source);
+        let program = signal_auras_lua::load_lua_controller_program_source(&source).unwrap();
+        let runtime = ImperativeLuaController::load_source(&source).unwrap();
         let registration = program.registrations().registrations()[0].clone();
         let capabilities = available_capability_report(program.required_capabilities(), "test");
         let mut scheduler = LuaCallbackScheduler::new(2, Duration::from_nanos(1)).unwrap();

@@ -336,13 +336,16 @@ fn lua_file_looks_like_controller(lua_file: &Path) -> Result<bool, DiagnosableEr
             format!("cannot read Lua file '{}': {error}", lua_file.display()),
         )
     })?;
-    Ok(source.contains("sa.hotkey")
-        || source.contains("sa.motion")
-        || source.contains("sa.press")
-        || source.contains("sa.timer")
-        || source.contains("sa.shutdown")
-        || source.contains("sa.state.track")
-        || source.contains("sa.callback"))
+    Ok(source.contains("return function")
+        || (source.contains("return ")
+            && (source.contains(".hotkey")
+                || source.contains(".motion")
+                || source.contains(".press")
+                || source.contains(".timer")
+                || source.contains(".shutdown")
+                || source.contains(".state.track")
+                || source.contains(".overlay.mount")
+                || source.contains(".callback"))))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1928,7 +1931,7 @@ fn load_imperative_controller_runtime(
     lua_file: &Path,
 ) -> Result<Option<ImperativeLuaController>, DiagnosableError> {
     let source = load_lua_controller_runtime_source_file(lua_file)?;
-    if !(source.contains("sa.sleep") || source.contains("sa.window.")) {
+    if !(source.contains(".sleep") || source.contains(".window.")) {
         return Ok(None);
     }
     ImperativeLuaController::load_source(&source).map(Some)
@@ -4573,6 +4576,13 @@ where
 mod tests {
     use super::*;
 
+    fn typed_controller(body: &str) -> String {
+        format!(
+            "local function configure(aura)\n{}\nend\n\nreturn configure\n",
+            body.replace("sa.", "aura.")
+        )
+    }
+
     #[test]
     fn runtime_log_rendering_does_not_embed_ansi_escapes() {
         let rendered = RuntimeLog::from_config(RuntimeLogConfig {
@@ -4611,7 +4621,7 @@ mod tests {
 
     #[test]
     fn overlay_toggle_bindings_match_shift_function_key_input() {
-        let program = signal_auras_lua::load_lua_controller_program_source(
+        let program = signal_auras_lua::load_lua_controller_program_source(&typed_controller(
             r##"
             sa.state.track({
               id = "heavy_stun",
@@ -4643,7 +4653,7 @@ mod tests {
               },
             })
             "##,
-        )
+        ))
         .unwrap();
 
         let bindings = overlay_toggle_bindings(&program).unwrap();
@@ -4799,15 +4809,12 @@ mod tests {
         let args = vec![
             "doctor".to_string(),
             "input".to_string(),
-            "examples/poe2-legacy.lua".to_string(),
+            "examples/poe2.lua".to_string(),
         ];
         let options = parse_doctor_args(&args).unwrap();
 
         assert_eq!(options.command, DoctorCommand::Input);
-        assert_eq!(
-            options.lua_file,
-            Some(PathBuf::from("examples/poe2-legacy.lua"))
-        );
+        assert_eq!(options.lua_file, Some(PathBuf::from("examples/poe2.lua")));
     }
 
     #[test]
@@ -4815,15 +4822,12 @@ mod tests {
         let args = vec![
             "doctor".to_string(),
             "keys".to_string(),
-            "examples/poe2-legacy.lua".to_string(),
+            "examples/poe2.lua".to_string(),
         ];
         let options = parse_doctor_args(&args).unwrap();
 
         assert_eq!(options.command, DoctorCommand::Keys);
-        assert_eq!(
-            options.lua_file,
-            Some(PathBuf::from("examples/poe2-legacy.lua"))
-        );
+        assert_eq!(options.lua_file, Some(PathBuf::from("examples/poe2.lua")));
     }
 
     #[test]

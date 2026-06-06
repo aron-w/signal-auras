@@ -342,14 +342,8 @@ inter-action defaults and one millisecond for explicit `delay` actions.
 
 ## Examples
 
-- `examples/poe2.lua`: controller-style PoE2 bindings backed by Rust output APIs.
-- `examples/poe2-legacy.lua`: legacy declarative PoE2 bindings.
-- `examples/prompt-scope.lua`: scope-free script that exercises the terminal
-  consent prompt.
-- `examples/composite-bindings.lua`: structured `Ctrl` plus wheel and left-click
-  bindings.
-- `examples/input-motions.lua`: uniform leader, keyboard, mouse, and loop repeat
-  motion notation.
+- `examples/poe2.lua`: typed controller-style PoE2 bindings backed by Rust
+  output, screen-state, and overlay APIs.
 
 ## Input Performance Diagnostics
 
