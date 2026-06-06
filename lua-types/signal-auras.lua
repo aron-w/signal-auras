@@ -74,6 +74,99 @@
 ---@field motions? SignalAurasMotion[]
 ---@field presses? SignalAurasPress[]
 
+---@alias SignalAurasControllerCapability '"global_shortcut"'|'"composite_pointer_observation"'|'"composite_pointer_consumption"'|'"active_process_metadata"'|'"active_window_metadata"'|'"window_activation"'|'"synthesized_input"'|'"timer"'|'"screen_read"'
+
+---@class SignalAurasControllerOptions
+---@field input_provider? SignalAurasInputProvider
+---@field leader? SignalAurasKeyName
+
+---@class SignalAurasControllerScope
+---@field processes? string[]
+---@field global? boolean
+
+---@class SignalAurasControllerRegistration
+---@field trigger? string
+---@field requires_held? SignalAurasHeldToken[]
+---@field mode? SignalAurasBindingMode
+---@field scope? SignalAurasControllerScope
+---@field capabilities? SignalAurasControllerCapability[]
+---@field callback string
+
+---@class SignalAurasControllerLoopRepeat
+---@field every_ms integer
+---@field callback string
+
+---@class SignalAurasControllerLoop
+---@field while_held SignalAurasMotionToken[]
+---@field before? string
+---@field repeat SignalAurasControllerLoopRepeat
+---@field after? string
+
+---@class SignalAurasControllerMotionRegistration: SignalAurasControllerRegistration
+---@field loop? SignalAurasControllerLoop
+
+---@class SignalAurasWindowActiveOptions
+---@field title? boolean
+
+---@class SignalAurasWindowFindOptions
+---@field processes? string[]
+
+---@class SignalAurasActiveWindow
+---@field title? string
+
+---@class SignalAurasControllerInput
+---@field key fun(name: SignalAurasKeyName)
+---@field text fun(value: string)
+---@field key_down fun(name: SignalAurasKeyName)
+---@field key_up fun(name: SignalAurasKeyName)
+---@field mouse_click fun(button: SignalAurasMouseButton)
+
+---@class SignalAurasControllerWindow
+---@field active fun(options?: SignalAurasWindowActiveOptions): SignalAurasActiveWindow
+---@field find fun(options?: SignalAurasWindowFindOptions): string|nil
+---@field activate fun(handle: string): boolean
+---@field wait_active fun(handle: string, timeout_ms: integer): boolean
+
+---@class SignalAurasStateTracker
+---@field id string
+---@field scope? SignalAurasControllerScope
+---@field capabilities? SignalAurasControllerCapability[]
+---@field poll_ms integer
+---@field when? table
+---@field detector table
+
+---@class SignalAurasControllerState
+---@field track fun(tracker: SignalAurasStateTracker)
+
+---@class SignalAurasOverlayDefinition
+---@field id string
+---@field scope? SignalAurasControllerScope
+---@field provider string
+---@field surface? string
+---@field hotkey? table
+---@field visuals table[]
+
+---@class SignalAurasControllerOverlay
+---@field mount fun(overlay: SignalAurasOverlayDefinition)
+
+---@class SignalAurasController
+---@field input SignalAurasControllerInput
+---@field window SignalAurasControllerWindow
+---@field state SignalAurasControllerState
+---@field overlay SignalAurasControllerOverlay
+---@field configure fun(options: SignalAurasControllerOptions)
+---@field hotkey fun(registration: SignalAurasControllerRegistration)
+---@field motion fun(registration: SignalAurasControllerMotionRegistration)
+---@field press fun(registration: SignalAurasControllerRegistration)
+---@field timer fun(registration: SignalAurasControllerRegistration)
+---@field shutdown fun(registration: SignalAurasControllerRegistration)
+---@field callback fun(name: string, handler: fun())
+---@field import fun(module: string)
+---@field sleep fun(ms: integer)
+---@field log fun(message: string)
+---@field log_debug fun(message: string)
+---@field log_warn fun(message: string)
+
 ---Creates an ordered Signal Auras macro definition.
 ---@param actions SignalAurasMacroAction[]
 ---@return SignalAurasMacro

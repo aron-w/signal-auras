@@ -1,14 +1,34 @@
 use signal_auras_core::{
-    CapabilityKind, CapabilitySet, DetectorDefinition, MacroAction, RadialCooldownPhase,
-    RendererProviderId, StateField,
+    CapabilityKind, CapabilitySet, ControllerProgram, DetectorDefinition, DiagnosableError,
+    MacroAction, RadialCooldownPhase, RendererProviderId, StateField,
 };
 use signal_auras_lua::{
-    load_lua_controller_program_file, load_lua_controller_program_source,
-    load_lua_controller_runtime_source_file, load_lua_file, load_lua_source, ActiveWindowMetadata,
+    load_lua_controller_program_file,
+    load_lua_controller_program_source as real_load_lua_controller_program_source,
+    load_lua_controller_runtime_source_file, load_lua_source, ActiveWindowMetadata,
     ImperativeLuaController, LuaCallbackStep, LuaExecutionBudget, LuaHostRequest, LuaHostResponse,
     LuaLogLevel,
 };
 use std::{fs, path::Path, time::Duration};
+
+fn typed_controller(body: &str) -> String {
+    if body.contains("return function") || body.contains("return configure") {
+        body.to_string()
+    } else {
+        format!(
+            "local function configure(aura)\n{}\nend\n\nreturn configure\n",
+            body.replace("sa.", "aura.")
+        )
+    }
+}
+
+fn load_lua_controller_program_source(source: &str) -> Result<ControllerProgram, DiagnosableError> {
+    real_load_lua_controller_program_source(&typed_controller(source))
+}
+
+fn load_runtime(source: &str) -> Result<ImperativeLuaController, DiagnosableError> {
+    ImperativeLuaController::load_source(&typed_controller(source))
+}
 
 #[test]
 fn lua_api_accepts_v1_sample() {
@@ -32,15 +52,10 @@ fn lua_api_accepts_v1_sample() {
 }
 
 #[test]
-fn lua_api_accepts_poe2_legacy_example() {
-    let config = load_lua_file(Path::new("examples/poe2-legacy.lua")).unwrap();
-
-    assert_eq!(config.motions().len(), 2);
-    assert_eq!(config.presses().len(), 4);
-}
-
-#[test]
 fn lua_api_accepts_poe2_controller_example() {
+    let source = fs::read_to_string("examples/poe2.lua").unwrap();
+    assert!(!source.contains("sa."));
+    assert!(source.contains("aura.configure"));
     let program = load_lua_controller_program_file(Path::new("examples/poe2.lua")).unwrap();
 
     assert_eq!(program.registrations().registrations().len(), 7);
@@ -94,6 +109,80 @@ fn lua_api_accepts_poe2_controller_example() {
         .unwrap();
     assert!(refutation_visual.activated_style.is_some());
     assert!(refutation_visual.active_style.is_some());
+}
+
+#[test]
+fn controller_configure_populates_runtime_options() {
+    let program = load_lua_controller_program_source(
+        r#"
+        aura.configure({
+          input_provider = {
+            backend = "evdev",
+            mode = "grab",
+            output = "uinput",
+            devices = "all",
+            acknowledge_risk = "GRAB_ALL_INPUTS",
+          },
+          leader = "F13",
+        })
+        "#,
+    )
+    .unwrap();
+
+    let provider = program.input_provider.unwrap();
+    assert!(provider.all_devices);
+    assert_eq!(provider.mode, signal_auras_core::InputProviderMode::Grab);
+    assert_eq!(
+        provider.output,
+        signal_auras_core::InputProviderOutput::Uinput
+    );
+    assert_eq!(program.leader.as_ref().unwrap().describe(), "F13");
+}
+
+#[test]
+fn controller_configure_rejects_duplicate_calls() {
+    let error = load_lua_controller_program_source(
+        r#"
+        aura.configure({ leader = "F13" })
+        aura.configure({})
+        "#,
+    )
+    .unwrap_err();
+
+    assert!(error.message.contains("at most once"));
+}
+
+#[test]
+fn controller_rejects_legacy_runtime_option_declarations() {
+    for source in [
+        r#"
+        local input_provider = {
+          backend = "evdev",
+          devices = "all",
+        }
+        "#,
+        r#"
+        local leader = "F13"
+        "#,
+    ] {
+        let error = load_lua_controller_program_source(source).unwrap_err();
+        assert!(error.message.contains("aura.configure"));
+    }
+}
+
+#[test]
+fn controller_rejects_configure_inside_callbacks() {
+    let error = load_lua_controller_program_source(
+        r#"
+        aura.press({ trigger = "F5", callback = "bad" })
+        aura.callback("bad", function()
+          aura.configure({ leader = "F13" })
+        end)
+        "#,
+    )
+    .unwrap_err();
+
+    assert!(error.message.contains("controller startup"));
 }
 
 #[test]
@@ -639,7 +728,7 @@ fn overlay_visuals() -> String {
 #[test]
 fn imperative_lua_accepts_poe2_controller_example_keyword_fields() {
     let source = fs::read_to_string("examples/poe2.lua").unwrap();
-    let runtime = ImperativeLuaController::load_source(&source).unwrap();
+    let runtime = load_runtime(&source).unwrap();
 
     assert!(runtime
         .registrations()
@@ -893,7 +982,7 @@ fn lua_api_rejects_alias_equivalent_duplicate_keys() {
 
 #[test]
 fn imperative_lua_filterblade_relay_yields_ordered_host_requests() {
-    let runtime = ImperativeLuaController::load_source(
+    let runtime = load_runtime(
         r#"
         sa.press({
           requires_held = { "Ctrl" },
@@ -1038,7 +1127,7 @@ fn imperative_lua_filterblade_relay_yields_ordered_host_requests() {
 
 #[test]
 fn imperative_lua_filterblade_relay_emits_nothing_without_matching_title() {
-    let runtime = ImperativeLuaController::load_source(
+    let runtime = load_runtime(
         r#"
         sa.press({
           trigger = "S",
@@ -1091,7 +1180,7 @@ fn imperative_lua_filterblade_relay_emits_nothing_without_matching_title() {
 
 #[test]
 fn imperative_lua_logs_without_sensitive_capability() {
-    let runtime = ImperativeLuaController::load_source(
+    let runtime = load_runtime(
         r#"
         sa.press({
           trigger = "S",
@@ -1128,7 +1217,7 @@ fn imperative_lua_logs_without_sensitive_capability() {
 
 #[test]
 fn imperative_lua_preempts_non_yielding_callback_before_first_host_request() {
-    let runtime = ImperativeLuaController::load_source(
+    let runtime = load_runtime(
         r#"
         sa.press({
           trigger = "S",
@@ -1162,7 +1251,7 @@ fn imperative_lua_preempts_non_yielding_callback_before_first_host_request() {
 
 #[test]
 fn imperative_lua_preempts_non_yielding_callback_after_sleep_resume() {
-    let runtime = ImperativeLuaController::load_source(
+    let runtime = load_runtime(
         r#"
         sa.press({
           trigger = "S",
@@ -1200,7 +1289,7 @@ fn imperative_lua_preempts_non_yielding_callback_after_sleep_resume() {
 
 #[test]
 fn imperative_lua_preserves_bounded_work_and_sleep_with_budget() {
-    let runtime = ImperativeLuaController::load_source(
+    let runtime = load_runtime(
         r#"
         sa.press({
           trigger = "S",
@@ -1248,7 +1337,7 @@ fn imperative_lua_preserves_bounded_work_and_sleep_with_budget() {
 
 #[test]
 fn imperative_lua_denies_host_request_without_declared_capability() {
-    let runtime = ImperativeLuaController::load_source(
+    let runtime = load_runtime(
         r#"
         sa.press({
           trigger = "S",
@@ -1288,7 +1377,7 @@ fn imperative_lua_denies_ambient_runtime_apis() {
         r#"debug.traceback()"#,
     ] {
         assert!(
-            ImperativeLuaController::load_source(source).is_err(),
+            load_runtime(source).is_err(),
             "source should be denied: {source}"
         );
     }
@@ -1300,9 +1389,11 @@ fn imperative_lua_loads_resolved_imported_callbacks_with_runtime_import_noop() {
     fs::write(
         root.join("helper.lua"),
         r#"
-        sa.callback("imported_sleep", function()
-          sa.sleep(25)
-        end)
+        function install_helper(aura)
+          aura.callback("imported_sleep", function()
+            aura.sleep(25)
+          end)
+        end
         "#,
     )
     .unwrap();
@@ -1310,21 +1401,26 @@ fn imperative_lua_loads_resolved_imported_callbacks_with_runtime_import_noop() {
     fs::write(
         &main,
         r#"
-        sa.import("helper")
-        sa.hotkey({
-          trigger = "F5",
-          capabilities = { "global_shortcut", "timer" },
-          callback = "imported_sleep",
-        })
+        local function configure(aura)
+          aura.import("helper")
+          install_helper(aura)
+          aura.hotkey({
+            trigger = "F5",
+            capabilities = { "global_shortcut", "timer" },
+            callback = "imported_sleep",
+          })
+        end
+
+        return configure
         "#,
     )
     .unwrap();
 
     let source = load_lua_controller_runtime_source_file(&main).unwrap();
-    assert!(source.contains(r#"sa.callback("imported_sleep""#));
-    assert!(source.contains(r#"sa.import("helper")"#));
+    assert!(source.contains(r#"aura.callback("imported_sleep""#));
+    assert!(source.contains(r#"aura.import("helper")"#));
 
-    let runtime = ImperativeLuaController::load_source(&source).unwrap();
+    let runtime = load_runtime(&source).unwrap();
     let run = runtime.start_callback("imported_sleep").unwrap();
 
     assert_eq!(
@@ -1341,7 +1437,7 @@ fn imperative_lua_loads_resolved_imported_callbacks_with_runtime_import_noop() {
 
 #[test]
 fn imperative_lua_requires_registered_callbacks_to_be_defined() {
-    let error = match ImperativeLuaController::load_source(
+    let error = match load_runtime(
         r#"
         sa.press({
           trigger = "S",

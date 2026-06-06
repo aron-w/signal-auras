@@ -118,30 +118,35 @@ pub fn load_lua_controller_program_source(
     source: &str,
 ) -> Result<ControllerProgram, DiagnosableError> {
     validate_controller_sandbox(source)?;
+    reject_legacy_controller_runtime_options(source)?;
     let registrations = parse_controller_registration_set(source)?;
     let state_trackers = parse_state_tracker_definition_set(source)?;
     let overlays = parse_overlay_definition_set(source, &state_trackers)?;
+    let (input_provider, leader) = parse_controller_runtime_options(source)?;
     Ok(
         ControllerProgram::new(registrations, parse_controller_callbacks(source)?)?
             .with_state_trackers(state_trackers)
             .with_overlay_definitions(overlays)
-            .with_runtime_options(parse_input_provider(source)?, parse_leader(source)?),
+            .with_runtime_options(input_provider, leader),
     )
 }
 
 fn validate_controller_sandbox(source: &str) -> Result<(), DiagnosableError> {
+    controller_context_name(source)?;
     let lua = Lua::new();
     install_denied_globals(&lua)?;
-    install_controller_validation_api(&lua)?;
+    let api = create_controller_validation_api(&lua)?;
     let source = lua_compatible_controller_source(source);
-    lua.load(&source)
+    let entrypoint = lua
+        .load(&source)
         .set_name("signal-auras-controller-validation")
-        .exec()
+        .eval::<Function>()
         .map_err(controller_lua_error)?;
+    entrypoint.call::<()>(api).map_err(controller_lua_error)?;
     Ok(())
 }
 
-fn install_controller_validation_api(lua: &Lua) -> Result<(), DiagnosableError> {
+fn create_controller_validation_api(lua: &Lua) -> Result<Table, DiagnosableError> {
     let sa = lua.create_table().map_err(controller_lua_error)?;
     for name in ["hotkey", "motion", "press", "timer", "shutdown"] {
         sa.set(
@@ -151,6 +156,12 @@ fn install_controller_validation_api(lua: &Lua) -> Result<(), DiagnosableError> 
         )
         .map_err(controller_lua_error)?;
     }
+    sa.set(
+        "configure",
+        lua.create_function(|_, _: Table| Ok(()))
+            .map_err(controller_lua_error)?,
+    )
+    .map_err(controller_lua_error)?;
     sa.set(
         "callback",
         lua.create_function(|_, (_name, _function): (String, Function)| Ok(()))
@@ -189,8 +200,7 @@ fn install_controller_validation_api(lua: &Lua) -> Result<(), DiagnosableError> 
         .map_err(controller_lua_error)?;
     sa.set("overlay", overlay).map_err(controller_lua_error)?;
 
-    lua.globals().set("sa", sa).map_err(controller_lua_error)?;
-    Ok(())
+    Ok(sa)
 }
 
 fn controller_lua_error(error: mlua::Error) -> DiagnosableError {
@@ -200,33 +210,111 @@ fn controller_lua_error(error: mlua::Error) -> DiagnosableError {
     )
 }
 
+fn reject_legacy_controller_global(source: &str) -> Result<(), DiagnosableError> {
+    if source.contains("sa.") {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "Lua controller scripts must use the injected context parameter, not the legacy 'sa' global",
+        ));
+    }
+    Ok(())
+}
+
+fn controller_context_name(source: &str) -> Result<&str, DiagnosableError> {
+    reject_legacy_controller_global(source)?;
+    if let Some(param) = returned_anonymous_function_parameter(source) {
+        return Ok(param);
+    }
+    if let Some(name) = returned_identifier(source) {
+        if let Some(param) = local_function_parameter(source, name) {
+            return Ok(param);
+        }
+    }
+    Err(DiagnosableError::new(
+        ErrorPhase::ScriptValidation,
+        "Lua controller script must return a function that accepts the Signal Auras controller context",
+    ))
+}
+
+fn controller_api_name(context: &str, suffix: &str) -> String {
+    let mut api_name = String::with_capacity(context.len() + suffix.len());
+    api_name.push_str(context);
+    api_name.push_str(suffix);
+    api_name
+}
+
+fn returned_anonymous_function_parameter(source: &str) -> Option<&str> {
+    let return_index = source.find("return")?;
+    let after_return = source[return_index + "return".len()..].trim_start();
+    let after_function = after_return.strip_prefix("function")?.trim_start();
+    let params = after_function.strip_prefix('(')?.split_once(')')?.0.trim();
+    first_lua_parameter(params)
+}
+
+fn returned_identifier(source: &str) -> Option<&str> {
+    let return_index = source.rfind("return")?;
+    let after_return = source[return_index + "return".len()..].trim_start();
+    let len = after_return
+        .bytes()
+        .take_while(|byte| is_controller_identifier_byte(*byte))
+        .count();
+    (len > 0).then_some(&after_return[..len])
+}
+
+fn local_function_parameter<'a>(source: &'a str, name: &str) -> Option<&'a str> {
+    let needle = format!("local function {name}");
+    let function_index = source.find(&needle)?;
+    let after_name = source[function_index + needle.len()..].trim_start();
+    let params = after_name.strip_prefix('(')?.split_once(')')?.0.trim();
+    first_lua_parameter(params)
+}
+
+fn first_lua_parameter(params: &str) -> Option<&str> {
+    let param = params.split(',').next()?.trim();
+    if param.is_empty()
+        || param == "..."
+        || !param
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        None
+    } else {
+        Some(param)
+    }
+}
+
+fn is_controller_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
 fn parse_controller_registration_set(
     source: &str,
 ) -> Result<ControllerRegistrationSet, DiagnosableError> {
+    let context = controller_context_name(source)?;
     let mut registrations = Vec::new();
     registrations.extend(parse_controller_entries(
         source,
-        "sa.hotkey",
+        &controller_api_name(context, ".hotkey"),
         ControllerRegistrationKind::Hotkey,
     )?);
     registrations.extend(parse_controller_entries(
         source,
-        "sa.motion",
+        &controller_api_name(context, ".motion"),
         ControllerRegistrationKind::Motion,
     )?);
     registrations.extend(parse_controller_entries(
         source,
-        "sa.press",
+        &controller_api_name(context, ".press"),
         ControllerRegistrationKind::Press,
     )?);
     registrations.extend(parse_controller_entries(
         source,
-        "sa.timer",
+        &controller_api_name(context, ".timer"),
         ControllerRegistrationKind::Timer,
     )?);
     registrations.extend(parse_controller_entries(
         source,
-        "sa.shutdown",
+        &controller_api_name(context, ".shutdown"),
         ControllerRegistrationKind::Shutdown,
     )?);
     ControllerRegistrationSet::new(registrations)
@@ -235,10 +323,12 @@ fn parse_controller_registration_set(
 fn parse_state_tracker_definition_set(
     source: &str,
 ) -> Result<StateTrackerDefinitionSet, DiagnosableError> {
+    let context = controller_context_name(source)?;
+    let api_name = controller_api_name(context, ".state.track");
     let mut trackers = Vec::new();
     let mut cursor = source;
-    while let Some(start) = cursor.find("sa.state.track") {
-        cursor = &cursor[start + "sa.state.track".len()..];
+    while let Some(start) = cursor.find(&api_name) {
+        cursor = &cursor[start + api_name.len()..];
         let Some(paren) = cursor.find('(') else {
             break;
         };
@@ -246,14 +336,14 @@ fn parse_state_tracker_definition_set(
         let Some(block_start) = cursor.find('{') else {
             return Err(DiagnosableError::new(
                 ErrorPhase::ScriptValidation,
-                "sa.state.track requires a table argument",
+                format!("{api_name} requires a table argument"),
             ));
         };
         let block = &cursor[block_start..];
         let Some(block_end) = matching_table_end(block) else {
             return Err(DiagnosableError::new(
                 ErrorPhase::ScriptValidation,
-                "sa.state.track table is not closed",
+                format!("{api_name} table is not closed"),
             ));
         };
         trackers.push(parse_state_tracker_definition(
@@ -324,10 +414,12 @@ fn parse_overlay_definition_set(
     source: &str,
     trackers: &StateTrackerDefinitionSet,
 ) -> Result<OverlayDefinitionSet, DiagnosableError> {
+    let context = controller_context_name(source)?;
+    let api_name = controller_api_name(context, ".overlay.mount");
     let mut overlays = Vec::new();
     let mut cursor = source;
-    while let Some(start) = cursor.find("sa.overlay.mount") {
-        cursor = &cursor[start + "sa.overlay.mount".len()..];
+    while let Some(start) = cursor.find(&api_name) {
+        cursor = &cursor[start + api_name.len()..];
         let Some(paren) = cursor.find('(') else {
             break;
         };
@@ -335,14 +427,14 @@ fn parse_overlay_definition_set(
         let Some(block_start) = cursor.find('{') else {
             return Err(DiagnosableError::new(
                 ErrorPhase::ScriptValidation,
-                "sa.overlay.mount requires a table argument",
+                format!("{api_name} requires a table argument"),
             ));
         };
         let block = &cursor[block_start..];
         let Some(block_end) = matching_table_end(block) else {
             return Err(DiagnosableError::new(
                 ErrorPhase::ScriptValidation,
-                "sa.overlay.mount table is not closed",
+                format!("{api_name} table is not closed"),
             ));
         };
         overlays.push(parse_overlay_definition(&block[1..block_end], source)?);
@@ -843,76 +935,102 @@ fn parse_circular_mask(source: &str) -> Result<CircularMask, DiagnosableError> {
 }
 
 fn parse_controller_callbacks(source: &str) -> Result<Vec<ControllerCallback>, DiagnosableError> {
+    let context = controller_context_name(source)?;
+    let api_name = controller_api_name(context, ".callback");
     let mut callbacks = Vec::new();
     let mut cursor = source;
-    while let Some(start) = cursor.find("sa.callback") {
-        cursor = &cursor[start + "sa.callback".len()..];
+    while let Some(start) = cursor.find(&api_name) {
+        cursor = &cursor[start + api_name.len()..];
         let Some(paren) = cursor.find('(') else {
             break;
         };
         cursor = &cursor[paren + 1..];
         let name = first_quoted(cursor).ok_or_else(|| {
-            DiagnosableError::new(ErrorPhase::ScriptValidation, "sa.callback requires a name")
+            DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                format!("{api_name} requires a name"),
+            )
         })?;
         let Some(function_start) = cursor.find("function") else {
             return Err(DiagnosableError::new(
                 ErrorPhase::ScriptValidation,
-                "sa.callback requires a function body",
+                format!("{api_name} requires a function body"),
             ));
         };
         let after_function = &cursor[function_start + "function".len()..];
         let Some(args_end) = after_function.find(')') else {
             return Err(DiagnosableError::new(
                 ErrorPhase::ScriptValidation,
-                "sa.callback function arguments are not closed",
+                format!("{api_name} function arguments are not closed"),
             ));
         };
         let body = &after_function[args_end + 1..];
         let Some(body_end) = body.find("\nend").or_else(|| body.find(" end")) else {
             return Err(DiagnosableError::new(
                 ErrorPhase::ScriptValidation,
-                "sa.callback function body is not closed",
+                format!("{api_name} function body is not closed"),
             ));
         };
         callbacks.push(ControllerCallback::new(
             name,
-            parse_controller_output_actions(&body[..body_end])?,
+            parse_controller_output_actions(&body[..body_end], context)?,
         )?);
         cursor = &body[body_end + "end".len()..];
     }
     Ok(callbacks)
 }
 
-fn parse_controller_output_actions(source: &str) -> Result<Vec<MacroAction>, DiagnosableError> {
+fn parse_controller_output_actions(
+    source: &str,
+    context: &str,
+) -> Result<Vec<MacroAction>, DiagnosableError> {
+    if source.contains(&controller_api_name(context, ".configure")) {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "aura.configure may only be called during controller startup",
+        ));
+    }
     if let Some(token) = first_denied_token(source, denied_global_tokens()) {
         return Err(DiagnosableError::new(
             ErrorPhase::ScriptValidation,
             format!("Lua controller callback sandbox denies ambient API token '{token}'"),
         ));
     }
-    if source.contains("sa.sleep") || source.contains("sa.window.") {
+    if source.contains(&controller_api_name(context, ".sleep"))
+        || source.contains(&controller_api_name(context, ".window."))
+        || source.contains("while ")
+        || source.contains("for ")
+        || source.contains("if ")
+        || source.contains("local ")
+        || source.contains("..")
+    {
         return Ok(Vec::new());
     }
 
     let mut actions = Vec::new();
+    let input_key = controller_api_name(context, ".input.key");
+    let input_key_down = controller_api_name(context, ".input.key_down");
+    let input_key_up = controller_api_name(context, ".input.key_up");
+    let input_text = controller_api_name(context, ".input.text");
+    let input_mouse_click = controller_api_name(context, ".input.mouse_click");
     for line in source
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with("--"))
     {
-        if let Some(argument) = controller_call_argument(line, "sa.input.key") {
+        if let Some(argument) = controller_call_argument(line, &input_key) {
             actions.push(MacroAction::key(argument)?);
-        } else if let Some(argument) = controller_call_argument(line, "sa.input.key_down") {
+        } else if let Some(argument) = controller_call_argument(line, &input_key_down) {
             actions.push(MacroAction::key_down(argument)?);
-        } else if let Some(argument) = controller_call_argument(line, "sa.input.key_up") {
+        } else if let Some(argument) = controller_call_argument(line, &input_key_up) {
             actions.push(MacroAction::key_up(argument)?);
-        } else if let Some(argument) = controller_call_argument(line, "sa.input.text") {
+        } else if let Some(argument) = controller_call_argument(line, &input_text) {
             actions.push(MacroAction::text(argument)?);
-        } else if let Some(argument) = controller_call_argument(line, "sa.input.mouse_click") {
+        } else if let Some(argument) = controller_call_argument(line, &input_mouse_click) {
             actions.push(MacroAction::mouse_click(MouseButton::parse(argument)?));
-        } else if supported_imperative_callback_api(line) {
+        } else if supported_imperative_callback_api(line, context) {
             continue;
-        } else if line.starts_with("sa.") {
+        } else if line.starts_with(&format!("{context}.")) {
             return Err(DiagnosableError::new(
                 ErrorPhase::ScriptValidation,
                 format!("unsupported Lua controller callback API '{line}'"),
@@ -922,21 +1040,22 @@ fn parse_controller_output_actions(source: &str) -> Result<Vec<MacroAction>, Dia
     Ok(actions)
 }
 
-fn supported_imperative_callback_api(line: &str) -> bool {
+fn supported_imperative_callback_api(line: &str, context: &str) -> bool {
     [
-        "sa.sleep",
-        "sa.window.active",
-        "sa.window.find",
-        "sa.window.activate",
-        "sa.window.wait_active",
-        "sa.input.key",
-        "sa.input.key_down",
-        "sa.input.key_up",
-        "sa.input.text",
-        "sa.input.mouse_click",
+        ".sleep",
+        ".window.active",
+        ".window.find",
+        ".window.activate",
+        ".window.wait_active",
+        ".input.key",
+        ".input.key_down",
+        ".input.key_up",
+        ".input.text",
+        ".input.mouse_click",
     ]
     .iter()
-    .any(|api| line.starts_with(api))
+    .map(|suffix| controller_api_name(context, suffix))
+    .any(|api| line.starts_with(&api))
 }
 
 fn controller_call_argument<'a>(line: &'a str, api_name: &str) -> Option<&'a str> {
@@ -1026,8 +1145,8 @@ fn load_controller_source_tree_file(path: &Path) -> Result<String, DiagnosableEr
 fn controller_imports(source: &str) -> Vec<&str> {
     let mut imports = Vec::new();
     let mut cursor = source;
-    while let Some(start) = cursor.find("sa.import") {
-        cursor = &cursor[start + "sa.import".len()..];
+    while let Some(start) = cursor.find(".import") {
+        cursor = &cursor[start + ".import".len()..];
         let Some(paren) = cursor.find('(') else {
             break;
         };
@@ -1321,6 +1440,68 @@ fn parse_leader(source: &str) -> Result<Option<signal_auras_core::MotionToken>, 
         ));
     }
     Ok(leader)
+}
+
+fn reject_legacy_controller_runtime_options(source: &str) -> Result<(), DiagnosableError> {
+    for field in ["input_provider", "leader"] {
+        if top_level_field_index(source, field).is_some() {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                format!(
+                    "Lua controller runtime option '{field}' must be declared with aura.configure({{ ... }})"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_controller_runtime_options(
+    source: &str,
+) -> Result<(Option<InputProviderConfig>, Option<MotionToken>), DiagnosableError> {
+    let Some(options_body) = controller_configure_options_body(source)? else {
+        return Ok((None, None));
+    };
+    Ok((
+        parse_input_provider(options_body)?,
+        parse_leader(options_body)?,
+    ))
+}
+
+fn controller_configure_options_body(source: &str) -> Result<Option<&str>, DiagnosableError> {
+    let context = controller_context_name(source)?;
+    let api_name = controller_api_name(context, ".configure");
+    let mut cursor = source;
+    let mut body = None;
+    while let Some(start) = cursor.find(&api_name) {
+        cursor = &cursor[start + api_name.len()..];
+        let Some(paren) = cursor.find('(') else {
+            break;
+        };
+        cursor = &cursor[paren + 1..];
+        let Some(block_start) = cursor.find('{') else {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                format!("{api_name} requires a table argument"),
+            ));
+        };
+        let block = &cursor[block_start..];
+        let Some(block_end) = matching_table_end(block) else {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                format!("{api_name} table is not closed"),
+            ));
+        };
+        if body.is_some() {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScriptValidation,
+                "Lua controller scripts may call aura.configure at most once",
+            ));
+        }
+        body = Some(&block[1..block_end]);
+        cursor = &block[block_end + 1..];
+    }
+    Ok(body)
 }
 
 fn parse_input_provider(source: &str) -> Result<Option<InputProviderConfig>, DiagnosableError> {
@@ -1966,6 +2147,8 @@ fn table_body_field_after<'a>(
 fn top_level_field_index(source: &str, field: &str) -> Option<usize> {
     let bytes = source.as_bytes();
     let field_bytes = field.as_bytes();
+    let bracketed_field = format!("[\"{field}\"]");
+    let bracketed_field_bytes = bracketed_field.as_bytes();
     let mut depth = 0usize;
     let mut in_string = false;
     let mut index = 0usize;
@@ -1977,12 +2160,21 @@ fn top_level_field_index(source: &str, field: &str) -> Option<usize> {
             (b'}', false) => depth = depth.saturating_sub(1),
             _ => {}
         }
-        if !in_string
-            && depth == 0
-            && bytes[index..].starts_with(field_bytes)
-            && is_identifier_boundary(bytes, index, field.len())
-        {
-            let after = index + field.len();
+        if !in_string && depth == 0 {
+            let matched_len = if bytes[index..].starts_with(field_bytes)
+                && is_identifier_boundary(bytes, index, field.len())
+            {
+                Some(field.len())
+            } else if bytes[index..].starts_with(bracketed_field_bytes) {
+                Some(bracketed_field.len())
+            } else {
+                None
+            };
+            let Some(matched_len) = matched_len else {
+                index += 1;
+                continue;
+            };
+            let after = index + matched_len;
             if bytes[after..]
                 .iter()
                 .copied()
@@ -2057,9 +2249,16 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn typed_controller(body: &str) -> String {
+        format!(
+            "local function configure(aura)\n{}\nend\n\nreturn configure\n",
+            body.replace("sa.", "aura.")
+        )
+    }
+
     #[test]
     fn parses_controller_registrations_without_runtime_activation() {
-        let controller = load_lua_controller_source(
+        let controller = load_lua_controller_source(&typed_controller(
             r#"
             sa.hotkey({
               trigger = "F5",
@@ -2072,7 +2271,7 @@ mod tests {
               callback = "motion",
             })
             "#,
-        )
+        ))
         .unwrap();
 
         assert_eq!(controller.registrations().len(), 2);
@@ -2092,7 +2291,7 @@ mod tests {
 
     #[test]
     fn parses_state_trackers_without_callbacks_or_input_capabilities() {
-        let program = load_lua_controller_program_source(
+        let program = load_lua_controller_program_source(&typed_controller(
             r#"
             poe = { processes = { "steam_app_2694490", "PathOfExileSteam.exe" } }
 
@@ -2139,7 +2338,7 @@ mod tests {
               },
             })
             "#,
-        )
+        ))
         .unwrap();
 
         assert_eq!(program.registrations().registrations().len(), 0);
@@ -2183,7 +2382,7 @@ mod tests {
                 }})
                 "#
             );
-            let error = load_lua_controller_program_source(&source).unwrap_err();
+            let error = load_lua_controller_program_source(&typed_controller(&source)).unwrap_err();
             assert!(
                 error.message.contains("radial_cooldown phase style field"),
                 "unexpected error for {field}: {error}"
@@ -2193,7 +2392,7 @@ mod tests {
 
     #[test]
     fn parses_overlay_activated_and_active_visual_styles() {
-        let program = load_lua_controller_program_source(
+        let program = load_lua_controller_program_source(&typed_controller(
             r##"
             poe = { processes = { "PathOfExileSteam.exe" } }
 
@@ -2239,7 +2438,7 @@ mod tests {
               },
             })
             "##,
-        )
+        ))
         .unwrap();
 
         let visual = match &program.overlays().overlays()[0].visuals[0] {
@@ -2269,12 +2468,12 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_controller_triggers() {
-        let error = load_lua_controller_source(
+        let error = load_lua_controller_source(&typed_controller(
             r#"
             sa.hotkey({ trigger = "Return", callback = "first" })
             sa.hotkey({ trigger = "Return", callback = "second" })
             "#,
-        )
+        ))
         .unwrap_err();
 
         assert!(error.message.contains("duplicate controller trigger"));
@@ -2288,21 +2487,51 @@ mod tests {
             r#"sa.hotkey({ trigger = "F5", callback = "ok" }); debug.traceback()"#,
         ] {
             assert!(
-                load_lua_controller_source(source).is_err(),
+                load_lua_controller_source(&typed_controller(source)).is_err(),
                 "source should be denied: {source}"
             );
         }
     }
 
     #[test]
+    fn controller_loader_rejects_legacy_sa_global() {
+        let error = load_lua_controller_source(
+            r#"
+            local function configure(aura)
+              sa.press({ trigger = "F5", callback = "ok" })
+            end
+
+            return configure
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("legacy 'sa' global"));
+    }
+
+    #[test]
+    fn controller_loader_requires_returned_entrypoint_function() {
+        let error = load_lua_controller_source(
+            r#"
+            local function configure(aura)
+              aura.press({ trigger = "F5", callback = "ok" })
+            end
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("must return a function"));
+    }
+
+    #[test]
     fn controller_loader_allows_denied_words_in_safe_lua_values() {
-        let controller = load_lua_controller_source(
+        let controller = load_lua_controller_source(&typed_controller(
             r#"
             local require = "documentation only"
             local note = "io.open and debug.traceback are not executed"
             sa.hotkey({ trigger = "F5", callback = "ok" })
             "#,
-        )
+        ))
         .unwrap();
 
         assert_eq!(controller.registrations().len(), 1);
@@ -2316,7 +2545,7 @@ mod tests {
             r#"sa.hotkey({ trigger = "F5", callback = "ok" }); dofile("other.lua")"#,
         ] {
             assert!(
-                load_lua_controller_source(source).is_err(),
+                load_lua_controller_source(&typed_controller(source)).is_err(),
                 "source should be denied: {source}"
             );
         }
@@ -2338,7 +2567,7 @@ mod tests {
                 "#
             );
             assert!(
-                load_lua_controller_program_source(&source).is_err(),
+                load_lua_controller_program_source(&typed_controller(&source)).is_err(),
                 "callback body should be denied: {body}"
             );
         }
@@ -2354,15 +2583,22 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         std::fs::write(
             root.join("helper.lua"),
-            r#"sa.motion({ trigger = "<Leader> x", callback = "helper_motion" })"#,
+            r#"function helper(aura)
+              aura.motion({ trigger = "<Leader> x", callback = "helper_motion" })
+            end"#,
         )
         .unwrap();
         let main = root.join("main.lua");
         std::fs::write(
             &main,
             r#"
-            sa.import("helper")
-            sa.hotkey({ trigger = "F5", callback = "main_hotkey" })
+            local function configure(aura)
+              aura.import("helper")
+              helper(aura)
+              aura.hotkey({ trigger = "F5", callback = "main_hotkey" })
+            end
+
+            return configure
             "#,
         )
         .unwrap();
@@ -2377,7 +2613,7 @@ mod tests {
 
     #[test]
     fn controller_program_parses_callback_output_apis() {
-        let program = load_lua_controller_program_source(
+        let program = load_lua_controller_program_source(&typed_controller(
             r#"
             sa.hotkey({ trigger = "F5", callback = "hideout" })
             sa.callback("hideout", function()
@@ -2386,7 +2622,7 @@ mod tests {
               sa.input.key("Enter")
             end)
             "#,
-        )
+        ))
         .unwrap();
 
         let callback = program.callback("hideout").unwrap();
@@ -2398,9 +2634,9 @@ mod tests {
 
     #[test]
     fn controller_program_requires_callback_definition() {
-        let error = load_lua_controller_program_source(
+        let error = load_lua_controller_program_source(&typed_controller(
             r#"sa.hotkey({ trigger = "F5", callback = "missing" })"#,
-        )
+        ))
         .unwrap_err();
 
         assert!(error.message.contains("registered but not defined"));
@@ -2408,14 +2644,14 @@ mod tests {
 
     #[test]
     fn controller_program_rejects_unsupported_callback_api() {
-        let error = load_lua_controller_program_source(
+        let error = load_lua_controller_program_source(&typed_controller(
             r#"
             sa.hotkey({ trigger = "F5", callback = "hideout" })
             sa.callback("hideout", function()
               sa.shell("nope")
             end)
             "#,
-        )
+        ))
         .unwrap_err();
 
         assert!(error

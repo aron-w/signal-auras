@@ -147,18 +147,22 @@ pub struct ImperativeLuaController {
 
 impl ImperativeLuaController {
     pub fn load_source(source: &str) -> Result<Self, DiagnosableError> {
+        reject_legacy_controller_global(source)?;
         let lua = Lua::new();
         install_sandbox(&lua)?;
 
         let registrations = Rc::new(RefCell::new(Vec::new()));
         let callbacks = Rc::new(RefCell::new(BTreeMap::new()));
-        install_sa_api(&lua, Rc::clone(&registrations), Rc::clone(&callbacks))?;
+        let api = create_controller_api(&lua, Rc::clone(&registrations), Rc::clone(&callbacks))?;
 
         let source = lua_compatible_controller_source(source);
-        lua.load(&source)
+        let entrypoint = lua
+            .load(&source)
             .set_name("signal-auras-controller")
-            .exec()
+            .eval::<Function>()
             .map_err(lua_error)?;
+        entrypoint.call::<()>(&api).map_err(lua_error)?;
+        replace_configure_with_runtime_error(&lua, &api)?;
 
         let registrations = ControllerRegistrationSet::new(registrations.take())?;
         for registration in registrations.registrations() {
@@ -346,11 +350,21 @@ fn install_sandbox(lua: &Lua) -> Result<(), DiagnosableError> {
     install_denied_globals(lua)
 }
 
-fn install_sa_api(
+fn reject_legacy_controller_global(source: &str) -> Result<(), DiagnosableError> {
+    if source.contains("sa.") {
+        return Err(DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "Lua controller scripts must use the injected context parameter, not the legacy 'sa' global",
+        ));
+    }
+    Ok(())
+}
+
+fn create_controller_api(
     lua: &Lua,
     registrations: Rc<RefCell<Vec<ControllerRegistration>>>,
     callbacks: Rc<RefCell<BTreeMap<String, RegistryKey>>>,
-) -> Result<(), DiagnosableError> {
+) -> Result<Table, DiagnosableError> {
     let sa = lua.create_table().map_err(lua_error)?;
 
     for (name, kind) in [
@@ -374,6 +388,12 @@ fn install_sa_api(
     }
 
     let callback_store = Rc::clone(&callbacks);
+    sa.set(
+        "configure",
+        lua.create_function(|_, _: Table| Ok(()))
+            .map_err(lua_error)?,
+    )
+    .map_err(lua_error)?;
     sa.set(
         "callback",
         lua.create_function(move |lua, (name, function): (String, Function)| {
@@ -415,10 +435,10 @@ fn install_sa_api(
         )
         .map_err(lua_error)?;
     sa.set("overlay", overlay).map_err(lua_error)?;
-    lua.globals().set("sa", sa).map_err(lua_error)?;
-
     lua.load(
         r#"
+        local sa = ...
+
         function sa.sleep(ms)
           return coroutine.yield({ op = "sleep", ms = ms })
         end
@@ -475,9 +495,22 @@ fn install_sa_api(
         "#,
     )
     .set_name("signal-auras-host-api")
-    .exec()
+    .call::<()>(sa.clone())
     .map_err(lua_error)?;
-    Ok(())
+    Ok(sa)
+}
+
+fn replace_configure_with_runtime_error(lua: &Lua, api: &Table) -> Result<(), DiagnosableError> {
+    api.set(
+        "configure",
+        lua.create_function(|_, _: Table| {
+            Err::<(), _>(LuaError::RuntimeError(
+                "aura.configure may only be called during controller startup".to_string(),
+            ))
+        })
+        .map_err(lua_error)?,
+    )
+    .map_err(lua_error)
 }
 
 fn parse_registration_table(
