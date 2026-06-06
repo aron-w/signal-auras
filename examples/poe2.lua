@@ -106,6 +106,7 @@ sa.overlay.mount({
   scope = poe,
   provider = "native",
   surface = "overlay",
+  hotkey = { trigger = "Shift+F1", mode = "consume" },
   visuals = {
     {
       id = "heavy_stun",

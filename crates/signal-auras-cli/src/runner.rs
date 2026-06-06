@@ -21,15 +21,15 @@ use signal_auras_core::{
     execute_plan_with_inter_action_delay, ActiveProcessProvider, BindingMode, BindingTrigger,
     CallbackDisposition, CapabilityKind, CapabilityReport, CapabilitySet, ControllerProgram,
     ControllerRegistration, ControllerRegistrationKind, DeveloperDiagnosticShortcut,
-    DeveloperDiagnosticState, DiagnosableError, ErrorPhase, FocusFreshnessPolicy, HotkeyBinding,
-    HotkeyId, HotkeyRegistrar, InputProviderConfig, InputProviderMode, InputProviderOutput,
-    KeyToken, LoopBody, LoopDefinition, LoopInterval, LoopRepeat, LuaCallbackScheduler,
-    MacroAction, MacroDefinition, MacroExecutor, MacroRunId, MacroRunPoll, MacroRunState,
-    MacroScheduler, MotionDefinition, MotionDiscardReason, MotionInputEvent, MotionInputState,
-    MotionRuntime, MotionRuntimeEvent, MotionToken, MotionTrigger, RegistrationState,
-    RuntimeMotion, RuntimePress, RuntimeStats, ScopeSelection, ShutdownReason,
-    StateTrackerDefinitionSet, StateTrackerPoller, SynthesizedInputRequest, TrackerState,
-    DEFAULT_LUA_CALLBACK_BUDGET,
+    DeveloperDiagnosticState, DiagnosableError, ErrorPhase, FocusFreshnessPolicy, HeldCondition,
+    HotkeyBinding, HotkeyId, HotkeyRegistrar, InputProviderConfig, InputProviderMode,
+    InputProviderOutput, KeyToken, LoopBody, LoopDefinition, LoopInterval, LoopRepeat,
+    LuaCallbackScheduler, MacroAction, MacroDefinition, MacroExecutor, MacroRunId, MacroRunPoll,
+    MacroRunState, MacroScheduler, MotionDefinition, MotionDiscardReason, MotionInputEvent,
+    MotionInputState, MotionRuntime, MotionRuntimeEvent, MotionToken, MotionTrigger,
+    OverlayDefinition, RegistrationState, RuntimeMotion, RuntimePress, RuntimeStats,
+    ScopeSelection, ShutdownReason, StateTrackerDefinitionSet, StateTrackerPoller,
+    SynthesizedInputRequest, TrackerState, DEFAULT_LUA_CALLBACK_BUDGET,
 };
 use signal_auras_lua::{
     load_lua_controller_program_file, load_lua_controller_runtime_source_file, load_lua_file,
@@ -1201,6 +1201,26 @@ pub fn start_live_real_controller_runner_with_options(
             }
         }
     }
+    let overlay_toggle_bindings = overlay_toggle_bindings(&program)?;
+    for binding in &overlay_toggle_bindings {
+        stats.record_registration_attempt();
+        match session.adapter().register(binding.clone()) {
+            Ok(id) => {
+                stats.record_registration_success();
+                log.info(format!(
+                    "event=registration controller=true overlay_toggle=true trigger={} mode={} id={}",
+                    binding.trigger_label(),
+                    binding.mode.as_str(),
+                    id.as_str()
+                ));
+            }
+            Err(error) => {
+                stats.record_registration_failure();
+                session.cleanup_after_error(ErrorPhase::Registration)?;
+                return Err(error);
+            }
+        }
+    }
 
     let mut developer_diagnostics =
         DeveloperDiagnosticRuntime::with_trackers(program.state_trackers().clone());
@@ -1671,6 +1691,31 @@ fn controller_hotkey_bindings(
         .collect()
 }
 
+fn overlay_toggle_bindings(
+    program: &ControllerProgram,
+) -> Result<Vec<HotkeyBinding>, DiagnosableError> {
+    program
+        .overlays()
+        .overlays()
+        .iter()
+        .filter_map(|overlay| {
+            overlay
+                .toggle_hotkey
+                .as_ref()
+                .map(|toggle| (overlay, toggle))
+        })
+        .map(|(overlay, toggle)| {
+            Ok(HotkeyBinding {
+                trigger: BindingTrigger::keyboard(toggle.trigger.clone()),
+                scope: overlay.scope.clone(),
+                mode: toggle.mode,
+                macro_definition: MacroDefinition::new(vec![MacroAction::delay(1)?])?,
+                registration_state: RegistrationState::Pending,
+            })
+        })
+        .collect()
+}
+
 fn controller_hotkey_binding(
     registration: &ControllerRegistration,
 ) -> Result<HotkeyBinding, DiagnosableError> {
@@ -2098,6 +2143,7 @@ fn run_live_real_controller_lifecycle(
             program.state_trackers().clone(),
         )))
     };
+    let mut overlay_toggles = OverlayToggleRuntime::default();
     loop {
         stats.record_event_loop_wakeup();
         drain_live_controller_shortcut_callbacks(
@@ -2106,6 +2152,7 @@ fn run_live_real_controller_lifecycle(
             &mut scheduler,
             capabilities,
             developer_diagnostics,
+            &mut overlay_toggles,
             stats,
             log,
         )?;
@@ -2116,6 +2163,7 @@ fn run_live_real_controller_lifecycle(
             capabilities,
             log,
             tracker_time_base,
+            &overlay_toggles,
         )?;
         drain_controller_callbacks(
             program,
@@ -2164,6 +2212,7 @@ fn run_live_real_controller_lifecycle(
                     &mut scheduler,
                     capabilities,
                     developer_diagnostics,
+                    &mut overlay_toggles,
                     stats,
                     log,
                 )?;
@@ -2178,6 +2227,8 @@ fn run_live_real_controller_lifecycle(
                     stats,
                     last_repeat_ticks: &mut last_repeat_ticks,
                     motion_time_base,
+                    overlay_toggles: &mut overlay_toggles,
+                    log,
                 };
                 handle_live_controller_observed_input(event, &mut context)?;
             }
@@ -2193,6 +2244,8 @@ fn run_live_real_controller_lifecycle(
                 stats,
                 last_repeat_ticks: &mut last_repeat_ticks,
                 motion_time_base,
+                overlay_toggles: &mut overlay_toggles,
+                log,
             };
             handle_live_controller_observed_input(event, &mut context)?;
         }
@@ -2203,6 +2256,7 @@ fn run_live_real_controller_lifecycle(
             capabilities,
             log,
             tracker_time_base,
+            &overlay_toggles,
         )?;
         drain_controller_callbacks(
             program,
@@ -2261,6 +2315,7 @@ fn poll_live_state_trackers(
     capabilities: &CapabilityReport,
     log: RuntimeLog,
     tracker_time_base: Instant,
+    overlay_toggles: &OverlayToggleRuntime,
 ) -> Result<(), DiagnosableError> {
     let Some(runtime) = runtime.as_mut() else {
         return Ok(());
@@ -2360,6 +2415,7 @@ fn poll_live_state_trackers(
         &active_context,
         log,
         now_ms,
+        overlay_toggles,
     )?;
     Ok(())
 }
@@ -2372,17 +2428,19 @@ fn poll_live_overlays(
     active_context: &signal_auras_core::ActiveProcessContext,
     log: RuntimeLog,
     now_ms: u64,
+    overlay_toggles: &OverlayToggleRuntime,
 ) -> Result<(), DiagnosableError> {
     if program.overlays().is_empty() {
         return Ok(());
     }
     let provider_report = adapter.overlay_provider_report();
-    let snapshots = program.overlays().snapshots(
+    let snapshots = program.overlays().snapshots_with_hidden(
         now_ms,
         capabilities,
         active_context,
         runtime.poller.latest_states(),
         &provider_report,
+        overlay_toggles.hidden_overlay_ids(),
     );
     for snapshot in snapshots {
         if snapshot.is_active() {
@@ -2566,6 +2624,8 @@ struct LiveControllerInputContext<'a> {
     stats: &'a mut RuntimeStats,
     last_repeat_ticks: &'a mut BTreeMap<MotionTrigger, Instant>,
     motion_time_base: Instant,
+    overlay_toggles: &'a mut OverlayToggleRuntime,
+    log: RuntimeLog,
 }
 
 fn handle_live_controller_observed_input(
@@ -2595,6 +2655,23 @@ fn handle_live_controller_observed_input(
     let motion_events = context
         .motion_runtime
         .handle_input_at(event.clone(), event_time);
+    let overlay_toggle = context.overlay_toggles.handle_observed_input(
+        context.program,
+        &event,
+        context.motion_runtime,
+        context.adapter,
+        context.stats,
+        context.log,
+    )?;
+    if overlay_toggle.handled {
+        if observed.grabbed && !overlay_toggle.consumed {
+            context.adapter.passthrough_raw_input(&observed.raw)?;
+        }
+        if event.token == MotionToken::Leader && event.state == MotionInputState::Released {
+            context.adapter.release_input_grab()?;
+        }
+        return Ok(());
+    }
     if event.state == MotionInputState::Pressed {
         if let Some(registration) =
             matching_controller_press_registration(context.program, &event, context.motion_runtime)?
@@ -2725,6 +2802,7 @@ fn drain_live_controller_shortcut_callbacks(
     scheduler: &mut LuaCallbackScheduler,
     capabilities: &CapabilityReport,
     developer_diagnostics: &mut DeveloperDiagnosticRuntime,
+    overlay_toggles: &mut OverlayToggleRuntime,
     stats: &mut RuntimeStats,
     log: RuntimeLog,
 ) -> Result<(), DiagnosableError> {
@@ -2745,6 +2823,12 @@ fn drain_live_controller_shortcut_callbacks(
             event.hotkey.as_str()
         ));
         if developer_diagnostics.handle_shortcut(&event.hotkey, adapter, log)? {
+            continue;
+        }
+        if overlay_toggles
+            .handle_shortcut(program, &event.hotkey, adapter, stats, log)?
+            .handled
+        {
             continue;
         }
         if let Some(registration) = controller_registration_for_hotkey(program, &event.hotkey) {
@@ -2852,6 +2936,169 @@ struct LiveMacroRun {
 struct ScopedFocusTracker {
     active: Option<bool>,
     deactivated: bool,
+}
+
+#[derive(Default)]
+struct OverlayToggleRuntime {
+    hidden_overlay_ids: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct OverlayToggleHandling {
+    handled: bool,
+    consumed: bool,
+}
+
+impl OverlayToggleRuntime {
+    fn hidden_overlay_ids(&self) -> &BTreeSet<String> {
+        &self.hidden_overlay_ids
+    }
+
+    fn handle_shortcut(
+        &mut self,
+        program: &ControllerProgram,
+        hotkey: &HotkeyId,
+        adapter: &mut RealWaylandAdapter,
+        stats: &mut RuntimeStats,
+        log: RuntimeLog,
+    ) -> Result<OverlayToggleHandling, DiagnosableError> {
+        let Some(overlay) = overlay_for_toggle_hotkey(program, hotkey) else {
+            return Ok(OverlayToggleHandling::default());
+        };
+        let active_context = adapter.active_process_context()?;
+        self.toggle_overlay(overlay, &active_context, adapter, stats, log)
+    }
+
+    fn handle_observed_input(
+        &mut self,
+        program: &ControllerProgram,
+        event: &MotionInputEvent,
+        motion_runtime: &MotionRuntime,
+        adapter: &mut RealWaylandAdapter,
+        stats: &mut RuntimeStats,
+        log: RuntimeLog,
+    ) -> Result<OverlayToggleHandling, DiagnosableError> {
+        let Some(overlay) = program
+            .overlays()
+            .overlays()
+            .iter()
+            .find(|overlay| overlay_toggle_matches_input(overlay, event, motion_runtime))
+        else {
+            return Ok(OverlayToggleHandling::default());
+        };
+        let active_context = adapter.active_process_context()?;
+        self.toggle_overlay(overlay, &active_context, adapter, stats, log)
+    }
+
+    fn toggle_overlay(
+        &mut self,
+        overlay: &OverlayDefinition,
+        active_context: &signal_auras_core::ActiveProcessContext,
+        adapter: &mut RealWaylandAdapter,
+        stats: &mut RuntimeStats,
+        log: RuntimeLog,
+    ) -> Result<OverlayToggleHandling, DiagnosableError> {
+        let Some(toggle) = overlay.toggle_hotkey.as_ref() else {
+            return Ok(OverlayToggleHandling::default());
+        };
+        let state = overlay.scope.scoped_focus_state(active_context);
+        if !state.is_active() {
+            if let Some(diagnostic) = state.diagnostic {
+                record_scope_denial(stats, &diagnostic);
+                log.debug(format!(
+                    "event=overlay_toggle id={} hotkey={} reason={} {} disposition=denied",
+                    overlay.id,
+                    toggle.trigger.as_str(),
+                    state.reason.as_str(),
+                    diagnostic.render_fields()
+                ));
+            }
+            return Ok(OverlayToggleHandling {
+                handled: true,
+                consumed: false,
+            });
+        }
+
+        let trigger_label = format!("overlay {} toggle", overlay.id);
+        stats.record_trigger(&trigger_label);
+        match toggle.mode {
+            BindingMode::Consume => stats.record_consumed_trigger_event(),
+            BindingMode::Passthrough => stats.record_passthrough_trigger_event(),
+        }
+        stats.record_active_process_match();
+
+        let visible = if self.hidden_overlay_ids.remove(&overlay.id) {
+            true
+        } else {
+            self.hidden_overlay_ids.insert(overlay.id.clone());
+            adapter.cleanup_overlay(&overlay.id)?;
+            false
+        };
+        log.info(format!(
+            "event=overlay_toggle id={} hotkey={} visible={} mode={}",
+            overlay.id,
+            toggle.trigger.as_str(),
+            visible,
+            toggle.mode.as_str()
+        ));
+        Ok(OverlayToggleHandling {
+            handled: true,
+            consumed: toggle.mode == BindingMode::Consume,
+        })
+    }
+}
+
+fn overlay_for_toggle_hotkey<'a>(
+    program: &'a ControllerProgram,
+    hotkey: &HotkeyId,
+) -> Option<&'a OverlayDefinition> {
+    program.overlays().overlays().iter().find(|overlay| {
+        overlay
+            .toggle_hotkey
+            .as_ref()
+            .is_some_and(|toggle| toggle.trigger == *hotkey)
+    })
+}
+
+fn overlay_toggle_matches_input(
+    overlay: &OverlayDefinition,
+    event: &MotionInputEvent,
+    motion_runtime: &MotionRuntime,
+) -> bool {
+    if event.state != MotionInputState::Pressed {
+        return false;
+    }
+    let Some(toggle) = overlay.toggle_hotkey.as_ref() else {
+        return false;
+    };
+    let Ok((required_held, primary)) = overlay_toggle_tokens(&toggle.trigger) else {
+        return false;
+    };
+    if event.token != primary {
+        return false;
+    }
+    motion_runtime.held_satisfies(&required_held)
+}
+
+fn overlay_toggle_tokens(
+    hotkey: &HotkeyId,
+) -> Result<(HeldCondition, MotionToken), DiagnosableError> {
+    let mut parts = hotkey.as_str().split('+').collect::<Vec<_>>();
+    let primary = parts.pop().ok_or_else(|| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "overlay hotkey requires trigger",
+        )
+    })?;
+    Ok((
+        HeldCondition::new(
+            parts
+                .into_iter()
+                .map(MotionToken::parse)
+                .collect::<Result<Vec<_>, _>>()?,
+        )?,
+        MotionToken::parse(primary)?,
+    ))
 }
 
 #[derive(Default)]
@@ -4360,6 +4607,60 @@ mod tests {
         assert!(rendered.contains("dispatch_after_read_latency_ms=3"));
         assert!(rendered.contains("event_age_ms=99"));
         assert!(!rendered.contains("dispatch_latency_ms=3"));
+    }
+
+    #[test]
+    fn overlay_toggle_bindings_match_shift_function_key_input() {
+        let program = signal_auras_lua::load_lua_controller_program_source(
+            r##"
+            sa.state.track({
+              id = "heavy_stun",
+              scope = { processes = { "PathOfExileSteam.exe" } },
+              capabilities = { "screen_read" },
+              poll_ms = 50,
+              detector = {
+                kind = "horizontal_progress_bar",
+                roi = { x = 0, y = 0, w = 10, h = 10 },
+                fill = { direction = "left_to_right" },
+              },
+            })
+
+            sa.overlay.mount({
+              id = "poe2_status",
+              scope = { processes = { "PathOfExileSteam.exe" } },
+              provider = "native",
+              hotkey = { trigger = "Shift+F1", mode = "consume" },
+              visuals = {
+                {
+                  id = "heavy_stun",
+                  kind = "progress_bar",
+                  bind = { tracker = "heavy_stun", field = "progress_percent" },
+                  rect = { x = 1200, y = 900, w = 150, h = 22 },
+                  opacity = 0.72,
+                  fill = "#d8b84c",
+                  background = "#101820",
+                },
+              },
+            })
+            "##,
+        )
+        .unwrap();
+
+        let bindings = overlay_toggle_bindings(&program).unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].trigger_label(), "Shift+F1");
+        assert_eq!(bindings[0].mode, BindingMode::Consume);
+
+        let overlay = &program.overlays().overlays()[0];
+        let mut motion_runtime = MotionRuntime::new(Vec::new());
+        motion_runtime.handle_input(MotionInputEvent::pressed(MotionToken::Key(
+            "Shift".to_string(),
+        )));
+        assert!(overlay_toggle_matches_input(
+            overlay,
+            &MotionInputEvent::pressed(MotionToken::Key("F1".to_string())),
+            &motion_runtime
+        ));
     }
 
     #[test]

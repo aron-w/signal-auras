@@ -13,7 +13,7 @@ use signal_auras_core::{
     StateTrackerDefinitionSet, StateTrackerPoller, SynthesizedInputRequest, TrackerState,
     VisualDefinition, WheelDirection, DEFAULT_FOCUS_STALE_THRESHOLD,
 };
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
 #[test]
@@ -215,6 +215,7 @@ fn overlay_definitions_validate_duplicate_visuals_and_bindings() {
         overlay_scope(),
         OverlaySurfaceKind::Overlay,
         RendererProviderId::Native,
+        None,
         [
             overlay_progress_visual(
                 "bar",
@@ -240,6 +241,7 @@ fn overlay_definitions_validate_duplicate_visuals_and_bindings() {
         overlay_scope(),
         OverlaySurfaceKind::Overlay,
         RendererProviderId::Native,
+        None,
         [overlay_progress_visual(
             "bad",
             "missing_tracker",
@@ -551,6 +553,7 @@ fn overlay_provider_selection_fails_closed_without_fallback() {
         ScopeSelection::ExplicitGlobal,
         OverlaySurfaceKind::Overlay,
         RendererProviderId::WebView,
+        None,
         [overlay_progress_visual(
             "heavy_stun",
             "heavy_stun",
@@ -643,6 +646,48 @@ fn overlay_snapshots_are_sanitized_and_do_not_request_input_or_macros() {
     assert!(!rendered.contains("compositor"));
 }
 
+#[test]
+fn hidden_overlay_ids_are_skipped_for_current_run_snapshots() {
+    let overlays = overlay_definition_set();
+    let states = BTreeMap::from([
+        (
+            "heavy_stun".to_string(),
+            TrackerState::HorizontalProgressBar {
+                visible: true,
+                progress_percent: 40,
+                confidence: 95,
+                freshness_ms: 0,
+            },
+        ),
+        (
+            "refutation_cooldown".to_string(),
+            TrackerState::RadialCooldown {
+                phase: signal_auras_core::RadialCooldownPhase::Active,
+                ready: false,
+                cooldown_fraction: 40,
+                remaining_ms: Some(1_600),
+                total_estimated_ms: Some(4_000),
+                predicted_remaining_ms: None,
+                predicted_duration_ms: None,
+                confidence: 95,
+                freshness_ms: 0,
+            },
+        ),
+    ]);
+    let hidden = BTreeSet::from(["poe2_status".to_string()]);
+
+    let snapshots = overlays.snapshots_with_hidden(
+        10,
+        &signal_auras_core::available_capability_report(overlays.required_capabilities(), "test"),
+        &ActiveProcessContext::name_only(ProcessName::parse("PathOfExileSteam.exe").unwrap()),
+        &states,
+        &OverlayProviderReport::native_available(),
+        &hidden,
+    );
+
+    assert!(snapshots.is_empty());
+}
+
 fn overlay_definition_set() -> OverlayDefinitionSet {
     let trackers = overlay_test_trackers();
     let overlay = OverlayDefinition::new(
@@ -650,6 +695,7 @@ fn overlay_definition_set() -> OverlayDefinitionSet {
         overlay_scope(),
         OverlaySurfaceKind::Overlay,
         RendererProviderId::Native,
+        None,
         [
             overlay_progress_visual(
                 "heavy_stun",

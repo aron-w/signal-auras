@@ -118,8 +118,8 @@ fn state_trackers_accept_poe2_example_without_tracker_callbacks() {
             && roi.h == 36
             && mask.inset == 10
             && phases.order.len() == 4
-            && phases.prediction.is_some_and(|prediction| prediction.duration_ms == 8_000
-                && prediction.stable_after_ms == 1_000)
+            && phases.prediction.is_some_and(|prediction| prediction.duration_ms == 7_000
+                && prediction.stable_after_ms == 500)
     ));
 
     let heavy_stun = trackers

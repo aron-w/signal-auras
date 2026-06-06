@@ -53,8 +53,9 @@ pub use motion::{
 pub use overlay::{
     OverlayDefinition, OverlayDefinitionSet, OverlayDiagnostic, OverlayDiagnosticReason,
     OverlayLifecycleState, OverlayProviderReport, OverlayProviderStatus, OverlayRect,
-    OverlaySnapshot, OverlayStyle, OverlaySurfaceKind, ProgressBarVisualDefinition,
-    RendererProviderId, StateBinding, StateField, VisualDefinition, VisualShape, VisualSnapshot,
+    OverlaySnapshot, OverlayStyle, OverlaySurfaceKind, OverlayToggleHotkey,
+    ProgressBarVisualDefinition, RendererProviderId, StateBinding, StateField, VisualDefinition,
+    VisualShape, VisualSnapshot,
 };
 pub use scope::{
     ActiveProcessConfidence, ActiveProcessContext, FocusFreshness, FocusFreshnessPolicy,

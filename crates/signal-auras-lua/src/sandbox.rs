@@ -15,11 +15,12 @@ use signal_auras_core::{
     LoopBody, LoopDefinition, LoopInterval, LoopRepeat, LuaAutomationConfiguration, MacroAction,
     MacroDefinition, ModifierSet, MotionDefinition, MotionToken, MotionTrigger, MouseButton,
     MouseTrigger, OverlayDefinition, OverlayDefinitionSet, OverlayRect, OverlayStyle,
-    OverlaySurfaceKind, PressDefinition, ProcessName, ProgressBarVisualDefinition,
-    ProgressFillDirection, RadialCooldownPhase, RadialCooldownPhases, RadialCooldownPrediction,
-    RadialPhaseRule, RadialProgressFill, RadialRuleMetric, RadialSampleRegion, RendererProviderId,
-    Roi, ScopeSelection, ScriptScope, StateBinding, StateField, StateTrackerCondition,
-    StateTrackerDefinition, StateTrackerDefinitionSet, VisualDefinition, WheelDirection,
+    OverlaySurfaceKind, OverlayToggleHotkey, PressDefinition, ProcessName,
+    ProgressBarVisualDefinition, ProgressFillDirection, RadialCooldownPhase, RadialCooldownPhases,
+    RadialCooldownPrediction, RadialPhaseRule, RadialProgressFill, RadialRuleMetric,
+    RadialSampleRegion, RendererProviderId, Roi, ScopeSelection, ScriptScope, StateBinding,
+    StateField, StateTrackerCondition, StateTrackerDefinition, StateTrackerDefinitionSet,
+    VisualDefinition, WheelDirection,
 };
 use std::{
     collections::BTreeSet,
@@ -382,6 +383,7 @@ fn parse_overlay_definition(
             DiagnosableError::new(ErrorPhase::ScriptValidation, "overlay requires provider")
         })?)?;
     let surface_kind = OverlaySurfaceKind::parse(field_string(source, "surface"))?;
+    let toggle_hotkey = parse_overlay_toggle_hotkey(source)?;
     let scope = parse_overlay_scope(source, full_source)?;
     let visuals_body = table_body_field_after(source, "visuals")?.ok_or_else(|| {
         DiagnosableError::new(ErrorPhase::ScriptValidation, "overlay requires visuals")
@@ -390,7 +392,31 @@ fn parse_overlay_definition(
         .into_iter()
         .map(parse_overlay_visual)
         .collect::<Result<Vec<_>, _>>()?;
-    OverlayDefinition::new(id, scope, surface_kind, provider, visuals)
+    OverlayDefinition::new(id, scope, surface_kind, provider, toggle_hotkey, visuals)
+}
+
+fn parse_overlay_toggle_hotkey(
+    source: &str,
+) -> Result<Option<OverlayToggleHotkey>, DiagnosableError> {
+    if top_level_field_index(source, "hotkey").is_none() {
+        return Ok(None);
+    }
+    let hotkey_body = table_body_field_after(source, "hotkey")?.ok_or_else(|| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "overlay hotkey must use table constructor",
+        )
+    })?;
+    let trigger = field_string(hotkey_body, "trigger").ok_or_else(|| {
+        DiagnosableError::new(
+            ErrorPhase::ScriptValidation,
+            "overlay hotkey requires trigger",
+        )
+    })?;
+    Ok(Some(OverlayToggleHotkey::new(
+        HotkeyId::parse(trigger)?,
+        BindingMode::parse(field_string(hotkey_body, "mode"))?,
+    )))
 }
 
 fn parse_overlay_scope(
@@ -2197,6 +2223,7 @@ mod tests {
               scope = poe,
               provider = "native",
               surface = "overlay",
+              hotkey = { trigger = "Shift+F1", mode = "consume" },
               visuals = {
                 {
                   id = "refutation",
@@ -2218,6 +2245,12 @@ mod tests {
         let visual = match &program.overlays().overlays()[0].visuals[0] {
             VisualDefinition::ProgressBar(visual) => visual,
         };
+        let toggle = program.overlays().overlays()[0]
+            .toggle_hotkey
+            .as_ref()
+            .unwrap();
+        assert_eq!(toggle.trigger.as_str(), "Shift+F1");
+        assert_eq!(toggle.mode, BindingMode::Consume);
         assert_eq!(
             visual
                 .activated_style

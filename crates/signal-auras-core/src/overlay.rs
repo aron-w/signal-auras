@@ -1,6 +1,7 @@
+use crate::BindingMode;
 use crate::{
     ActiveProcessContext, AdapterDiagnostic, CapabilityAvailability, CapabilityKind,
-    CapabilityReport, CapabilitySet, DetectorDefinition, DiagnosableError, ErrorPhase,
+    CapabilityReport, CapabilitySet, DetectorDefinition, DiagnosableError, ErrorPhase, HotkeyId,
     RadialCooldownPhase, ScopeDecision, ScopeSelection, StateTrackerDefinitionSet, TrackerState,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -51,6 +52,18 @@ impl OverlaySurfaceKind {
                 format!("unsupported overlay surface '{other}'"),
             )),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayToggleHotkey {
+    pub trigger: HotkeyId,
+    pub mode: BindingMode,
+}
+
+impl OverlayToggleHotkey {
+    pub fn new(trigger: HotkeyId, mode: BindingMode) -> Self {
+        Self { trigger, mode }
     }
 }
 
@@ -240,6 +253,7 @@ pub struct OverlayDefinition {
     pub scope: ScopeSelection,
     pub surface_kind: OverlaySurfaceKind,
     pub provider: RendererProviderId,
+    pub toggle_hotkey: Option<OverlayToggleHotkey>,
     pub visuals: Vec<VisualDefinition>,
 }
 
@@ -249,6 +263,7 @@ impl OverlayDefinition {
         scope: ScopeSelection,
         surface_kind: OverlaySurfaceKind,
         provider: RendererProviderId,
+        toggle_hotkey: Option<OverlayToggleHotkey>,
         visuals: impl IntoIterator<Item = VisualDefinition>,
     ) -> Result<Self, DiagnosableError> {
         let visuals = visuals.into_iter().collect::<Vec<_>>();
@@ -272,6 +287,7 @@ impl OverlayDefinition {
             scope,
             surface_kind,
             provider,
+            toggle_hotkey,
             visuals,
         })
     }
@@ -335,8 +351,28 @@ impl OverlayDefinitionSet {
         tracker_states: &BTreeMap<String, TrackerState>,
         providers: &OverlayProviderReport,
     ) -> Vec<OverlaySnapshot> {
+        self.snapshots_with_hidden(
+            now_ms,
+            capabilities,
+            active_context,
+            tracker_states,
+            providers,
+            &BTreeSet::new(),
+        )
+    }
+
+    pub fn snapshots_with_hidden(
+        &self,
+        now_ms: u64,
+        capabilities: &CapabilityReport,
+        active_context: &ActiveProcessContext,
+        tracker_states: &BTreeMap<String, TrackerState>,
+        providers: &OverlayProviderReport,
+        hidden_overlay_ids: &BTreeSet<String>,
+    ) -> Vec<OverlaySnapshot> {
         self.overlays
             .iter()
+            .filter(|overlay| !hidden_overlay_ids.contains(&overlay.id))
             .map(|overlay| {
                 overlay_snapshot(
                     overlay,
