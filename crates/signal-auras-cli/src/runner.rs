@@ -126,6 +126,28 @@ impl ScopePrompt for StdioPrompt {
         let mut prompt = TerminalPrompt::new(stdin.lock(), stdout.lock(), stdin_is_interactive());
         prompt.resolve_missing_scope()
     }
+
+    fn select_input_devices(
+        &mut self,
+        reason: &str,
+        candidates: &[crate::prompt::DevicePromptCandidate],
+    ) -> Result<crate::prompt::DeviceSelectionDecision, DiagnosableError> {
+        let stdin = io::stdin();
+        let stdout = io::stdout();
+        let mut prompt = TerminalPrompt::new(stdin.lock(), stdout.lock(), stdin_is_interactive());
+        prompt.select_input_devices(reason, candidates)
+    }
+
+    fn confirm_input_permission_repair(
+        &mut self,
+        paths: &[PathBuf],
+        uinput: bool,
+    ) -> Result<bool, DiagnosableError> {
+        let stdin = io::stdin();
+        let stdout = io::stdout();
+        let mut prompt = TerminalPrompt::new(stdin.lock(), stdout.lock(), stdin_is_interactive());
+        prompt.confirm_input_permission_repair(paths, uinput)
+    }
 }
 
 impl ControllerHost for RealWaylandAdapter {
