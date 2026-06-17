@@ -116,6 +116,21 @@ fn lua_api_accepts_poe2_controller_example() {
 }
 
 #[test]
+fn lua_api_accepts_poe2_minion_controller_example() {
+    let source = fs::read_to_string("examples/poe2_minion.lua").unwrap();
+    assert!(!source.contains("/dev/input/event"));
+    let program = load_lua_controller_program_file(Path::new("examples/poe2_minion.lua")).unwrap();
+    let provider = program.input_provider.as_ref().unwrap();
+
+    assert!(provider.interactive_devices);
+    assert!(provider.devices.is_empty());
+    assert!(program.leader.is_some());
+    assert!(program
+        .required_capabilities()
+        .contains(signal_auras_core::CapabilityKind::CompositePointerObservation));
+}
+
+#[test]
 fn controller_configure_populates_runtime_options() {
     let program = load_lua_controller_program_source(
         r#"
