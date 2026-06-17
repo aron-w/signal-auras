@@ -101,6 +101,7 @@ An operator can inspect why an interactive device cache is accepted or rejected 
 - **FR-010**: System MUST display an interactive terminal checklist when the cache is missing, stale, invalid, incomplete, or permission-incomplete and the startup session is interactive.
 - **FR-011**: System MUST fail closed without observing input, grabbing devices, emitting input, or writing a successful cache when startup is non-interactive and the cache cannot be validated.
 - **FR-012**: System MUST allow users to cancel interactive selection without side effects beyond diagnostics.
+- **FR-012a**: System MUST provide a startup flag that discards the derived runtime cache before validation and forces fresh interactive selection.
 - **FR-013**: System MUST request temporary permission repair only after explicit user confirmation and only for the selected evdev paths plus `/dev/uinput` when required.
 - **FR-014**: System MUST revalidate selected devices after any permission repair before writing or accepting the cache.
 - **FR-015**: System MUST avoid broad all-event-device permission repair during interactive startup unless the user runs a separate documented manual fallback outside this flow.

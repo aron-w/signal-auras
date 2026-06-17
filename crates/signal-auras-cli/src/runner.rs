@@ -5,8 +5,12 @@ use crate::{
         InputAccessStatus, RealInputDeviceProbe, SudoSetfaclRepair,
     },
     logging::{init_runtime_logging, RuntimeLogConfig, RuntimeLogFormat, RuntimeLogLevel},
-    prompt::{stdin_is_interactive, ScopePrompt, TerminalPrompt},
+    prompt::{
+        stdin_is_interactive, DevicePromptCandidate, DeviceSelectionDecision, ScopePrompt,
+        TerminalPrompt,
+    },
 };
+use dialoguer::{theme::ColorfulTheme, Confirm, MultiSelect};
 mod controller;
 mod diagnostics;
 mod lifecycle;
@@ -130,12 +134,47 @@ impl ScopePrompt for StdioPrompt {
     fn select_input_devices(
         &mut self,
         reason: &str,
-        candidates: &[crate::prompt::DevicePromptCandidate],
-    ) -> Result<crate::prompt::DeviceSelectionDecision, DiagnosableError> {
-        let stdin = io::stdin();
-        let stdout = io::stdout();
-        let mut prompt = TerminalPrompt::new(stdin.lock(), stdout.lock(), stdin_is_interactive());
-        prompt.select_input_devices(reason, candidates)
+        candidates: &[DevicePromptCandidate],
+    ) -> Result<DeviceSelectionDecision, DiagnosableError> {
+        if !stdin_is_interactive() {
+            return Ok(DeviceSelectionDecision::NonInteractive);
+        }
+        if candidates.is_empty() {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScopePrompt,
+                "interactive input selection found no eligible devices",
+            ));
+        }
+
+        let items = candidates
+            .iter()
+            .map(|candidate| format!("{}  {}", candidate.path.display(), candidate.label.trim()))
+            .collect::<Vec<_>>();
+        let defaults = candidates
+            .iter()
+            .map(|candidate| candidate.selected)
+            .collect::<Vec<_>>();
+        let selected = MultiSelect::with_theme(&ColorfulTheme::default())
+            .with_prompt(format!("Select input devices for this run ({reason})"))
+            .items(&items)
+            .defaults(&defaults)
+            .interact_opt()
+            .map_err(prompt_dialog_error)?;
+        let Some(selected) = selected else {
+            return Ok(DeviceSelectionDecision::Cancel);
+        };
+        if selected.is_empty() {
+            return Err(DiagnosableError::new(
+                ErrorPhase::ScopePrompt,
+                "interactive input selection requires at least one device",
+            ));
+        }
+        Ok(DeviceSelectionDecision::Selected(
+            selected
+                .into_iter()
+                .map(|index| candidates[index].path.clone())
+                .collect(),
+        ))
     }
 
     fn confirm_input_permission_repair(
@@ -143,11 +182,29 @@ impl ScopePrompt for StdioPrompt {
         paths: &[PathBuf],
         uinput: bool,
     ) -> Result<bool, DiagnosableError> {
-        let stdin = io::stdin();
-        let stdout = io::stdout();
-        let mut prompt = TerminalPrompt::new(stdin.lock(), stdout.lock(), stdin_is_interactive());
-        prompt.confirm_input_permission_repair(paths, uinput)
+        if !stdin_is_interactive() {
+            return Ok(false);
+        }
+        eprintln!("Selected devices need temporary ACL repair:");
+        for path in paths {
+            eprintln!("  {}", path.display());
+        }
+        if uinput {
+            eprintln!("  /dev/uinput");
+        }
+        Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("Run sudo setfacl for only these paths?")
+            .default(false)
+            .interact()
+            .map_err(prompt_dialog_error)
     }
+}
+
+fn prompt_dialog_error(error: dialoguer::Error) -> DiagnosableError {
+    DiagnosableError::new(
+        ErrorPhase::ScopePrompt,
+        format!("interactive prompt failed: {error}"),
+    )
 }
 
 impl ControllerHost for RealWaylandAdapter {
@@ -255,11 +312,18 @@ pub fn run_cli(
             prompt,
             &mut adapter,
             options.log,
+            options.reset_input_cache,
         )
         .map(|_| ())
     } else {
-        start_live_real_runner_with_options(&options.lua_file, prompt, &mut adapter, options.log)
-            .map(|_| ())
+        start_live_real_runner_with_options(
+            &options.lua_file,
+            prompt,
+            &mut adapter,
+            options.log,
+            options.reset_input_cache,
+        )
+        .map(|_| ())
     }
 }
 
@@ -267,6 +331,7 @@ pub fn run_cli(
 pub struct RunOptions {
     pub lua_file: PathBuf,
     pub log: RuntimeLog,
+    pub reset_input_cache: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,10 +357,12 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions, DiagnosableError> {
     }
     let mut verbose = false;
     let mut config = RuntimeLogConfig::new(false);
+    let mut reset_input_cache = false;
     let mut paths = Vec::new();
     for arg in &args[1..] {
         match arg.as_str() {
             "--verbose" | "-v" => verbose = true,
+            "--reset-input-cache" | "--refresh-input-cache" => reset_input_cache = true,
             "--color=auto" => config.color_mode = ColorMode::Auto,
             "--color=always" => config.color_mode = ColorMode::Always,
             "--color=never" => config.color_mode = ColorMode::Never,
@@ -329,11 +396,12 @@ pub fn parse_run_args(args: &[String]) -> Result<RunOptions, DiagnosableError> {
     Ok(RunOptions {
         lua_file: paths.remove(0),
         log: RuntimeLog::from_config(config),
+        reset_input_cache,
     })
 }
 
 fn run_usage() -> &'static str {
-    "usage: signal-auras run [--verbose|-v] [--log-level=off|error|warn|info|debug|trace] [--log-format=auto|pretty|compact] [--color=auto|always|never] [--no-color] <lua-file>"
+    "usage: signal-auras run [--verbose|-v] [--reset-input-cache] [--log-level=off|error|warn|info|debug|trace] [--log-format=auto|pretty|compact] [--color=auto|always|never] [--no-color] <lua-file>"
 }
 
 pub fn parse_doctor_args(args: &[String]) -> Result<DoctorOptions, DiagnosableError> {
@@ -1068,7 +1136,7 @@ where
     let presses = config.presses_for_scope(scope.clone());
     let required = CapabilitySet::for_configuration_scope(&config, &scope);
     let input_provider =
-        resolve_real_input_provider(lua_file, config.input_provider.as_ref(), prompt)?;
+        resolve_real_input_provider(lua_file, config.input_provider.as_ref(), prompt, false)?;
     log.info("event=startup provider=kde-plasma-wayland");
     let mut session = RealAdapterCleanupSession::new(adapter);
     if let Err(error) = session
@@ -1156,8 +1224,12 @@ where
     ));
     let required = program.required_capabilities().clone();
     let mut stdio_prompt = StdioPrompt;
-    let input_provider =
-        resolve_real_input_provider(lua_file, program.input_provider.as_ref(), &mut stdio_prompt)?;
+    let input_provider = resolve_real_input_provider(
+        lua_file,
+        program.input_provider.as_ref(),
+        &mut stdio_prompt,
+        false,
+    )?;
     log.info("event=startup provider=kde-plasma-wayland");
     let mut session = RealAdapterCleanupSession::new(adapter);
     if let Err(error) = session
@@ -1237,7 +1309,7 @@ pub fn start_live_real_runner(
     prompt: &mut impl ScopePrompt,
     adapter: &mut RealWaylandAdapter,
 ) -> Result<RuntimeStats, DiagnosableError> {
-    start_live_real_runner_with_options(lua_file, prompt, adapter, RuntimeLog::default())
+    start_live_real_runner_with_options(lua_file, prompt, adapter, RuntimeLog::default(), false)
 }
 
 pub fn start_live_real_controller_runner_with_options(
@@ -1245,6 +1317,7 @@ pub fn start_live_real_controller_runner_with_options(
     prompt: &mut impl ScopePrompt,
     adapter: &mut RealWaylandAdapter,
     log: RuntimeLog,
+    reset_input_cache: bool,
 ) -> Result<RuntimeStats, DiagnosableError> {
     let log_guard = init_runtime_logging(&log);
     log.info(format!(
@@ -1259,8 +1332,12 @@ pub fn start_live_real_controller_runner_with_options(
         program.callbacks().count()
     ));
     let required = program.required_capabilities().clone();
-    let input_provider =
-        resolve_real_input_provider(lua_file, program.input_provider.as_ref(), prompt)?;
+    let input_provider = resolve_real_input_provider(
+        lua_file,
+        program.input_provider.as_ref(),
+        prompt,
+        reset_input_cache,
+    )?;
     let signal_fd = RuntimeSignalFd::shutdown()?;
     log.info("event=startup provider=kde-plasma-wayland");
     let mut session = RealAdapterCleanupSession::new(adapter);
@@ -1387,6 +1464,7 @@ pub fn start_live_real_runner_with_options(
     prompt: &mut impl ScopePrompt,
     adapter: &mut RealWaylandAdapter,
     log: RuntimeLog,
+    reset_input_cache: bool,
 ) -> Result<RuntimeStats, DiagnosableError> {
     let log_guard = init_runtime_logging(&log);
     log.info(format!("event=startup script_path={}", lua_file.display()));
@@ -1430,8 +1508,12 @@ pub fn start_live_real_runner_with_options(
     let motions = config.motions_for_scope(scope.clone());
     let presses = config.presses_for_scope(scope.clone());
     let required = CapabilitySet::for_configuration_scope(&config, &scope);
-    let input_provider =
-        resolve_real_input_provider(lua_file, config.input_provider.as_ref(), prompt)?;
+    let input_provider = resolve_real_input_provider(
+        lua_file,
+        config.input_provider.as_ref(),
+        prompt,
+        reset_input_cache,
+    )?;
     let signal_fd = RuntimeSignalFd::shutdown()?;
     log.info("event=startup provider=kde-plasma-wayland");
     let mut session = RealAdapterCleanupSession::new(adapter);
@@ -1533,6 +1615,7 @@ fn resolve_real_input_provider(
     lua_file: &Path,
     provider: Option<&InputProviderConfig>,
     prompt: &mut impl ScopePrompt,
+    reset_input_cache: bool,
 ) -> Result<Option<InputProviderConfig>, DiagnosableError> {
     let Some(provider) = provider else {
         return Ok(None);
@@ -1542,7 +1625,15 @@ fn resolve_real_input_provider(
     }
     let probe = RealInputDeviceProbe;
     let mut repair = SudoSetfaclRepair;
-    resolve_interactive_input_provider(lua_file, provider, prompt, &probe, &mut repair).map(Some)
+    resolve_interactive_input_provider(
+        lua_file,
+        provider,
+        prompt,
+        &probe,
+        &mut repair,
+        reset_input_cache,
+    )
+    .map(Some)
 }
 
 fn warn_for_observe_mode_mouse_button_repeats<'a>(
@@ -5340,6 +5431,7 @@ mod tests {
             &mut prompt,
             &probe,
             &mut repair,
+            false,
         )
         .unwrap();
 

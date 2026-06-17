@@ -35,7 +35,7 @@ nix develop -c cargo run -p signal-auras-cli -- run ./examples/poe2.lua
 The command shape is:
 
 ```text
-signal-auras run [--verbose|-v] <lua-file>
+signal-auras run [--verbose|-v] [--reset-input-cache] <lua-file>
 ```
 
 The runner accepts exactly one Lua file path. Startup output includes the script
@@ -297,7 +297,8 @@ paths still match the recorded device identity and required permissions are
 present; otherwise interactive startup prompts again, or non-interactive startup
 fails closed. Permission repair from this flow is selected-device scoped and
 targets only the chosen evdev paths plus `/dev/uinput` when uinput output is
-configured.
+configured. Use `--reset-input-cache` to discard the runtime cache for that
+startup and force the interactive checklist before the runner opens devices.
 Use `signal-auras doctor keys <script.lua>` when you need key-name discovery
 for the current run. Key diagnostics report current-run device status, raw key
 code, canonical token, aliases, triggerability, emittability, and unavailable

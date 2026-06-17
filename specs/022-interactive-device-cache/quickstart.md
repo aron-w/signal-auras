@@ -31,7 +31,9 @@ nix flake check
 5. Confirm selected-device ACL repair if permissions are missing.
 6. Stop the runner and start it again; the second startup should reuse the
    valid runtime cache without prompting.
-7. Replug or change a selected device; the next startup should reject the stale
+7. Run `signal-auras run --reset-input-cache examples/poe2.lua`; startup should
+   ignore the valid cache and show the checklist again.
+8. Replug or change a selected device; the next startup should reject the stale
    cache and prompt again.
 
 ## Diagnostic Check

@@ -176,17 +176,22 @@ pub fn resolve_interactive_input_provider(
     prompt: &mut impl ScopePrompt,
     probe: &impl InputDeviceProbe,
     repair: &mut impl PermissionRepair,
+    reset_cache: bool,
 ) -> Result<InputProviderConfig, DiagnosableError> {
     if !provider.interactive_devices {
         return Ok(provider.clone());
     }
 
     let cache_path = runtime_cache_path(lua_file)?;
-    match validate_cache_file(&cache_path, lua_file, provider, probe) {
-        Ok(report) if matches!(report.status, CacheValidationStatus::Accepted) => {
-            return provider.with_selected_devices(report.selected_devices);
+    if reset_cache {
+        remove_cache_file_if_present(&cache_path)?;
+    } else {
+        match validate_cache_file(&cache_path, lua_file, provider, probe) {
+            Ok(report) if matches!(report.status, CacheValidationStatus::Accepted) => {
+                return provider.with_selected_devices(report.selected_devices);
+            }
+            Ok(_) | Err(_) => {}
         }
-        Ok(_) | Err(_) => {}
     }
 
     let candidates = interactive_candidates(probe)?;
@@ -237,6 +242,20 @@ pub fn resolve_interactive_input_provider(
     validate_selected_devices(&selected, provider, probe)?;
     write_cache_file(&cache_path, lua_file, provider, &selected, probe)?;
     provider.with_selected_devices(selected)
+}
+
+fn remove_cache_file_if_present(cache_path: &Path) -> Result<(), DiagnosableError> {
+    match fs::remove_file(cache_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DiagnosableError::new(
+            ErrorPhase::CapabilityProbe,
+            format!(
+                "cannot reset runtime input cache '{}': {error}",
+                cache_path.display()
+            ),
+        )),
+    }
 }
 
 pub fn validate_cache_file(
@@ -921,12 +940,78 @@ mod tests {
             &mut prompt,
             &probe,
             &mut repair,
+            false,
         )
         .unwrap();
 
         assert_eq!(resolved.devices, vec![device]);
         assert!(!resolved.interactive_devices);
         assert_eq!(prompt.select_calls, 0);
+        restore_runtime_dir(previous);
+    }
+
+    #[test]
+    fn reset_cache_reprompts_even_when_cache_is_valid() {
+        let _guard = env_lock().lock().unwrap();
+        let runtime = temp_dir("reset-cache");
+        let script = write_script("reset-cache");
+        let previous = std::env::var_os("XDG_RUNTIME_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+        let provider = interactive_provider();
+        let old_device = PathBuf::from("/dev/input/event3");
+        let new_device = PathBuf::from("/dev/input/event4");
+        let mut probe = FakeProbe::default();
+        for (device, name) in [(&old_device, "old keyboard"), (&new_device, "new keyboard")] {
+            probe.devices.push(device.clone());
+            probe
+                .read
+                .insert(device.clone(), InputAccessStatus::Accessible);
+            probe
+                .identities
+                .insert(device.clone(), identity("event", name));
+            probe.names.insert(device.clone(), name.to_string());
+        }
+        probe
+            .read_write
+            .insert(PathBuf::from("/dev/uinput"), InputAccessStatus::Accessible);
+        write_cache_file(
+            &runtime_cache_path(&script).unwrap(),
+            &script,
+            &provider,
+            std::slice::from_ref(&old_device),
+            &probe,
+        )
+        .unwrap();
+        let mut prompt = FakePrompt {
+            selection: DeviceSelectionDecision::Selected(vec![new_device.clone()]),
+            repair: false,
+            select_calls: 0,
+        };
+        let mut repair = FakeRepair::default();
+
+        let resolved = resolve_interactive_input_provider(
+            &script,
+            &provider,
+            &mut prompt,
+            &probe,
+            &mut repair,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.devices, vec![new_device.clone()]);
+        assert_eq!(prompt.select_calls, 1);
+        assert_eq!(
+            validate_cache_file(
+                &runtime_cache_path(&script).unwrap(),
+                &script,
+                &provider,
+                &probe
+            )
+            .unwrap()
+            .selected_devices,
+            vec![new_device]
+        );
         restore_runtime_dir(previous);
     }
 
@@ -982,6 +1067,7 @@ mod tests {
             &mut prompt,
             &probe,
             &mut repair,
+            false,
         )
         .unwrap();
 
@@ -1023,6 +1109,7 @@ mod tests {
             &mut prompt,
             &probe,
             &mut repair,
+            false,
         )
         .unwrap_err();
 
@@ -1067,6 +1154,7 @@ mod tests {
             &mut prompt,
             &probe,
             &mut repair,
+            false,
         )
         .unwrap_err();
 

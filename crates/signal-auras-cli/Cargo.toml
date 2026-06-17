@@ -5,6 +5,7 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
+dialoguer = "0.11"
 signal-auras-core = { path = "../signal-auras-core" }
 signal-auras-lua = { path = "../signal-auras-lua" }
 signal-auras-wayland = { path = "../signal-auras-wayland" }

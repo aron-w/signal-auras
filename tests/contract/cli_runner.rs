@@ -25,6 +25,25 @@ fn cli_requires_run_and_one_path() {
     let options = parse_run_args(&["run".into(), "--verbose".into(), "a.lua".into()]).unwrap();
     assert_eq!(options.lua_file, PathBuf::from("a.lua"));
     assert!(options.log.verbose());
+    assert!(!options.reset_input_cache);
+}
+
+#[test]
+fn cli_accepts_input_cache_reset_flag() {
+    let options =
+        parse_run_args(&["run".into(), "--reset-input-cache".into(), "a.lua".into()]).unwrap();
+
+    assert_eq!(options.lua_file, PathBuf::from("a.lua"));
+    assert!(options.reset_input_cache);
+}
+
+#[test]
+fn cli_accepts_input_cache_refresh_alias() {
+    let options =
+        parse_run_args(&["run".into(), "--refresh-input-cache".into(), "a.lua".into()]).unwrap();
+
+    assert_eq!(options.lua_file, PathBuf::from("a.lua"));
+    assert!(options.reset_input_cache);
 }
 
 #[test]

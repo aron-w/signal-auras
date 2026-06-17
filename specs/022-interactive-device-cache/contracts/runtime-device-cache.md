@@ -17,6 +17,8 @@ The cache key is derived from the canonical main Lua path.
   exclusion.
 - Cache writes happen only after successful interactive selection and
   post-repair validation.
+- `signal-auras run --reset-input-cache <lua-file>` discards the derived cache
+  for that startup before validation and requires a fresh interactive selection.
 
 ## Failure Behavior
 
@@ -24,3 +26,5 @@ The cache key is derived from the canonical main Lua path.
   partially used.
 - Unsafe `$XDG_RUNTIME_DIR` conditions fail closed.
 - Deleting the cache revokes automatic reuse for the next startup.
+- Explicit cache reset has the same revocation effect for the current startup
+  while preserving the normal cache location and validation rules.
