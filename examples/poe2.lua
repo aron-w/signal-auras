@@ -5,11 +5,7 @@ aura.configure({
     backend = "evdev",
     mode = "grab",
     output = "uinput",
-    devices = {
-      "/dev/input/by-signal-auras/keychron-k5-pro",
-      "/dev/input/by-signal-auras/logitech-mouse",
-      "/dev/input/by-signal-auras/logitech-mouse-keyboard",
-    },
+    devices = "interactive",
   },
   leader = "F9",
 })

@@ -1,3 +1,4 @@
+use signal_auras_cli::prompt::{DevicePromptCandidate, DeviceSelectionDecision};
 use signal_auras_cli::prompt::{ScopePrompt, TerminalPrompt};
 use signal_auras_cli::runner::{
     parse_doctor_args, parse_run_args, start_controller_runner_with_lifecycle,
@@ -137,6 +138,65 @@ fn prompt_cancel_and_non_interactive_do_not_select_global_scope() {
     assert_eq!(error.phase, ErrorPhase::ScopePrompt);
     assert!(error.message.contains("interactive stdin"));
     assert!(output.is_empty());
+}
+
+#[test]
+fn prompt_selects_input_devices_from_terminal_checklist() {
+    let input = Cursor::new("1, 2\n");
+    let mut output = Vec::new();
+    let candidates = vec![
+        DevicePromptCandidate {
+            path: PathBuf::from("/dev/input/event3"),
+            label: "name=keyboard access=ok".to_string(),
+            selected: false,
+        },
+        DevicePromptCandidate {
+            path: PathBuf::from("/dev/input/event4"),
+            label: "name=mouse access=ok".to_string(),
+            selected: true,
+        },
+    ];
+
+    let decision = {
+        let mut prompt = TerminalPrompt::new(input, &mut output, true);
+        prompt
+            .select_input_devices("missing cache", &candidates)
+            .unwrap()
+    };
+
+    assert_eq!(
+        decision,
+        DeviceSelectionDecision::Selected(vec![
+            PathBuf::from("/dev/input/event3"),
+            PathBuf::from("/dev/input/event4"),
+        ])
+    );
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("[ ] 1. /dev/input/event3"));
+    assert!(output.contains("[x] 2. /dev/input/event4"));
+}
+
+#[test]
+fn prompt_requires_literal_grant_for_input_permission_repair() {
+    let mut granted_output = Vec::new();
+    let granted = {
+        let input = Cursor::new("GRANT\n");
+        let mut prompt = TerminalPrompt::new(input, &mut granted_output, true);
+        prompt
+            .confirm_input_permission_repair(&[PathBuf::from("/dev/input/event3")], true)
+            .unwrap()
+    };
+    assert!(granted);
+    assert!(String::from_utf8(granted_output)
+        .unwrap()
+        .contains("/dev/uinput"));
+
+    let input = Cursor::new("grant\n");
+    let mut rejected_output = Vec::new();
+    let mut prompt = TerminalPrompt::new(input, &mut rejected_output, true);
+    assert!(!prompt
+        .confirm_input_permission_repair(&[PathBuf::from("/dev/input/event3")], false)
+        .unwrap());
 }
 
 #[test]

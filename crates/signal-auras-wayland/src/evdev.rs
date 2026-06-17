@@ -37,6 +37,36 @@ const BTN_MIDDLE: u16 = 0x112;
 
 pub const SIGNAL_AURAS_UINPUT_DEVICE_NAME: &str = crate::uinput::UINPUT_DEVICE_NAME;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvdevDeviceIdentity {
+    pub event_name: String,
+    pub name: Option<String>,
+    pub phys: Option<String>,
+    pub uniq: Option<String>,
+    pub bustype: Option<String>,
+    pub vendor: Option<String>,
+    pub product: Option<String>,
+    pub version: Option<String>,
+}
+
+impl EvdevDeviceIdentity {
+    pub fn stable_parts(&self) -> Vec<(&'static str, &str)> {
+        [
+            ("event", Some(self.event_name.as_str())),
+            ("name", self.name.as_deref()),
+            ("phys", self.phys.as_deref()),
+            ("uniq", self.uniq.as_deref()),
+            ("bustype", self.bustype.as_deref()),
+            ("vendor", self.vendor.as_deref()),
+            ("product", self.product.as_deref()),
+            ("version", self.version.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(name, value)| value.map(|value| (name, value)))
+        .collect()
+    }
+}
+
 #[derive(Debug)]
 pub struct EvdevObservationProvider {
     devices: Vec<EvdevDevice>,
@@ -709,6 +739,47 @@ fn is_event_device_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.starts_with("event"))
+}
+
+pub fn evdev_device_identity(path: &Path) -> Option<EvdevDeviceIdentity> {
+    evdev_device_identity_from_sysfs(path, Path::new("/sys/class/input"))
+}
+
+pub fn evdev_device_identity_from_sysfs(
+    path: &Path,
+    sysfs_input_root: &Path,
+) -> Option<EvdevDeviceIdentity> {
+    let event_name = event_node_name(path)?;
+    let device_root = sysfs_input_root.join(&event_name).join("device");
+    Some(EvdevDeviceIdentity {
+        event_name,
+        name: read_trimmed(device_root.join("name")),
+        phys: read_trimmed(device_root.join("phys")),
+        uniq: read_trimmed(device_root.join("uniq")),
+        bustype: read_trimmed(device_root.join("id/bustype")),
+        vendor: read_trimmed(device_root.join("id/vendor")),
+        product: read_trimmed(device_root.join("id/product")),
+        version: read_trimmed(device_root.join("id/version")),
+    })
+}
+
+fn event_node_name(path: &Path) -> Option<String> {
+    let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    resolved
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| name.starts_with("event"))
+        .map(str::to_string)
+}
+
+fn read_trimmed(path: impl AsRef<Path>) -> Option<String> {
+    let value = fs::read_to_string(path).ok()?;
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 impl Drop for EvdevObservationProvider {
@@ -1517,6 +1588,40 @@ mod tests {
         assert!(!is_signal_auras_virtual_device_name("ordinary keyboard"));
     }
 
+    #[test]
+    fn reads_device_identity_from_sysfs_event_node() {
+        let sysfs = temp_dir("identity-sysfs");
+        let device = sysfs.join("event3/device");
+        std::fs::create_dir_all(device.join("id")).unwrap();
+        std::fs::write(device.join("name"), "Keychron K5 Pro\n").unwrap();
+        std::fs::write(device.join("phys"), "usb-0000:00:14.0-1/input0\n").unwrap();
+        std::fs::write(device.join("uniq"), "serial-1\n").unwrap();
+        std::fs::write(device.join("id/bustype"), "0003\n").unwrap();
+        std::fs::write(device.join("id/vendor"), "3434\n").unwrap();
+        std::fs::write(device.join("id/product"), "0431\n").unwrap();
+        std::fs::write(device.join("id/version"), "0111\n").unwrap();
+
+        let identity = evdev_device_identity_from_sysfs(Path::new("/dev/input/event3"), &sysfs)
+            .expect("event path should resolve");
+
+        assert_eq!(identity.event_name, "event3");
+        assert_eq!(identity.name.as_deref(), Some("Keychron K5 Pro"));
+        assert_eq!(identity.phys.as_deref(), Some("usb-0000:00:14.0-1/input0"));
+        assert_eq!(identity.uniq.as_deref(), Some("serial-1"));
+        assert_eq!(identity.vendor.as_deref(), Some("3434"));
+        assert!(identity
+            .stable_parts()
+            .iter()
+            .any(|part| *part == ("product", "0431")));
+    }
+
+    #[test]
+    fn device_identity_rejects_non_event_paths() {
+        let sysfs = temp_dir("identity-non-event");
+
+        assert!(evdev_device_identity_from_sysfs(Path::new("/dev/input/mouse0"), &sysfs).is_none());
+    }
+
     fn input_event_bytes(event_type: u16, code: u16, value: i32) -> [u8; INPUT_EVENT_SIZE] {
         let mut bytes = [0u8; INPUT_EVENT_SIZE];
         bytes[TIMEVAL_SIZE..TIMEVAL_SIZE + 2].copy_from_slice(&event_type.to_ne_bytes());
@@ -1557,6 +1662,19 @@ mod tests {
             "signal-auras-evdev-{label}-{}-{sequence}.event",
             std::process::id()
         ));
+        path
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        static NEXT_DIR_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let mut path = std::env::temp_dir();
+        let sequence = NEXT_DIR_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        path.push(format!(
+            "signal-auras-evdev-{label}-{}-{sequence}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
         path
     }
 }

@@ -460,6 +460,12 @@ impl RealWaylandAdapter {
         };
         match provider.backend {
             InputProviderBackend::Evdev => {
+                if provider.interactive_devices {
+                    return Err(signal_auras_core::DiagnosableError::new(
+                        signal_auras_core::ErrorPhase::Registration,
+                        "interactive evdev device selection must be resolved before adapter startup",
+                    ));
+                }
                 let devices = if provider.all_devices {
                     crate::evdev::discover_event_devices()?
                 } else {

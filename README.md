@@ -289,6 +289,15 @@ Use `signal-auras doctor input <script.lua>` or `just input-doctor file=<script.
 to check the configured evdev paths and `/dev/uinput` access without grabbing
 devices or emitting input. `just unsafe-input-acl` remains available for short
 local tests; those ACLs can still be reset by reboot, replug, or udev changes.
+Scripts can also set `devices = "interactive"` for a terminal startup checklist.
+The runner stores the selected devices in a mandatory per-script runtime cache
+under `$XDG_RUNTIME_DIR/signal-auras/input-devices/`, keyed by the canonical
+main Lua path. On later starts the cache is used only when the cached event
+paths still match the recorded device identity and required permissions are
+present; otherwise interactive startup prompts again, or non-interactive startup
+fails closed. Permission repair from this flow is selected-device scoped and
+targets only the chosen evdev paths plus `/dev/uinput` when uinput output is
+configured.
 Use `signal-auras doctor keys <script.lua>` when you need key-name discovery
 for the current run. Key diagnostics report current-run device status, raw key
 code, canonical token, aliases, triggerability, emittability, and unavailable

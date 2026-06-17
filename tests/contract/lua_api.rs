@@ -61,6 +61,10 @@ fn lua_api_accepts_poe2_controller_example() {
     assert_eq!(program.registrations().registrations().len(), 7);
     assert_eq!(program.state_trackers().trackers().len(), 2);
     assert!(program.input_provider.is_some());
+    let provider = program.input_provider.as_ref().unwrap();
+    assert!(provider.interactive_devices);
+    assert!(provider.devices.is_empty());
+    assert!(!source.contains("/dev/input/event"));
     assert!(program.leader.is_some());
     assert!(!program
         .required_capabilities()

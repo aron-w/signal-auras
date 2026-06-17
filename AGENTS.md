@@ -24,4 +24,6 @@ For the runner architecture decomposition follow-up, also read
 `specs/019-runner-decomposition/plan.md`.
 For the Lua callback preemption follow-up, also read
 `specs/020-lua-callback-preemption/plan.md`.
+For the interactive device cache follow-up, also read
+`specs/022-interactive-device-cache/plan.md`.
 <!-- SPECKIT END -->

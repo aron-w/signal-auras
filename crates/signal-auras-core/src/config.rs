@@ -211,6 +211,7 @@ pub struct InputProviderConfig {
     pub output: InputProviderOutput,
     pub devices: Vec<PathBuf>,
     pub all_devices: bool,
+    pub interactive_devices: bool,
 }
 
 impl InputProviderConfig {
@@ -231,7 +232,26 @@ impl InputProviderConfig {
             output,
             devices,
             all_devices: false,
+            interactive_devices: false,
         })
+    }
+
+    pub fn evdev_interactive(
+        mode: InputProviderMode,
+        output: InputProviderOutput,
+    ) -> Result<Self, DiagnosableError> {
+        Ok(Self {
+            backend: InputProviderBackend::Evdev,
+            mode,
+            output,
+            devices: Vec::new(),
+            all_devices: false,
+            interactive_devices: true,
+        })
+    }
+
+    pub fn with_selected_devices(&self, devices: Vec<PathBuf>) -> Result<Self, DiagnosableError> {
+        Self::evdev(devices, self.mode, self.output)
     }
 
     pub fn evdev_all(
@@ -251,6 +271,7 @@ impl InputProviderConfig {
             output,
             devices: Vec::new(),
             all_devices: true,
+            interactive_devices: false,
         })
     }
 }
@@ -535,5 +556,39 @@ mod tests {
             Vec::new(),
         )
         .is_err());
+    }
+
+    #[test]
+    fn input_provider_accepts_interactive_evdev_selection() {
+        let provider = InputProviderConfig::evdev_interactive(
+            InputProviderMode::Grab,
+            InputProviderOutput::Uinput,
+        )
+        .unwrap();
+
+        assert!(provider.interactive_devices);
+        assert!(!provider.all_devices);
+        assert!(provider.devices.is_empty());
+        assert_eq!(provider.mode, InputProviderMode::Grab);
+        assert_eq!(provider.output, InputProviderOutput::Uinput);
+    }
+
+    #[test]
+    fn interactive_provider_resolves_to_strict_selected_devices() {
+        let provider = InputProviderConfig::evdev_interactive(
+            InputProviderMode::Observe,
+            InputProviderOutput::Portal,
+        )
+        .unwrap();
+
+        let resolved = provider
+            .with_selected_devices(vec![PathBuf::from("/dev/input/event7")])
+            .unwrap();
+
+        assert!(!resolved.interactive_devices);
+        assert!(!resolved.all_devices);
+        assert_eq!(resolved.devices, vec![PathBuf::from("/dev/input/event7")]);
+        assert_eq!(resolved.mode, InputProviderMode::Observe);
+        assert_eq!(resolved.output, InputProviderOutput::Portal);
     }
 }

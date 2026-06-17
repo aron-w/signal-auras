@@ -1520,6 +1520,9 @@ fn parse_input_provider(source: &str) -> Result<Option<InputProviderConfig>, Dia
     let acknowledge_risk = field_string(provider_body, "acknowledge_risk");
     match (backend, mode) {
         (InputProviderBackend::Evdev, InputProviderMode::Observe | InputProviderMode::Grab) => {
+            if field_string(provider_body, "devices") == Some("interactive") {
+                return InputProviderConfig::evdev_interactive(mode, output).map(Some);
+            }
             if field_string(provider_body, "devices") == Some("all") {
                 return InputProviderConfig::evdev_all(mode, output, acknowledge_risk).map(Some);
             }
@@ -2965,6 +2968,36 @@ mod tests {
         assert!(provider.all_devices);
         assert!(provider.devices.is_empty());
         assert_eq!(provider.mode, InputProviderMode::Observe);
+    }
+
+    #[test]
+    fn parses_interactive_evdev_provider() {
+        let source = r#"
+            return {
+              leader = "F13",
+              input_provider = {
+                backend = "evdev",
+                mode = "grab",
+                output = "uinput",
+                devices = "interactive",
+              },
+              motions = {
+                {
+                  trigger = { "<Leader>", "<LClick>" },
+                  macro = macro { mouse_click "left" },
+                },
+              },
+            }
+        "#;
+
+        let config = load_lua_source(source).unwrap();
+        let provider = config.input_provider.unwrap();
+
+        assert!(provider.interactive_devices);
+        assert!(!provider.all_devices);
+        assert!(provider.devices.is_empty());
+        assert_eq!(provider.mode, InputProviderMode::Grab);
+        assert_eq!(provider.output, InputProviderOutput::Uinput);
     }
 
     #[test]

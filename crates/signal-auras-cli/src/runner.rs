@@ -1,5 +1,9 @@
 pub use crate::logging::{ColorMode, RuntimeLog, RuntimeLogGuard};
 use crate::{
+    input_cache::{
+        interactive_cache_report, resolve_interactive_input_provider, CacheValidationStatus,
+        InputAccessStatus, RealInputDeviceProbe, SudoSetfaclRepair,
+    },
     logging::{init_runtime_logging, RuntimeLogConfig, RuntimeLogFormat, RuntimeLogLevel},
     prompt::{stdin_is_interactive, ScopePrompt, TerminalPrompt},
 };
@@ -36,7 +40,9 @@ use signal_auras_lua::{
     ActiveWindowMetadata, ImperativeLuaController,
 };
 use signal_auras_wayland::{
-    evdev::{EvdevInputWaitOutcome, EvdevObservationProvider, KernelEventTimestamp},
+    evdev::{
+        EvdevDeviceIdentity, EvdevInputWaitOutcome, EvdevObservationProvider, KernelEventTimestamp,
+    },
     event_loop::{RuntimeSignalFd, RuntimeTimerFd},
     RealWaylandAdapter,
 };
@@ -222,8 +228,13 @@ pub fn run_cli(
     let _log_guard = init_runtime_logging(&options.log);
     let mut adapter = RealWaylandAdapter::new();
     if lua_file_looks_like_controller(&options.lua_file)? {
-        start_live_real_controller_runner_with_options(&options.lua_file, &mut adapter, options.log)
-            .map(|_| ())
+        start_live_real_controller_runner_with_options(
+            &options.lua_file,
+            prompt,
+            &mut adapter,
+            options.log,
+        )
+        .map(|_| ())
     } else {
         start_live_real_runner_with_options(&options.lua_file, prompt, &mut adapter, options.log)
             .map(|_| ())
@@ -533,6 +544,7 @@ enum InputPathStatus {
 }
 
 trait InputPermissionProbe {
+    fn event_devices(&self) -> Result<Vec<PathBuf>, DiagnosableError>;
     fn current_user(&self) -> String;
     fn current_groups(&self) -> Vec<String>;
     fn read_access(&self, path: &Path) -> InputPathStatus;
@@ -540,11 +552,16 @@ trait InputPermissionProbe {
     fn symlink_target(&self, path: &Path) -> Option<PathBuf>;
     fn stable_path_for(&self, path: &Path) -> Option<PathBuf>;
     fn device_name(&self, path: &Path) -> Option<String>;
+    fn device_identity(&self, path: &Path) -> Option<EvdevDeviceIdentity>;
 }
 
 struct RealInputPermissionProbe;
 
 impl InputPermissionProbe for RealInputPermissionProbe {
+    fn event_devices(&self) -> Result<Vec<PathBuf>, DiagnosableError> {
+        signal_auras_wayland::evdev::discover_event_devices()
+    }
+
     fn current_user(&self) -> String {
         std::env::var("USER").unwrap_or_else(|_| "unknown".to_string())
     }
@@ -597,6 +614,56 @@ impl InputPermissionProbe for RealInputPermissionProbe {
     fn device_name(&self, path: &Path) -> Option<String> {
         signal_auras_wayland::evdev::evdev_device_name(path)
     }
+
+    fn device_identity(&self, path: &Path) -> Option<EvdevDeviceIdentity> {
+        signal_auras_wayland::evdev::evdev_device_identity(path)
+    }
+}
+
+impl<T: InputPermissionProbe> crate::input_cache::InputDeviceProbe for T {
+    fn event_devices(&self) -> Result<Vec<PathBuf>, DiagnosableError> {
+        InputPermissionProbe::event_devices(self)
+    }
+
+    fn read_access(&self, path: &Path) -> InputAccessStatus {
+        match InputPermissionProbe::read_access(self, path) {
+            InputPathStatus::Accessible => InputAccessStatus::Accessible,
+            InputPathStatus::Missing(error) => InputAccessStatus::Missing(error),
+            InputPathStatus::Denied(error) => InputAccessStatus::Denied(error),
+            InputPathStatus::Duplicate => InputAccessStatus::Denied("duplicate".to_string()),
+            InputPathStatus::SelfGenerated(name) => {
+                InputAccessStatus::Denied(format!("self-generated device {name}"))
+            }
+        }
+    }
+
+    fn read_write_access(&self, path: &Path) -> InputAccessStatus {
+        match InputPermissionProbe::read_write_access(self, path) {
+            InputPathStatus::Accessible => InputAccessStatus::Accessible,
+            InputPathStatus::Missing(error) => InputAccessStatus::Missing(error),
+            InputPathStatus::Denied(error) => InputAccessStatus::Denied(error),
+            InputPathStatus::Duplicate => InputAccessStatus::Denied("duplicate".to_string()),
+            InputPathStatus::SelfGenerated(name) => {
+                InputAccessStatus::Denied(format!("self-generated device {name}"))
+            }
+        }
+    }
+
+    fn symlink_target(&self, path: &Path) -> Option<PathBuf> {
+        InputPermissionProbe::symlink_target(self, path)
+    }
+
+    fn stable_path_for(&self, path: &Path) -> Option<PathBuf> {
+        InputPermissionProbe::stable_path_for(self, path)
+    }
+
+    fn device_name(&self, path: &Path) -> Option<String> {
+        InputPermissionProbe::device_name(self, path)
+    }
+
+    fn device_identity(&self, path: &Path) -> Option<EvdevDeviceIdentity> {
+        InputPermissionProbe::device_identity(self, path)
+    }
 }
 
 pub fn input_doctor_report(lua_file: &Path) -> Result<InputDoctorReport, DiagnosableError> {
@@ -626,7 +693,20 @@ fn input_doctor_report_with_probe(
         provider.mode, provider.output
     ));
 
-    if provider.all_devices {
+    if provider.interactive_devices {
+        let cache = interactive_cache_report(lua_file, provider, probe);
+        if !matches!(cache.status, CacheValidationStatus::Accepted) {
+            ok = false;
+        }
+        lines.push(format!(
+            "interactive_cache path={} status={}",
+            cache.cache_path.display(),
+            render_cache_validation_status(&cache.status)
+        ));
+        for path in cache.selected_devices {
+            lines.push(format!("interactive_selected path={}", path.display()));
+        }
+    } else if provider.all_devices {
         ok = false;
         lines.push(
             "warning=devices_all selected-device permissions require explicit stable device paths"
@@ -701,6 +781,22 @@ fn render_input_path_status(status: &InputPathStatus) -> String {
                 shell_token(name)
             )
         }
+    }
+}
+
+fn render_cache_validation_status(status: &CacheValidationStatus) -> String {
+    match status {
+        CacheValidationStatus::Accepted => "accepted".to_string(),
+        CacheValidationStatus::Missing => "missing".to_string(),
+        CacheValidationStatus::Invalid(error) => format!("invalid error={}", shell_token(error)),
+        CacheValidationStatus::Stale(error) => format!("stale error={}", shell_token(error)),
+        CacheValidationStatus::PermissionIncomplete(error) => {
+            format!("permission_incomplete error={}", shell_token(error))
+        }
+        CacheValidationStatus::UnsafeRuntimeDir(error) => {
+            format!("unsafe_runtime_dir error={}", shell_token(error))
+        }
+        CacheValidationStatus::Cancelled => "cancelled".to_string(),
     }
 }
 
@@ -949,11 +1045,13 @@ where
     let motions = config.motions_for_scope(scope.clone());
     let presses = config.presses_for_scope(scope.clone());
     let required = CapabilitySet::for_configuration_scope(&config, &scope);
+    let input_provider =
+        resolve_real_input_provider(lua_file, config.input_provider.as_ref(), prompt)?;
     log.info("event=startup provider=kde-plasma-wayland");
     let mut session = RealAdapterCleanupSession::new(adapter);
     if let Err(error) = session
         .adapter()
-        .configure_input_provider(config.input_provider.as_ref(), config.leader.as_ref())
+        .configure_input_provider(input_provider.as_ref(), config.leader.as_ref())
     {
         session.cleanup_after_error(ErrorPhase::Registration)?;
         return Err(error);
@@ -1035,11 +1133,14 @@ where
         program.callbacks().count()
     ));
     let required = program.required_capabilities().clone();
+    let mut stdio_prompt = StdioPrompt;
+    let input_provider =
+        resolve_real_input_provider(lua_file, program.input_provider.as_ref(), &mut stdio_prompt)?;
     log.info("event=startup provider=kde-plasma-wayland");
     let mut session = RealAdapterCleanupSession::new(adapter);
     if let Err(error) = session
         .adapter()
-        .configure_input_provider(program.input_provider.as_ref(), program.leader.as_ref())
+        .configure_input_provider(input_provider.as_ref(), program.leader.as_ref())
     {
         session.cleanup_after_error(ErrorPhase::Registration)?;
         return Err(error);
@@ -1119,6 +1220,7 @@ pub fn start_live_real_runner(
 
 pub fn start_live_real_controller_runner_with_options(
     lua_file: &Path,
+    prompt: &mut impl ScopePrompt,
     adapter: &mut RealWaylandAdapter,
     log: RuntimeLog,
 ) -> Result<RuntimeStats, DiagnosableError> {
@@ -1135,12 +1237,14 @@ pub fn start_live_real_controller_runner_with_options(
         program.callbacks().count()
     ));
     let required = program.required_capabilities().clone();
+    let input_provider =
+        resolve_real_input_provider(lua_file, program.input_provider.as_ref(), prompt)?;
     let signal_fd = RuntimeSignalFd::shutdown()?;
     log.info("event=startup provider=kde-plasma-wayland");
     let mut session = RealAdapterCleanupSession::new(adapter);
     if let Err(error) = session
         .adapter()
-        .configure_input_provider(program.input_provider.as_ref(), program.leader.as_ref())
+        .configure_input_provider(input_provider.as_ref(), program.leader.as_ref())
     {
         session.cleanup_after_error(ErrorPhase::Registration)?;
         log_guard.log_summary(&log);
@@ -1304,12 +1408,14 @@ pub fn start_live_real_runner_with_options(
     let motions = config.motions_for_scope(scope.clone());
     let presses = config.presses_for_scope(scope.clone());
     let required = CapabilitySet::for_configuration_scope(&config, &scope);
+    let input_provider =
+        resolve_real_input_provider(lua_file, config.input_provider.as_ref(), prompt)?;
     let signal_fd = RuntimeSignalFd::shutdown()?;
     log.info("event=startup provider=kde-plasma-wayland");
     let mut session = RealAdapterCleanupSession::new(adapter);
     if let Err(error) = session
         .adapter()
-        .configure_input_provider(config.input_provider.as_ref(), config.leader.as_ref())
+        .configure_input_provider(input_provider.as_ref(), config.leader.as_ref())
     {
         session.cleanup_after_error(ErrorPhase::Registration)?;
         log_guard.log_summary(&log);
@@ -1399,6 +1505,22 @@ pub fn start_live_real_runner_with_options(
     log.info(format!("event=shutdown reason={shutdown_reason:?}"));
     log_guard.log_summary(&log);
     Ok(stats)
+}
+
+fn resolve_real_input_provider(
+    lua_file: &Path,
+    provider: Option<&InputProviderConfig>,
+    prompt: &mut impl ScopePrompt,
+) -> Result<Option<InputProviderConfig>, DiagnosableError> {
+    let Some(provider) = provider else {
+        return Ok(None);
+    };
+    if !provider.interactive_devices {
+        return Ok(Some(provider.clone()));
+    }
+    let probe = RealInputDeviceProbe;
+    let mut repair = SudoSetfaclRepair;
+    resolve_interactive_input_provider(lua_file, provider, prompt, &probe, &mut repair).map(Some)
 }
 
 fn warn_for_observe_mode_mouse_button_repeats<'a>(
@@ -2423,6 +2545,7 @@ fn poll_live_state_trackers(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn poll_live_overlays(
     program: &ControllerProgram,
     runtime: &LiveStateTrackerRuntime,
@@ -2799,6 +2922,7 @@ fn matching_controller_motion_registration<'a>(
     Ok(None)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn drain_live_controller_shortcut_callbacks(
     program: &ControllerProgram,
     adapter: &mut RealWaylandAdapter,
@@ -5106,6 +5230,107 @@ mod tests {
     }
 
     #[test]
+    fn input_doctor_reports_missing_interactive_cache() {
+        let _guard = env_lock().lock().unwrap();
+        let lua_file = write_doctor_lua(
+            r#"
+            return {
+              input_provider = {
+                backend = "evdev",
+                mode = "grab",
+                output = "uinput",
+                devices = "interactive",
+              },
+              leader = "F13",
+              motions = {
+                {
+                  trigger = { "<Leader>", "<LClick>" },
+                  macro = macro { mouse_click "left" },
+                },
+              },
+            }
+            "#,
+        );
+        let runtime = temp_doctor_dir("interactive-missing");
+        let previous = std::env::var_os("XDG_RUNTIME_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+        let mut probe = FakeInputProbe::default();
+        probe
+            .read_write
+            .insert(PathBuf::from("/dev/uinput"), InputPathStatus::Accessible);
+
+        let report = input_doctor_report_with_probe(&lua_file, &probe).unwrap();
+        let rendered = report.render();
+
+        assert!(!report.ok);
+        assert!(rendered.contains("interactive_cache path="));
+        assert!(rendered.contains("status=missing"));
+        restore_runtime_dir(previous);
+    }
+
+    #[test]
+    fn input_doctor_reports_valid_interactive_cache() {
+        let _guard = env_lock().lock().unwrap();
+        let lua_file = write_doctor_lua(
+            r#"
+            return {
+              input_provider = {
+                backend = "evdev",
+                mode = "grab",
+                output = "uinput",
+                devices = "interactive",
+              },
+              leader = "F13",
+              motions = {
+                {
+                  trigger = { "<Leader>", "<LClick>" },
+                  macro = macro { mouse_click "left" },
+                },
+              },
+            }
+            "#,
+        );
+        let runtime = temp_doctor_dir("interactive-valid");
+        let previous = std::env::var_os("XDG_RUNTIME_DIR");
+        std::env::set_var("XDG_RUNTIME_DIR", &runtime);
+        let device = PathBuf::from("/dev/input/event3");
+        let mut probe = FakeInputProbe::default();
+        probe.devices.push(device.clone());
+        probe
+            .read
+            .insert(device.clone(), InputPathStatus::Accessible);
+        probe
+            .read_write
+            .insert(PathBuf::from("/dev/uinput"), InputPathStatus::Accessible);
+        probe
+            .identities
+            .insert(device.clone(), fake_identity("event3", "keyboard"));
+        let provider = InputProviderConfig::evdev_interactive(
+            InputProviderMode::Grab,
+            InputProviderOutput::Uinput,
+        )
+        .unwrap();
+        let mut prompt = DoctorDevicePrompt::new(vec![device.clone()]);
+        let mut repair = DoctorRepair;
+        crate::input_cache::resolve_interactive_input_provider(
+            &lua_file,
+            &provider,
+            &mut prompt,
+            &probe,
+            &mut repair,
+        )
+        .unwrap();
+
+        let report = input_doctor_report_with_probe(&lua_file, &probe).unwrap();
+        let rendered = report.render();
+
+        assert!(report.ok);
+        assert!(rendered.contains("status=accepted"));
+        assert!(rendered.contains("interactive_selected path=/dev/input/event3"));
+        restore_runtime_dir(previous);
+    }
+
+    #[test]
     fn does_not_warn_for_grab_mode_mouse_button_repeat() {
         let provider = InputProviderConfig::evdev(
             vec![PathBuf::from("/dev/input/event0")],
@@ -5570,14 +5795,20 @@ mod tests {
 
     #[derive(Default)]
     struct FakeInputProbe {
+        devices: std::vec::Vec<PathBuf>,
         read: std::collections::BTreeMap<PathBuf, InputPathStatus>,
         read_write: std::collections::BTreeMap<PathBuf, InputPathStatus>,
         targets: std::collections::BTreeMap<PathBuf, PathBuf>,
         stable_paths: std::collections::BTreeMap<PathBuf, PathBuf>,
         device_names: std::collections::BTreeMap<PathBuf, String>,
+        identities: std::collections::BTreeMap<PathBuf, EvdevDeviceIdentity>,
     }
 
     impl InputPermissionProbe for FakeInputProbe {
+        fn event_devices(&self) -> Result<Vec<PathBuf>, DiagnosableError> {
+            Ok(self.devices.clone())
+        }
+
         fn current_user(&self) -> String {
             "alice".to_string()
         }
@@ -5609,6 +5840,50 @@ mod tests {
         fn device_name(&self, path: &Path) -> Option<String> {
             self.device_names.get(path).cloned()
         }
+
+        fn device_identity(&self, path: &Path) -> Option<EvdevDeviceIdentity> {
+            self.identities.get(path).cloned()
+        }
+    }
+
+    struct DoctorDevicePrompt {
+        selected: Vec<PathBuf>,
+    }
+
+    impl DoctorDevicePrompt {
+        fn new(selected: Vec<PathBuf>) -> Self {
+            Self { selected }
+        }
+    }
+
+    impl ScopePrompt for DoctorDevicePrompt {
+        fn resolve_missing_scope(
+            &mut self,
+        ) -> Result<signal_auras_core::ConsentDecision, DiagnosableError> {
+            Ok(signal_auras_core::ConsentDecision::Cancel)
+        }
+
+        fn select_input_devices(
+            &mut self,
+            _reason: &str,
+            _candidates: &[crate::prompt::DevicePromptCandidate],
+        ) -> Result<crate::prompt::DeviceSelectionDecision, DiagnosableError> {
+            Ok(crate::prompt::DeviceSelectionDecision::Selected(
+                self.selected.clone(),
+            ))
+        }
+    }
+
+    struct DoctorRepair;
+
+    impl crate::input_cache::PermissionRepair for DoctorRepair {
+        fn repair(
+            &mut self,
+            _evdev_paths: &[PathBuf],
+            _uinput: bool,
+        ) -> Result<(), DiagnosableError> {
+            Ok(())
+        }
     }
 
     fn write_doctor_lua(source: &str) -> PathBuf {
@@ -5619,5 +5894,45 @@ mod tests {
         let path = std::env::temp_dir().join(format!("signal-auras-doctor-{}.lua", unique));
         std::fs::write(&path, source).unwrap();
         path
+    }
+
+    fn fake_identity(event: &str, name: &str) -> EvdevDeviceIdentity {
+        EvdevDeviceIdentity {
+            event_name: event.to_string(),
+            name: Some(name.to_string()),
+            phys: Some("usb/input0".to_string()),
+            uniq: None,
+            bustype: Some("0003".to_string()),
+            vendor: Some("0001".to_string()),
+            product: Some("0002".to_string()),
+            version: Some("0001".to_string()),
+        }
+    }
+
+    fn temp_doctor_dir(label: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "signal-auras-doctor-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn restore_runtime_dir(previous: Option<std::ffi::OsString>) {
+        if let Some(previous) = previous {
+            std::env::set_var("XDG_RUNTIME_DIR", previous);
+        } else {
+            std::env::remove_var("XDG_RUNTIME_DIR");
+        }
+    }
+
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 }
